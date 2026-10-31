@@ -1,0 +1,536 @@
+import { spawn, execFile, type ChildProcess } from 'node:child_process';
+import { Readable, Writable } from 'node:stream';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import * as acp from '@agentclientprotocol/sdk';
+import { z } from 'zod';
+import type { Bot, Conversation, Message, PendingPermission, ToolActivity } from '../shared/types.js';
+import { atomicPrivateFile, HttpError, privateDirectory, WorkspaceFiles } from './files.js';
+import { Store, type PrivateSettings } from './store.js';
+
+export interface RuntimeOptions {
+  command?: string;
+  args?: string[];
+  cancelDeadlineMs?: number;
+  startupTimeoutMs?: number;
+  promptIdleTimeoutMs?: number;
+}
+type Approval = {
+  permission: PendingPermission;
+  resolve: (optionId: string | undefined) => void;
+};
+type Run = {
+  conversation: Conversation;
+  message: Message;
+  settings: PrivateSettings;
+  bot: Bot;
+  token: string;
+  fingerprint: string;
+  stopped: boolean;
+  finishing: boolean;
+  cleanup?: Promise<void>;
+  acceptingUpdates: boolean;
+  child?: ChildProcess;
+  connection?: acp.ClientConnection;
+  approvals: Approval[];
+  textSuffix: string;
+  toolIds: Map<string, string>;
+  idleTimer?: NodeJS.Timeout;
+  rejectIdle?: (error: Error) => void;
+  done: Promise<void>;
+  brokerTail: Promise<unknown>;
+};
+const MAX_REVIEWABLE_EDIT_BYTES = 160 * 1024;
+const toolArguments = z.discriminatedUnion('name', [
+  z.object({ name: z.literal('list_files'), arguments: z.object({ path: z.string().default('') }).strict() }),
+  z.object({ name: z.literal('read_file'), arguments: z.object({ path: z.string() }).strict() }),
+  z.object({ name: z.literal('write_file'), arguments: z.object({ path: z.string(), content: z.string().max(1024 * 1024), hash: z.string().optional() }).strict() }),
+]);
+const brokerTools = [
+  { name: 'list_files', description: 'List a directory inside the user-selected workspace. Paths are workspace-relative. Symbolic links are forbidden.', inputSchema: { type: 'object', properties: { path: { type: 'string' } }, additionalProperties: false } },
+  { name: 'read_file', description: 'Read a UTF-8 text file inside the user-selected workspace and obtain its content hash.', inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false } },
+  { name: 'write_file', description: 'Propose complete UTF-8 text contents for one workspace file. Every call waits for explicit browser approval. Supply the hash returned by read_file to prevent overwriting changes. Use an empty hash for a new file. Parent directories must exist.', inputSchema: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' }, hash: { type: 'string' } }, required: ['path', 'content'], additionalProperties: false } },
+];
+const safeBuiltinTools = 'search_tool,use_tool';
+const deniedBuiltinTools = 'run_terminal_cmd,task,workflow,read_file,list_dir,grep,write,search_replace,hashline_read,hashline_edit,hashline_grep,delete_file,Agent';
+
+export class GrokRuntime {
+  private runs = new Map<string, Run>();
+  private origin = '';
+  private closing = false;
+  constructor(private readonly store: Store, private readonly options: RuntimeOptions = {}) {}
+
+  setOrigin(origin: string): void { this.origin = origin; }
+
+  async initialize(): Promise<void> {
+    const home = await privateDirectory(path.join(this.store.dataDir, 'runtime-probe'));
+    const info = await new Promise<{ available: boolean; version?: string; error?: string }>(resolve => {
+      execFile(this.options.command ?? 'grok', ['--version'], { env: this.environment(home, ''), cwd: home, timeout: 4000, maxBuffer: 4096 }, (error, stdout) => {
+        const version = stdout.match(/grok\s+(\d+\.\d+\.\d+)/)?.[1];
+        resolve(error || !version
+          ? { available: false, error: 'Grok Build is unavailable. Install grok and make it available on PATH.' }
+          : version !== '1.0.62'
+            ? { available: false, version, error: 'This backend requires Grok Build 1.0.62. Tool confinement must be verified before enabling another version.' }
+            : { available: true, version });
+      });
+    });
+    this.store.runtime = info;
+    await this.store.changed();
+  }
+
+  private environment(home: string, key: string): NodeJS.ProcessEnv {
+    return {
+      PATH: process.env.PATH, LANG: 'C.UTF-8', HOME: home, GROK_HOME: path.join(home, '.grok'),
+      XDG_CONFIG_HOME: path.join(home, '.config'), XDG_DATA_HOME: path.join(home, '.local/share'),
+      XDG_CACHE_HOME: path.join(home, '.cache'), TMPDIR: path.join(home, 'tmp'),
+      GROK_BOT_PROVIDER_KEY: key || 'grok-bot-loopback-no-auth', GROK_DISABLE_AUTOUPDATER: '1', GROK_REMOTE_FETCH: '0', GROK_CAMPAIGNS: '0',
+      GROK_TURN_TRANSIENT_RETRY: '0', GROK_MAX_RETRIES: '0',
+      GROK_TELEMETRY_ENABLED: '0', GROK_TELEMETRY_TRACE_UPLOAD: '0', GROK_EXTERNAL_OTEL: '0',
+      GROK_SUBAGENTS: '0', GROK_WORKFLOWS: '0', GROK_DEFAULT_SELECTED_PERMISSION: 'reject',
+      GROK_CURSOR_MCPS_ENABLED: '0', GROK_CLAUDE_MCPS_ENABLED: '0', GROK_CURSOR_HOOKS_ENABLED: '0', GROK_CLAUDE_HOOKS_ENABLED: '0',
+    };
+  }
+
+  private async configure(run: Run): Promise<{ home: string; cwd: string }> {
+    const home = await privateDirectory(path.join(this.store.dataDir, 'grok', run.conversation.id, run.fingerprint));
+    const grokHome = await privateDirectory(path.join(home, '.grok'));
+    const cwd = await privateDirectory(path.join(home, 'workspace'));
+    await privateDirectory(path.join(home, 'tmp'));
+    await privateDirectory(path.join(cwd, '.git', 'objects'));
+    await privateDirectory(path.join(cwd, '.git', 'refs', 'heads'));
+    await atomicPrivateFile(path.join(cwd, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    await atomicPrivateFile(path.join(cwd, '.git', 'config'), '[core]\nrepositoryformatversion = 0\nbare = false\n');
+    const quoted = (value: string) => JSON.stringify(value);
+    await atomicPrivateFile(path.join(grokHome, 'config.toml'), `
+[models]
+default = "local"
+session_summary = "local"
+allowed_models = ["local"]
+[model.local]
+model = ${quoted(run.settings.model)}
+base_url = ${quoted(run.settings.baseUrl)}
+api_backend = "chat_completions"
+env_key = "GROK_BOT_PROVIDER_KEY"
+max_retries = 0
+inference_idle_timeout_secs = 120
+[cli]
+use_leader = false
+auto_update = false
+session_registry = false
+[ui]
+permission_mode = "ask"
+remember_tool_approvals = false
+[permission]
+allow = ["MCPTool(workspace__*)"]
+deny = ["Bash", "Read(/**)", "Read(~*)", "Read(~*/**)", "Edit", "Grep", "WebSearch", "WebFetch"]
+[features]
+turn_transient_retry = false
+remote_fetch = false
+managed_config = false
+campaigns = false
+telemetry = false
+backend_tools = false
+web_fetch = false
+ask_user_question = false
+write_file = false
+image_gen = false
+video_gen = false
+lsp_tools = false
+file_acceleration = false
+codebase_indexing = false
+mcp_recursive_config_watch = false
+remember_mode = false
+subagent_bundle = false
+session_recap = false
+title_refresh = false
+turn_summary = false
+[telemetry]
+trace_upload = false
+otel_enabled = false
+[managed_mcps]
+enabled = false
+gateway_tools_enabled = false
+[subagents]
+enabled = false
+[workflows]
+enabled = false
+[relay]
+enabled = false
+[session]
+load_envrc = false
+[toolset.bash]
+login_shell_capture = false
+[shell_environment_policy]
+inherit = "none"
+ignore_default_excludes = false
+[compat.claude]
+agents = false
+hooks = false
+mcps = false
+rules = false
+skills = false
+[compat.cursor]
+agents = false
+hooks = false
+mcps = false
+rules = false
+skills = false
+[compat.codex]
+hooks = false
+skills = false
+`);
+    return { home, cwd };
+  }
+
+  async start(conversationId: string, prompt: string): Promise<void> {
+    this.store.assertIdle();
+    if (this.closing) throw new HttpError(503, 'The server is shutting down.');
+    if (!this.store.runtime.available) throw new HttpError(503, this.store.runtime.error ?? 'Grok Build is unavailable.');
+    if (!this.origin) throw new HttpError(503, 'Runtime is not connected to the local server.');
+    const settings = { ...this.store.settings };
+    if (!settings.workspace || !settings.baseUrl || !settings.model) throw new HttpError(400, 'Configure a provider, model, and workspace in settings first.');
+    const conversation = this.store.conversation(conversationId);
+    const bot = { ...this.store.bot(conversation.botId) };
+    const now = new Date().toISOString();
+    const message: Message = { id: randomUUID(), role: 'assistant', text: '', createdAt: now, tools: [] };
+    conversation.messages.push({ id: randomUUID(), role: 'user', text: prompt, createdAt: now, tools: [] }, message);
+    if (conversation.messages.length === 2) conversation.title = prompt.replace(/\s+/g, ' ').slice(0, 70);
+    conversation.updatedAt = now;
+    conversation.run = { id: randomUUID(), status: 'starting', startedAt: now };
+    const fingerprint = createHash('sha256').update(JSON.stringify([settings, bot.instructions, 'broker-v2'])).digest('hex');
+    const run: Run = {
+      conversation, message, settings, bot, fingerprint, token: randomBytes(32).toString('hex'),
+      stopped: false, finishing: false, acceptingUpdates: false, approvals: [], textSuffix: '', toolIds: new Map(), done: Promise.resolve(), brokerTail: Promise.resolve(),
+    };
+    this.runs.set(conversationId, run);
+    try { await this.store.changed(); }
+    catch (error) { this.runs.delete(conversationId); conversation.run.status = 'error'; throw error; }
+    run.done = this.execute(run, prompt).catch(() => {
+      run.conversation.run.status = 'error';
+      run.conversation.run.error = 'Application state could not be saved. Check the data directory before continuing.';
+    });
+  }
+
+  private async persist(run: Run): Promise<void> {
+    run.conversation.updatedAt = new Date().toISOString();
+    await this.store.changed();
+  }
+
+  private redact(run: Run, value: string, maxLength = 200000): string {
+    const key = run.settings.apiKey;
+    return (key ? value.split(key).join('[redacted]') : value).slice(0, maxLength);
+  }
+
+  private resetIdle(run: Run): void {
+    clearTimeout(run.idleTimer);
+    if (!run.rejectIdle || run.stopped || run.finishing || run.approvals.length) return;
+    run.idleTimer = setTimeout(() => {
+      run.rejectIdle?.(new Error('Grok Build exceeded the inference inactivity deadline without session updates. Check the provider and try again.'));
+    }, this.options.promptIdleTimeoutMs ?? 30000);
+  }
+
+  private appendText(run: Run, chunk: string): void {
+    const key = run.settings.apiKey;
+    const pending = run.textSuffix + chunk;
+    const value = key ? pending.split(key).join('[redacted]') : pending;
+    let held = 0;
+    if (key) {
+      for (let length = Math.min(key.length - 1, value.length); length > 0; length--) {
+        if (value.endsWith(key.slice(0, length))) { held = length; break; }
+      }
+    }
+    run.textSuffix = held ? value.slice(-held) : '';
+    run.message.text = (run.message.text + (held ? value.slice(0, -held) : value)).slice(0, 200000);
+  }
+
+  private project(run: Run, notification: acp.SessionNotification): void {
+    if (!run.acceptingUpdates || run.stopped || run.finishing || notification.sessionId !== run.conversation.sessionId) return;
+    this.resetIdle(run);
+    const update = notification.update;
+    if (update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text') {
+      this.appendText(run, update.content.text);
+    } else if (update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') {
+      let publicId = run.toolIds.get(update.toolCallId);
+      if (!publicId) { publicId = randomUUID(); run.toolIds.set(update.toolCallId, publicId); }
+      let tool = run.message.tools.find(t => t.id === publicId);
+      if (!tool) {
+        tool = { id: publicId, title: 'Tool call', kind: 'other', status: 'pending' };
+        run.message.tools.push(tool);
+      }
+      if (update.title) tool.title = this.redact(run, update.title);
+      if (update.kind) tool.kind = update.kind;
+      if (update.status) tool.status = update.status;
+      if (update.rawInput !== undefined) tool.input = this.redact(run, JSON.stringify(update.rawInput));
+      if (update.rawOutput !== undefined) tool.output = this.redact(run, JSON.stringify(update.rawOutput));
+      if (update.locations) tool.paths = update.locations.map(location => this.redact(run, location.path));
+      const content = update.content?.flatMap(item => item.type === 'content' && item.content.type === 'text' ? [item.content.text] : []);
+      if (content?.length) tool.output = this.redact(run, content.join('\n'));
+    } else return;
+    void this.persist(run).catch(() => { void this.cancel(run.conversation.id).catch(() => { run.stopped = true; }); });
+  }
+
+  private async requestPermission(run: Run, request: acp.RequestPermissionRequest): Promise<acp.RequestPermissionResponse> {
+    if (run.stopped || run.finishing || request.sessionId !== run.conversation.sessionId) return { outcome: { outcome: 'cancelled' } };
+    const name = request.toolCall.name ?? request.toolCall.title ?? '';
+    if (!/workspace__|search_tool|use_tool|CallMcpTool|GetMcpTools/i.test(name) || /execute|delete|move/.test(request.toolCall.kind ?? '')) {
+      return { outcome: { outcome: 'cancelled' } };
+    }
+    const options = request.options.filter(option => option.kind === 'allow_once' || option.kind === 'reject_once');
+    if (!options.length) return { outcome: { outcome: 'cancelled' } };
+    const optionId = await this.approve(run, {
+      id: randomUUID(), title: this.redact(run, request.toolCall.title ?? 'Allow workspace tool'), kind: request.toolCall.kind ?? 'other',
+      description: this.redact(run, JSON.stringify(request.toolCall.rawInput ?? {})), paths: [],
+      options: options.map(option => ({ id: option.optionId, kind: option.kind, label: this.redact(run, option.name) })),
+    });
+    return { outcome: optionId ? { outcome: 'selected', optionId } : { outcome: 'cancelled' } };
+  }
+
+  private async execute(run: Run, prompt: string): Promise<void> {
+    let error: string | undefined;
+    let startupTimer: NodeJS.Timeout | undefined;
+    try {
+      const { home, cwd } = await this.configure(run);
+      if (run.stopped) return;
+      const args = this.options.args ?? [
+        '--tools', safeBuiltinTools, '--disallowed-tools', deniedBuiltinTools,
+        '--no-subagents', '--disable-web-search', '--permission-mode', 'default',
+        'agent', '--no-leader', '--model', 'local', 'stdio',
+      ];
+      const supervisor = fileURLToPath(new URL('./child-supervisor.ts', import.meta.url));
+      const child = spawn(process.execPath, ['--experimental-strip-types', supervisor, JSON.stringify({ command: this.options.command ?? 'grok', args, cancelDeadlineMs: this.options.cancelDeadlineMs ?? 800 })], {
+        cwd, env: this.environment(home, run.settings.apiKey), stdio: ['pipe', 'pipe', 'pipe', 'ipc'], detached: true,
+      });
+      run.child = child;
+      child.stderr!.resume();
+      const exit = new Promise<never>((_, reject) => {
+        child.once('error', () => reject(new Error('Could not start Grok Build. Check its installation and executable permissions.')));
+        child.once('exit', (code, signal) => reject(new Error(`Grok Build exited before completing the run${signal ? ` (${signal})` : ` (code ${code})`}.`)));
+      });
+      const client = acp.client({ name: 'grok-bot-q' })
+        .onNotification(acp.methods.client.session.update, ({ params }) => this.project(run, params))
+        .onRequest(acp.methods.client.session.requestPermission, ({ params }) => this.requestPermission(run, params));
+      const connection = client.connect(acp.ndJsonStream(
+        Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>, Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>,
+        { maxMessageBytes: 2 * 1024 * 1024 },
+      ));
+      run.connection = connection;
+      const agent = connection.agent;
+      const startupDeadline = new Promise<never>((_, reject) => {
+        startupTimer = setTimeout(() => reject(new Error('Grok Build did not initialize within the startup deadline. Check its installation and provider settings.')), this.options.startupTimeoutMs ?? 30000);
+      });
+      const requestOptions = { cancellationSignal: AbortSignal.timeout(this.options.startupTimeoutMs ?? 30000) };
+      const initialized = await Promise.race([agent.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+        clientInfo: { name: 'grok-bot-q', version: '0.1.0' },
+      }, requestOptions), exit, startupDeadline]);
+      const request: acp.NewSessionRequest = {
+        cwd, mcpServers: [{ name: 'workspace', type: 'http', url: `${this.origin}/internal/mcp/${run.conversation.run.id}`, headers: [{ name: 'Authorization', value: `Bearer ${run.token}` }] }],
+        _meta: {
+          yoloMode: false, autoMode: false, rules: this.rules(run),
+          agentProfile: {
+            name: 'grok-bot-scoped', description: 'Workspace broker only', promptMode: 'extend',
+            injectDefaultTools: false, tools: ['search_tool', 'use_tool'], disallowedTools: ['run_terminal_cmd', 'task', 'workflow'],
+            discoverSkills: false, inheritSkills: false, permissionMode: 'default',
+          },
+        },
+      };
+      if (run.conversation.sessionId && run.conversation.sessionFingerprint === run.fingerprint) {
+        if (!initialized.agentCapabilities?.loadSession) throw new Error('This Grok Build version cannot continue saved sessions. Start a new conversation.');
+        await Promise.race([agent.request(acp.methods.agent.session.load, { ...request, sessionId: run.conversation.sessionId }, requestOptions), exit, startupDeadline]);
+      } else {
+        const created = await Promise.race([agent.request(acp.methods.agent.session.new, request, requestOptions), exit, startupDeadline]);
+        run.conversation.sessionId = created.sessionId;
+        run.conversation.sessionFingerprint = run.fingerprint;
+      }
+      clearTimeout(startupTimer);
+      if (run.stopped) return;
+      run.acceptingUpdates = true;
+      run.conversation.run.status = 'running';
+      await this.persist(run);
+      const idleDeadline = new Promise<never>((_, reject) => { run.rejectIdle = reject; });
+      this.resetIdle(run);
+      const result = await Promise.race([agent.request(acp.methods.agent.session.prompt, {
+        sessionId: run.conversation.sessionId!, prompt: [{ type: 'text', text: prompt }],
+      }), exit, idleDeadline]);
+      if (result.stopReason === 'cancelled') run.stopped = true;
+      else if (result.stopReason !== 'end_turn') throw new Error(`Grok stopped with ${result.stopReason}. Send another message to continue.`);
+    } catch (failure) {
+      error = this.redact(run, failure instanceof Error ? failure.message : 'Grok Build could not complete the run.');
+    } finally {
+      clearTimeout(startupTimer);
+      clearTimeout(run.idleTimer);
+      delete run.rejectIdle;
+      run.finishing = true;
+      run.acceptingUpdates = false;
+      if (run.textSuffix) { run.message.text = (run.message.text + '[redacted]').slice(0, 200000); run.textSuffix = ''; }
+      for (const approval of run.approvals.splice(0)) approval.resolve(undefined);
+      delete run.conversation.run.permission;
+      await this.stopProcess(run);
+      await run.brokerTail;
+      run.conversation.run.status = run.stopped ? 'cancelled' : error ? 'error' : 'completed';
+      run.conversation.run.finishedAt = new Date().toISOString();
+      if (error && !run.stopped) run.conversation.run.error = error;
+      for (const tool of run.message.tools) if (tool.status === 'in_progress' || tool.status === 'pending') tool.status = 'failed';
+      this.runs.delete(run.conversation.id);
+      await this.persist(run);
+    }
+  }
+
+  private rules(run: Run): string {
+    return [
+      'You are the assistant in a local Grok Bot web client. Use only the workspace MCP server for file access.',
+      `The user-selected workspace is ${run.settings.workspace}. All broker paths are relative to that workspace, not the agent current directory.`,
+      'Discover workspace__list_files, workspace__read_file, and workspace__write_file with search_tool, then call them with use_tool.',
+      'Every file modification requires a separate browser approval. Do not claim a write succeeded until the broker confirms it.',
+      'Shell commands, subagents, workflows, external integrations, and native file tools are intentionally unavailable.',
+      run.bot.instructions,
+    ].filter(Boolean).join('\n');
+  }
+
+  private async approve(run: Run, permission: PendingPermission): Promise<string | undefined> {
+    if (run.stopped || run.finishing) return undefined;
+    const result = new Promise<string | undefined>(resolve => { run.approvals.push({ permission, resolve }); });
+    this.showApproval(run);
+    await this.persist(run);
+    return result;
+  }
+
+  private showApproval(run: Run): void {
+    if (run.stopped || run.finishing) return;
+    this.resetIdle(run);
+    run.conversation.run.status = run.approvals.length ? 'awaiting_permission' : 'running';
+    if (run.approvals.length) run.conversation.run.permission = run.approvals[0].permission;
+    else delete run.conversation.run.permission;
+  }
+
+  async resolve(conversationId: string, permissionId: string, optionId: string): Promise<void> {
+    this.store.assertWritable();
+    const run = this.runs.get(conversationId);
+    const approval = run?.approvals[0];
+    if (!run || run.stopped || run.finishing || !approval || approval.permission.id !== permissionId) throw new HttpError(409, 'This approval is no longer pending.');
+    if (!approval.permission.options.some(option => option.id === optionId)) throw new HttpError(400, 'Choose one of the displayed approval options.');
+    run.approvals.shift();
+    this.showApproval(run);
+    try { await this.persist(run); }
+    catch (error) { approval.resolve(undefined); throw error; }
+    approval.resolve(optionId);
+  }
+
+  async cancel(conversationId: string): Promise<void> {
+    const run = this.runs.get(conversationId);
+    if (!run) {
+      this.store.conversation(conversationId);
+      return;
+    }
+    run.stopped = true;
+    run.acceptingUpdates = false;
+    clearTimeout(run.idleTimer);
+    for (const approval of run.approvals.splice(0)) approval.resolve(undefined);
+    delete run.conversation.run.permission;
+    if (run.connection && run.conversation.sessionId) {
+      void run.connection.agent.notify(acp.methods.agent.session.cancel, { sessionId: run.conversation.sessionId }).catch(() => {});
+    }
+    await this.stopProcess(run);
+    await run.done;
+  }
+
+  private signal(run: Run, signal: 'SIGTERM' | 'SIGKILL'): void {
+    if (!run.child?.connected) return;
+    run.child.send({ type: 'signal', signal }, () => {});
+  }
+
+  private stopProcess(run: Run): Promise<void> {
+    if (!run.child) return Promise.resolve();
+    run.cleanup ??= this.terminate(run);
+    return run.cleanup;
+  }
+
+  private async terminate(run: Run): Promise<void> {
+    const child = run.child!;
+    run.connection?.close();
+    if (!child.pid) return;
+    this.signal(run, 'SIGTERM');
+    if (child.exitCode === null && child.signalCode === null) {
+      await new Promise<void>(resolve => {
+        const finish = () => { clearTimeout(timer); child.off('exit', finish); resolve(); };
+        const timer = setTimeout(finish, this.options.cancelDeadlineMs ?? 800);
+        child.once('exit', finish);
+      });
+    }
+    this.signal(run, 'SIGKILL');
+    if (child.exitCode === null && child.signalCode === null) await new Promise<void>(resolve => child.once('exit', () => resolve()));
+  }
+
+  async shutdown(): Promise<void> {
+    this.closing = true;
+    await Promise.all([...this.runs.keys()].map(id => this.cancel(id)));
+    await this.store.flush();
+  }
+
+  async mcp(runId: string, authorization: string | undefined, body: unknown): Promise<unknown> {
+    const run = [...this.runs.values()].find(item => item.conversation.run.id === runId);
+    if (!run || run.stopped || run.finishing || authorization !== `Bearer ${run.token}`) throw new HttpError(403, 'Invalid workspace broker session.');
+    const request = z.object({ jsonrpc: z.literal('2.0'), id: z.union([z.string(), z.number()]).optional(), method: z.string(), params: z.unknown().optional() }).parse(body);
+    if (request.id === undefined) return undefined;
+    let result: unknown;
+    if (request.method === 'initialize') {
+      const params = z.object({ protocolVersion: z.string() }).passthrough().parse(request.params);
+      result = { protocolVersion: params.protocolVersion, capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'grok-bot-workspace', version: '1.0.0' } };
+    } else if (request.method === 'ping') result = {};
+    else if (request.method === 'tools/list') result = { tools: brokerTools };
+    else if (request.method === 'tools/call') {
+      const operation = async () => {
+        try { return { content: [{ type: 'text', text: JSON.stringify(await this.brokerCall(run, request.params)) }] }; }
+        catch (error) { return { isError: true, content: [{ type: 'text', text: this.redact(run, error instanceof HttpError ? error.message : error instanceof z.ZodError ? 'Invalid workspace tool arguments.' : 'Workspace operation failed.') }] }; }
+      };
+      const call = run.brokerTail.then(operation);
+      run.brokerTail = call.catch(() => {});
+      result = await call;
+    } else return { jsonrpc: '2.0', id: request.id, error: { code: -32601, message: 'Method not found' } };
+    return { jsonrpc: '2.0', id: request.id, result };
+  }
+
+  private async brokerCall(run: Run, params: unknown): Promise<unknown> {
+    if (run.stopped || run.finishing) throw new HttpError(409, 'Run was cancelled or finished.');
+    const call = toolArguments.parse(params);
+    const files = new WorkspaceFiles(run.settings.workspace);
+    if (call.name === 'list_files') return files.list(call.arguments.path);
+    if (call.name === 'read_file') return files.read(call.arguments.path);
+    const { path: filename, content } = call.arguments;
+    if (Buffer.byteLength(content, 'utf8') > MAX_REVIEWABLE_EDIT_BYTES) throw new HttpError(413, 'Write proposals must be at most 160 KiB of UTF-8 text so the complete edit can be reviewed.');
+    const expectedHash = await files.expected(filename);
+    if (run.stopped || run.finishing) throw new HttpError(409, 'Run was cancelled or finished.');
+    if (call.arguments.hash !== undefined && call.arguments.hash !== expectedHash) throw new HttpError(409, 'File changed on disk. Read it again before proposing an edit.');
+    const publicPath = this.redact(run, filename);
+    const tool: ToolActivity = {
+      id: randomUUID(), title: this.redact(run, `Write ${filename}`), kind: 'edit', status: 'pending', paths: [publicPath], input: this.redact(run, content, Infinity),
+    };
+    run.message.tools.push(tool);
+    const allowId = randomUUID();
+    const rejectId = randomUUID();
+    const decision = await this.approve(run, {
+      id: randomUUID(), title: this.redact(run, `Write ${filename}`), kind: 'edit', paths: [publicPath],
+      description: this.redact(run, `${expectedHash ? 'Replace' : 'Create'} ${filename}\n\n${content}`, Infinity),
+      options: [{ id: allowId, label: 'Allow once', kind: 'allow_once' }, { id: rejectId, label: 'Deny', kind: 'reject_once' }],
+    });
+    if (run.stopped || run.finishing || decision !== allowId) {
+      tool.status = 'failed'; tool.output = 'The user denied this write or cancelled the run.';
+      await this.persist(run);
+      throw new HttpError(403, tool.output);
+    }
+    tool.status = 'in_progress';
+    await this.persist(run);
+    if (run.stopped || run.finishing) throw new HttpError(409, 'Run was cancelled or finished.');
+    try {
+      const document = await files.save(filename, content, expectedHash);
+      tool.status = 'completed'; tool.output = this.redact(run, `Saved ${filename}.`);
+      await this.persist(run);
+      return { path: document.path, hash: document.hash, saved: true };
+    } catch (error) {
+      tool.status = 'failed'; tool.output = this.redact(run, error instanceof HttpError ? error.message : 'Workspace write failed.');
+      await this.persist(run);
+      throw error;
+    }
+  }
+}
