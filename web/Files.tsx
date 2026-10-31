@@ -28,6 +28,7 @@ export function Files({
   onClose: () => void;
   onSettings: () => void;
 }) {
+  const requestSequence = useRef(0);
   const filesRef = useRef(files);
   filesRef.current = files;
   const workspaceRef = useRef(workspace);
@@ -99,7 +100,7 @@ export function Files({
     }
   };
   const reloadFile = async (path: string) => {
-    const id = crypto.randomUUID();
+    const id = String(++requestSequence.current);
     const root = workspace;
     dispatch({ type: 'open-file', path, requestId: id });
     try {

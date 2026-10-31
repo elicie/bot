@@ -28,6 +28,10 @@ A full-height desktop workspace. A 280 px left sidebar contains a compact title/
 
 All visible controls perform their named action. Empty, loading, disconnected, running, awaiting-approval, cancelled, and error states use real application state. The composer supports Enter to send and Shift+Enter for a new line. A running task exposes a stop control. File writes show a pending or explicit-save action and report success only after the backend confirms the write. Dialogs manage focus and Escape. Focus indicators, labels, reduced-motion preferences, and keyboard navigation apply throughout.
 
+## Routines
+
+The sidebar's 루틴 action opens a list and detail surface in the existing main stage. Creation and editing use an inline form with explicit schedule fields and timezone. Details show the selected bot, prompt, next server-calculated execution time, pause/resume, manual run, and retained history. History opens the linked conversation; queued conversations expose cancellation. Drafts survive live snapshots, and navigation confirms before discarding a changed routine form. Mobile stacks the form and details within the existing drawer navigation.
+
 ## Verification
 
 Compare desktop screenshots with the available baseline and exercise all workflows in Chromium. Check a representative mobile viewport. A single reference screenshot supports layout and token comparison; it does not establish full-application pixel parity.

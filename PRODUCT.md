@@ -8,7 +8,7 @@ web
 
 ## Product purpose
 
-A local-first web client for Grok Build. The user configures an OpenAI-compatible model endpoint, creates named bots, chats with them, and edits files on the computer running the local server.
+A local-first web client for Grok Build. The user configures an OpenAI-compatible model endpoint, creates named bots, chats with them, schedules local routines, and edits files on the computer running the local server.
 
 ## Users and operating context
 
@@ -20,8 +20,10 @@ The confirmed initial user runs this repository on their local computer and open
 - Configure an OpenAI-compatible base URL, model ID, and optional API key.
 - Select a local workspace and browse, read, and explicitly save text files there.
 - Display agent responses, tool activity, permission requests, cancellation, and failures.
-- Persist bots, conversations, settings, and session identifiers locally.
-- Bind the application to loopback and protect local APIs against cross-origin access.
+- Persist bots, conversations, routines, execution history, settings, and session identifiers locally.
+- Create, edit, pause, and manually run routines with one-time, interval, and daily timezone schedules.
+- Keep model-only chat usable before connecting a workspace.
+- Bind to loopback by default, support explicit trusted-network binding, and validate Host and Origin.
 - Use no Docker commands or automatic container provisioning.
 - Store provider credentials on the backend. Never return stored API keys to the browser.
 
@@ -33,7 +35,7 @@ The user explicitly requests the same UI as Grok Bot. Follow the observed deskto
 
 - Local Grok Bot 0.18 reconstructed source and the Router settings screenshot.
 - Official Grok Build ACP and custom-model documentation.
-- A currently empty application repository.
+- The implemented local application and repeatable backend and Chromium tests.
 
 ## Product principles
 

@@ -3,8 +3,9 @@ import { open } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { z } from 'zod';
-import type { AppState, Bot, Conversation, PublicSettings, RuntimeInfo, SettingsInput } from '../shared/types.js';
+import type { AppState, Bot, Conversation, PublicSettings, Routine, RoutineInput, RoutineRun, RuntimeInfo, SettingsInput } from '../shared/types.js';
 import { atomicPrivateFile, canonicalDirectory, HttpError, isMissing, privateDirectory } from './files.js';
+import { latestRoutineTime, nextRoutineTime, routineInputSchema, routineRunSchema, routineSchema } from './routines.js';
 
 const toolSchema = z.object({
   id: z.string(), title: z.string(), kind: z.string(), status: z.enum(['pending', 'in_progress', 'completed', 'failed']),
@@ -27,10 +28,17 @@ const conversationSchema = z.object({
   }).strict(),
 }).strict();
 const settingsSchema = z.object({ baseUrl: z.string(), model: z.string(), workspace: z.string(), apiKey: z.string() }).strict();
+const MAX_STATE_BYTES = 64 * 1024 * 1024;
+const MAX_ROUTINES = 1000;
+const MAX_ROUTINE_RUNS = 10000;
 const diskSchema = z.object({
   version: z.literal(1), revision: z.number().int().nonnegative().default(0), settings: settingsSchema, bots: z.array(botSchema).min(1), conversations: z.array(conversationSchema),
+  routines: z.array(routineSchema).max(MAX_ROUTINES).default([]), routineRuns: z.array(routineRunSchema).max(MAX_ROUTINE_RUNS).default([]),
 }).strict();
-type DiskState = z.infer<typeof diskSchema>;
+type DiskState = Pick<AppState, 'revision' | 'bots' | 'conversations' | 'routines' | 'routineRuns'> & {
+  version: 1;
+  settings: z.infer<typeof settingsSchema>;
+};
 export type PrivateSettings = DiskState['settings'];
 export const activeStatus = (status: Conversation['run']['status']) => ['starting', 'running', 'awaiting_permission'].includes(status);
 
@@ -53,38 +61,61 @@ export class Store {
   private writeError?: Error;
   private listeners = new Set<(state: AppState) => void>();
   runtime: RuntimeInfo = { available: false, error: 'Checking Grok Build.' };
+  routineSchedulingError?: string;
 
-  private constructor(readonly dataDir: string, disk: DiskState) { this.disk = disk; }
+  private constructor(readonly dataDir: string, disk: DiskState, private readonly now: () => Date) { this.disk = disk; }
 
-  static async open(dataDir: string): Promise<Store> {
+  static async open(dataDir: string, options: { now?: () => Date } = {}): Promise<Store> {
+    const now = options.now ?? (() => new Date());
     const root = await privateDirectory(dataDir);
     let disk: DiskState;
     try {
       const file = await open(path.join(root, 'state.json'), constants.O_RDONLY | constants.O_NOFOLLOW);
       try {
         const stat = await file.stat();
-        if (!stat.isFile() || stat.nlink !== 1 || stat.size > 64 * 1024 * 1024) throw new Error('Invalid application state file.');
+        if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_STATE_BYTES) throw new Error('Invalid application state file.');
         await file.chmod(0o600);
         disk = diskSchema.parse(JSON.parse(await file.readFile('utf8')));
       } finally { await file.close(); }
       if (disk.settings.baseUrl) baseUrl(disk.settings.baseUrl);
-      const ids = new Set(disk.bots.map(bot => bot.id));
-      if (ids.size !== disk.bots.length || new Set(disk.conversations.map(c => c.id)).size !== disk.conversations.length || disk.conversations.some(c => !ids.has(c.botId))) {
+      const botIds = new Set(disk.bots.map(bot => bot.id));
+      const conversationIds = new Set(disk.conversations.map(conversation => conversation.id));
+      const entityIds = [...botIds, ...conversationIds, ...disk.routines.map(routine => routine.id), ...disk.routineRuns.map(run => run.id)];
+      const uniqueIds = new Set(entityIds);
+      const linkedConversations = new Set<string>();
+      const pendingRoutines = new Set<string>();
+      const invalidRuns = disk.routineRuns.some(run => {
+        const conversation = disk.conversations.find(item => item.id === run.conversationId);
+        const routine = disk.routines.find(item => item.id === run.routineId);
+        const linkedExecution = conversation && (!run.executionRunId || run.executionRunId === conversation.run.id);
+        const pending = !run.result && linkedExecution && (conversation.run.status === 'idle' || activeStatus(conversation.run.status));
+        const invalid = !botIds.has(run.botId) || !conversation || conversation.botId !== run.botId || linkedConversations.has(run.conversationId)
+          || (!run.result && !linkedExecution) || (pending && (!routine || pendingRoutines.has(run.routineId)));
+        linkedConversations.add(run.conversationId);
+        if (pending) pendingRoutines.add(run.routineId);
+        return invalid;
+      });
+      if (botIds.size !== disk.bots.length || conversationIds.size !== disk.conversations.length || uniqueIds.size !== entityIds.length
+        || disk.routineRuns.some(run => uniqueIds.has(run.routineId) && !disk.routines.some(routine => routine.id === run.routineId))
+        || disk.conversations.some(conversation => !botIds.has(conversation.botId))
+        || disk.routines.some(routine => !botIds.has(routine.botId) || (routine.enabled && !routine.nextRunAt)
+          || (routine.schedule.kind === 'once' && routine.nextRunAt && Date.parse(routine.nextRunAt) !== Date.parse(routine.schedule.at)))
+        || invalidRuns) {
         throw new Error('Application state contains invalid references.');
       }
     } catch (error) {
       if (!isMissing(error)) throw new Error('Cannot load application state. The existing state.json was not replaced.', { cause: error });
       disk = {
-        version: 1, revision: 0, settings: { baseUrl: '', model: '', workspace: '', apiKey: '' }, conversations: [],
-        bots: [{ id: randomUUID(), name: 'Grok', color: '#8b5cf6', instructions: '', createdAt: new Date().toISOString() }],
+        version: 1, revision: 0, settings: { baseUrl: '', model: '', workspace: '', apiKey: '' }, conversations: [], routines: [], routineRuns: [],
+        bots: [{ id: randomUUID(), name: 'Grok', color: '#8b5cf6', instructions: '', createdAt: now().toISOString() }],
       };
     }
-    const store = new Store(root, disk);
+    const store = new Store(root, disk, now);
     for (const conversation of disk.conversations) {
       if (!activeStatus(conversation.run.status)) continue;
       conversation.run.status = 'interrupted';
       conversation.run.error = 'The server stopped before this run finished.';
-      conversation.run.finishedAt = new Date().toISOString();
+      conversation.run.finishedAt = now().toISOString();
       delete conversation.run.permission;
       for (const message of conversation.messages) for (const tool of message.tools) {
         if (tool.status === 'in_progress' || tool.status === 'pending') tool.status = 'failed';
@@ -97,14 +128,20 @@ export class Store {
   get settings(): Readonly<PrivateSettings> { return this.disk.settings; }
   get conversations(): Conversation[] { return this.disk.conversations; }
   get bots(): Bot[] { return this.disk.bots; }
+  get routines(): Routine[] { return this.disk.routines; }
+  get routineRuns(): RoutineRun[] { return this.disk.routineRuns; }
   get active(): Conversation | undefined { return this.conversations.find(c => activeStatus(c.run.status)); }
 
   snapshot(): AppState {
     const { apiKey, ...settings } = this.disk.settings;
-    const state = { revision: this.disk.revision, bots: this.bots, conversations: this.conversations, settings: { ...settings, hasApiKey: Boolean(apiKey) }, runtime: this.runtime };
+    const state: AppState = {
+      revision: this.disk.revision, bots: this.bots, conversations: this.conversations, routines: this.routines, routineRuns: this.routineRuns,
+      settings: { ...settings, hasApiKey: Boolean(apiKey) }, runtime: this.runtime,
+      ...(this.routineSchedulingError ? { routineSchedulingError: this.routineSchedulingError } : {}),
+    };
     return JSON.parse(JSON.stringify(state, (field, value: unknown) => {
       if (['kind', 'status', 'role', 'color', 'hash'].includes(field)) return value;
-      if (['id', 'botId', 'sessionId', 'sessionFingerprint'].includes(field) && typeof value === 'string' && /^(?:[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}|[a-f\d]{64})$/i.test(value)) return value;
+      if (['id', 'botId', 'routineId', 'conversationId', 'executionRunId', 'sessionId', 'sessionFingerprint'].includes(field) && typeof value === 'string' && /^(?:[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}|[a-f\d]{64})$/i.test(value)) return value;
       return typeof value === 'string' && apiKey ? value.split(apiKey).join('[redacted]') : value;
     })) as AppState;
   }
@@ -115,12 +152,29 @@ export class Store {
   }
 
   changed(): Promise<void> {
+    for (const routineRun of this.routineRuns) {
+      if (routineRun.result) continue;
+      const execution = this.conversation(routineRun.conversationId).run;
+      if (routineRun.executionRunId && routineRun.executionRunId !== execution.id) continue;
+      if (execution.id) routineRun.executionRunId = execution.id;
+      if (execution.status === 'completed' || execution.status === 'cancelled' || execution.status === 'error' || execution.status === 'interrupted') {
+        routineRun.result = {
+          status: execution.status,
+          ...(execution.startedAt ? { startedAt: execution.startedAt } : {}),
+          finishedAt: execution.finishedAt ?? this.now().toISOString(),
+          ...(execution.error ? { error: execution.error } : {}),
+        };
+      }
+    }
     this.disk.revision += 1;
     const bytes = JSON.stringify(this.disk);
     const state = this.snapshot();
     const write = this.writeTail.then(async () => {
       if (this.writeError) throw this.writeError;
-      try { await atomicPrivateFile(path.join(this.dataDir, 'state.json'), bytes); }
+      try {
+        if (Buffer.byteLength(bytes, 'utf8') > MAX_STATE_BYTES) throw new Error('Application state exceeds the 64 MiB limit.');
+        await atomicPrivateFile(path.join(this.dataDir, 'state.json'), bytes);
+      }
       catch (error) {
         this.writeError = error instanceof Error ? error : new Error('State persistence failed.');
         this.runtime = { ...this.runtime, available: false, error: 'Application state could not be saved. Check the data directory before continuing.' };
@@ -131,6 +185,12 @@ export class Store {
     });
     this.writeTail = write.catch(() => {});
     return write;
+  }
+
+  async setRoutineSchedulingError(error?: string): Promise<void> {
+    if (this.routineSchedulingError === error) return;
+    this.routineSchedulingError = error;
+    await this.changed();
   }
 
   async flush(): Promise<void> { await this.writeTail; if (this.writeError) throw this.writeError; }
@@ -160,8 +220,8 @@ export class Store {
     this.assertIdle();
     const canonicalUrl = baseUrl(input.baseUrl.trim());
     if (!input.model.trim()) throw new HttpError(400, 'Choose a model ID.');
-    const workspace = await canonicalDirectory(input.workspace.trim());
-    if (workspace === this.dataDir || workspace.startsWith(`${this.dataDir}${path.sep}`) || this.dataDir.startsWith(`${workspace}${path.sep}`) || workspace === path.parse(workspace).root) {
+    const workspace = input.workspace.trim() ? await canonicalDirectory(input.workspace.trim()) : '';
+    if (workspace && (workspace === this.dataDir || workspace.startsWith(`${this.dataDir}${path.sep}`) || this.dataDir.startsWith(`${workspace}${path.sep}`) || workspace === path.parse(workspace).root)) {
       throw new HttpError(400, 'Workspace must not contain the application data directory or be the filesystem root.');
     }
     const sameProvider = this.settings.baseUrl && new URL(this.settings.baseUrl).origin === new URL(canonicalUrl).origin;
@@ -184,6 +244,175 @@ export class Store {
     this.assertIdle();
     Object.assign(this.bot(id), input);
     for (const conversation of this.conversations.filter(c => c.botId === id)) { delete conversation.sessionId; delete conversation.sessionFingerprint; }
+    await this.changed();
+  }
+
+  routine(id: string): Routine {
+    const routine = this.routines.find(item => item.id === id);
+    if (!routine) throw new HttpError(404, 'Routine does not exist.');
+    return routine;
+  }
+
+  private pendingRoutine(id: string): RoutineRun | undefined {
+    return this.routineRuns.find(run => {
+      if (run.routineId !== id || run.result) return false;
+      const execution = this.conversation(run.conversationId).run;
+      if (run.executionRunId && run.executionRunId !== execution.id) return false;
+      const status = execution.status;
+      return status === 'idle' || activeStatus(status);
+    });
+  }
+
+  private assertRoutineIdle(id: string): void {
+    this.assertWritable();
+    this.routine(id);
+    if (this.pendingRoutine(id)) throw new HttpError(409, 'Wait for or cancel this routine’s queued or active run first.');
+  }
+
+  private checkRoutineCapacity(routines: Routine[], routineRuns = this.routineRuns, conversations = this.conversations): void {
+    if (routines.length > MAX_ROUTINES) throw new HttpError(409, 'The application supports at most 1000 routines.');
+    if (routineRuns.length > MAX_ROUTINE_RUNS) throw new HttpError(409, 'Routine history is full. Existing history and conversations are retained.');
+    const queued = new Set(conversations.filter(conversation => conversation.run.status === 'idle').map(conversation => conversation.id));
+    const dispatchBytes = routineRuns.reduce((bytes, run) => bytes + (
+      !run.result && !run.executionRunId && queued.has(run.conversationId)
+        ? Buffer.byteLength(JSON.stringify(run.prompt), 'utf8') + 4096
+        : 0
+    ), 0);
+    if (Buffer.byteLength(JSON.stringify({ ...this.disk, routines, routineRuns, conversations, revision: this.disk.revision + 1 }), 'utf8') + dispatchBytes > MAX_STATE_BYTES) {
+      throw new HttpError(413, 'Application state and reserved routine startup would exceed the 64 MiB limit. Existing history and conversations are retained.');
+    }
+  }
+
+  private routineFields(input: RoutineInput, now: Date): RoutineInput & { nextRunAt?: string } {
+    const parsed = routineInputSchema.parse(input);
+    this.bot(parsed.botId);
+    if (parsed.schedule.kind === 'once' && Date.parse(parsed.schedule.at) <= now.getTime()) throw new HttpError(400, 'A one-time schedule must be in the future.');
+    return { ...parsed, ...(parsed.enabled ? { nextRunAt: nextRoutineTime(parsed.schedule, now) } : {}) };
+  }
+
+  async addRoutine(input: RoutineInput): Promise<Routine> {
+    this.assertWritable();
+    const now = this.now();
+    const routine: Routine = { ...this.routineFields(input, now), id: randomUUID(), createdAt: now.toISOString(), updatedAt: now.toISOString() };
+    this.checkRoutineCapacity([...this.routines, routine]);
+    this.routines.push(routine);
+    await this.changed();
+    return routine;
+  }
+
+  async updateRoutine(id: string, input: RoutineInput): Promise<void> {
+    this.assertRoutineIdle(id);
+    const routine = this.routine(id);
+    const now = this.now();
+    const updated: Routine = { ...routine, ...this.routineFields(input, now), updatedAt: now.toISOString() };
+    if (!updated.enabled) delete updated.nextRunAt;
+    this.checkRoutineCapacity(this.routines.map(item => item.id === id ? updated : item));
+    Object.assign(routine, updated);
+    if (!updated.enabled) delete routine.nextRunAt;
+    await this.changed();
+  }
+
+  async setRoutineEnabled(id: string, enabled: boolean): Promise<void> {
+    this.assertWritable();
+    const routine = this.routine(id);
+    if (routine.enabled === enabled) return;
+    const now = this.now();
+    const updated: Routine = { ...routine, enabled, updatedAt: now.toISOString() };
+    if (enabled) {
+      if (routine.schedule.kind === 'once' && Date.parse(routine.schedule.at) <= now.getTime()) throw new HttpError(400, 'A one-time schedule must be in the future. Edit its time before enabling it.');
+      updated.nextRunAt = nextRoutineTime(routine.schedule, now);
+    } else delete updated.nextRunAt;
+    this.checkRoutineCapacity(this.routines.map(item => item.id === id ? updated : item));
+    Object.assign(routine, updated);
+    if (!enabled) delete routine.nextRunAt;
+    await this.changed();
+  }
+
+  async deleteRoutine(id: string): Promise<void> {
+    this.assertRoutineIdle(id);
+    this.disk.routines = this.routines.filter(item => item.id !== id);
+    await this.changed();
+  }
+
+  private routineClaim(routine: Routine, trigger: RoutineRun['trigger'], scheduledFor: string, now: Date): { run: RoutineRun; conversation: Conversation } {
+    const createdAt = now.toISOString();
+    const conversation: Conversation = {
+      id: randomUUID(), botId: routine.botId, title: routine.name, messages: [], run: { id: '', status: 'idle' }, updatedAt: createdAt,
+    };
+    const run: RoutineRun = {
+      id: randomUUID(), routineId: routine.id, routineName: routine.name, botId: routine.botId, conversationId: conversation.id,
+      prompt: routine.prompt, trigger, scheduledFor, createdAt,
+    };
+    return { run, conversation };
+  }
+
+  async runRoutine(id: string, now = this.now()): Promise<RoutineRun> {
+    this.assertRoutineIdle(id);
+    const routine = this.routine(id);
+    const { run, conversation } = this.routineClaim(routine, 'manual', now.toISOString(), now);
+    const updated = { ...routine };
+    if (routine.schedule.kind === 'once') { updated.enabled = false; delete updated.nextRunAt; updated.updatedAt = now.toISOString(); }
+    this.checkRoutineCapacity(this.routines.map(item => item.id === id ? updated : item), [...this.routineRuns, run], [...this.conversations, conversation]);
+    Object.assign(routine, updated);
+    if (routine.schedule.kind === 'once') delete routine.nextRunAt;
+    this.routineRuns.push(run);
+    this.conversations.push(conversation);
+    await this.changed();
+    return run;
+  }
+
+  async claimDueRoutines(now = this.now()): Promise<void> {
+    this.assertWritable();
+    const due = this.routines.filter(routine => routine.enabled && routine.nextRunAt && Date.parse(routine.nextRunAt) <= now.getTime())
+      .sort((a, b) => Date.parse(a.nextRunAt!) - Date.parse(b.nextRunAt!));
+    const updates = new Map<string, Routine>();
+    const runs: RoutineRun[] = [];
+    const conversations: Conversation[] = [];
+    for (const routine of due) {
+      const pending = this.pendingRoutine(routine.id);
+      const previous = this.routineRuns.findLast(run => run.routineId === routine.id);
+      const previousConversation = previous && this.conversation(previous.conversationId);
+      const coveredByRun = previous && latestRoutineTime(routine.schedule, routine.nextRunAt!, now)
+        <= Date.parse(previous.result?.finishedAt ?? previousConversation?.run.finishedAt ?? previous.createdAt);
+      if (!pending && !coveredByRun) {
+        const claim = this.routineClaim(routine, 'scheduled', routine.nextRunAt!, now);
+        runs.push(claim.run);
+        conversations.push(claim.conversation);
+      }
+      const updated = { ...routine, updatedAt: now.toISOString() };
+      if (routine.schedule.kind === 'once') { updated.enabled = false; delete updated.nextRunAt; }
+      else updated.nextRunAt = nextRoutineTime(routine.schedule, now, routine.nextRunAt);
+      updates.set(routine.id, updated);
+    }
+    if (!updates.size) return;
+    this.checkRoutineCapacity(this.routines.map(item => updates.get(item.id) ?? item), [...this.routineRuns, ...runs], [...this.conversations, ...conversations]);
+    this.disk.routines = this.routines.map(item => updates.get(item.id) ?? item);
+    this.routineRuns.push(...runs);
+    this.conversations.push(...conversations);
+    await this.changed();
+  }
+
+  async cancelQueuedRoutine(conversationId: string): Promise<boolean> {
+    this.assertWritable();
+    const conversation = this.conversation(conversationId);
+    if (conversation.run.status !== 'idle' || !this.routineRuns.some(run => !run.result && !run.executionRunId && run.conversationId === conversationId)) return false;
+    const timestamp = this.now().toISOString();
+    conversation.run = { ...conversation.run, status: 'cancelled', finishedAt: timestamp };
+    conversation.updatedAt = timestamp;
+    await this.changed();
+    return true;
+  }
+
+  async failRoutineRun(run: RoutineRun, error: string, now = this.now()): Promise<void> {
+    this.assertWritable();
+    const conversation = this.conversation(run.conversationId);
+    const key = this.settings.apiKey;
+    const timestamp = now.toISOString();
+    conversation.run = {
+      id: conversation.run.id || run.id, status: 'error', error: (key ? error.split(key).join('[redacted]') : error).slice(0, 1000),
+      startedAt: conversation.run.startedAt ?? timestamp, finishedAt: timestamp,
+    };
+    conversation.updatedAt = timestamp;
     await this.changed();
   }
 

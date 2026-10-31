@@ -68,10 +68,58 @@ export interface RuntimeInfo {
   version?: string;
   error?: string;
 }
+export type RoutineSchedule =
+  | { kind: 'once'; at: string }
+  | { kind: 'interval'; minutes: number }
+  | { kind: 'daily'; time: string; timezone: string };
+export interface Routine {
+  id: string;
+  botId: string;
+  name: string;
+  prompt: string;
+  schedule: RoutineSchedule;
+  enabled: boolean;
+  nextRunAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface RoutineInput {
+  botId: string;
+  name: string;
+  prompt: string;
+  schedule: RoutineSchedule;
+  enabled: boolean;
+}
+export interface RoutineResult {
+  status: 'completed' | 'cancelled' | 'error' | 'interrupted';
+  startedAt?: string;
+  finishedAt: string;
+  error?: string;
+}
+export interface RoutineRun {
+  id: string;
+  routineId: string;
+  routineName: string;
+  botId: string;
+  conversationId: string;
+  prompt: string;
+  trigger: 'manual' | 'scheduled';
+  scheduledFor: string;
+  createdAt: string;
+  executionRunId?: string;
+  result?: RoutineResult;
+}
+export interface RoutineRunResult {
+  run: RoutineRun;
+  state: AppState;
+}
 export interface AppState {
   revision: number;
   bots: Bot[];
   conversations: Conversation[];
+  routines: Routine[];
+  routineRuns: RoutineRun[];
+  routineSchedulingError?: string;
   settings: PublicSettings;
   runtime: RuntimeInfo;
 }

@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronDown,
   Circle,
+  Clock3,
   FileText,
   LoaderCircle,
   Plus,
@@ -14,7 +15,14 @@ import {
   Terminal,
   XCircle,
 } from 'lucide-react';
-import type { Bot, Conversation, Message, PendingPermission, ToolActivity } from '../shared/types';
+import type {
+  Bot,
+  Conversation,
+  Message,
+  PendingPermission,
+  RoutineRun,
+  ToolActivity,
+} from '../shared/types';
 import { activeRun, runLabels } from './state';
 import { Avatar, ErrorNotice, IconButton } from './ui';
 
@@ -187,6 +195,7 @@ function formatTime(date: string) {
 export function Transcript({
   bot,
   conversation,
+  queuedRoutine,
   modelConfigured,
   runtimeAvailable,
   runtimeError,
@@ -197,6 +206,7 @@ export function Transcript({
 }: {
   bot: Bot;
   conversation?: Conversation;
+  queuedRoutine?: RoutineRun;
   modelConfigured: boolean;
   runtimeAvailable: boolean;
   runtimeError?: string;
@@ -266,8 +276,12 @@ export function Transcript({
             <div className="conversation-empty">
               <Avatar size={54} color={bot.color} seed={bot.id} />
               <h1>{bot.name}</h1>
-              <p>무엇을 함께 해볼까요?</p>
-              {!modelConfigured ? (
+              <p>
+                {queuedRoutine ? '다른 작업이 끝나면 이 루틴을 실행합니다.' : '무엇을 함께 해볼까요?'}
+              </p>
+              {queuedRoutine ? (
+                <small className="queued-routine-prompt">{queuedRoutine.prompt}</small>
+              ) : !modelConfigured ? (
                 <button type="button" className="setup-hint" onClick={onSettings}>
                   모델을 연결하고 첫 대화를 시작하세요 <ArrowUp size={14} />
                 </button>
@@ -284,6 +298,11 @@ export function Transcript({
               <MessageView message={message} bot={bot} />
             </div>
           ))}
+          {queuedRoutine && (
+            <p className="run-indicator" role="status">
+              <Clock3 size={14} />루틴 실행 대기 중
+            </p>
+          )}
           {running && (
             <div className="run-indicator" role="status">
               {status === 'awaiting_permission' ? (

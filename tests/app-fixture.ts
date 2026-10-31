@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 
-export async function startTestApp() {
+export async function startTestApp(options: { network?: boolean; hostname?: string } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'grok-bot-e2e-'));
   const workspace = join(root, 'workspace');
   const dataDir = join(root, 'private-data');
@@ -20,10 +20,11 @@ export async function startTestApp() {
   if (!address || typeof address === 'string') throw new Error('No available loopback port');
   const port = address.port;
   await new Promise<void>(resolve => listener.close(() => resolve()));
-  const url = `http://127.0.0.1:${port}`;
+  const url = `http://${options.network ? options.hostname ?? 'grok-bot.test' : '127.0.0.1'}:${port}`;
+  const probeUrl = `http://127.0.0.1:${port}`;
   const child: ChildProcess = spawn(process.execPath, ['--import', 'tsx', 'server/index.ts', '--dev'], {
     cwd: process.cwd(),
-    env: { ...process.env, PORT: String(port), GROK_BOT_DATA_DIR: dataDir, NODE_ENV: 'test' },
+    env: { ...process.env, HOST: options.network ? '0.0.0.0' : '127.0.0.1', PORT: String(port), GROK_BOT_ALLOWED_HOSTS: options.network ? options.hostname ?? 'grok-bot.test' : '', GROK_BOT_DATA_DIR: dataDir, NODE_ENV: 'test' },
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: process.platform !== 'win32',
   });
@@ -46,7 +47,7 @@ export async function startTestApp() {
     while (Date.now() < deadline) {
       if (child.exitCode !== null) throw new Error(`Application exited: ${logs}`);
       try {
-        const response = await fetch(`${url}/api/state`);
+        const response = await fetch(`${probeUrl}/api/state`);
         if (response.ok) return { url, workspace, dataDir, root, stop, logs: () => logs };
       } catch {}
       await new Promise(resolve => setTimeout(resolve, 200));

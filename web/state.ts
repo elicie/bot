@@ -18,6 +18,11 @@ export interface Selection {
   botId: string | null;
   conversationId: string | null;
 }
+export type Surface = { kind: 'chat' } | { kind: 'routines' };
+export interface AppRoute {
+  selection: Selection;
+  surface: Surface;
+}
 export type Resource<T> =
   { status: 'loading' } | { status: 'ready'; value: T } | { status: 'error'; error: string };
 export type Editor =
@@ -43,7 +48,8 @@ export interface UIState {
   connection: 'loading' | 'online' | 'reconnecting' | 'error';
   connectionError: string | null;
   selection: Selection;
-  lastConversation: Record<string, string>;
+  surface: Surface;
+  lastConversation: Record<string, string | null>;
   drafts: Record<string, string>;
   overlay: Overlay;
   sidebarOpen: boolean;
@@ -58,6 +64,10 @@ export const activeRun = (status: RunStatus) =>
   status === 'starting' || status === 'running' || status === 'awaiting_permission';
 export const runningConversation = (data: AppState | null) =>
   data?.conversations.find((conversation) => activeRun(conversation.run.status));
+export const queuedRoutineRun = (data: AppState | null, conversation: Conversation | undefined) =>
+  conversation?.run.status === 'idle'
+    ? data?.routineRuns.find((run) => run.conversationId === conversation.id && !run.result)
+    : undefined;
 export const conversationsFor = (data: AppState | null, botId: string | null) =>
   (data?.conversations ?? [])
     .filter((conversation) => conversation.botId === botId)
@@ -92,12 +102,24 @@ export function selectionHash(selection: Selection): string {
   if (selection.conversationId) params.set('conversation', selection.conversationId);
   return params.size ? `#${params}` : '';
 }
+export function readRoute(hash = window.location.hash): AppRoute {
+  const params = new URLSearchParams(hash.replace(/^#/, ''));
+  return {
+    selection: readSelection(hash),
+    surface: { kind: params.get('view') === 'routines' ? 'routines' : 'chat' },
+  };
+}
+export function routeHash(route: AppRoute): string {
+  const params = new URLSearchParams(selectionHash(route.selection).replace(/^#/, ''));
+  if (route.surface.kind === 'routines') params.set('view', 'routines');
+  return params.size ? `#${params}` : '';
+}
 export function initialState(): UIState {
   return {
     data: null,
     connection: 'loading',
     connectionError: null,
-    selection: readSelection(),
+    ...readRoute(),
     lastConversation: {},
     drafts: {},
     overlay: null,
@@ -113,15 +135,14 @@ export function initialState(): UIState {
 function reconcile(
   selection: Selection,
   data: AppState,
-  history: Record<string, string>,
-  preserveEmpty = false,
+  history: Record<string, string | null>,
 ): Selection {
   const routedConversation = data.conversations.find(
     (conversation) => conversation.id === selection.conversationId,
   );
   const selectedBotId = data.bots.find((bot) => bot.id === selection.botId)?.id;
   const botId = selectedBotId ?? routedConversation?.botId ?? data.bots[0]?.id ?? null;
-  if (preserveEmpty && selectedBotId && selection.conversationId === null)
+  if (selectedBotId && selection.conversationId === null)
     return { botId, conversationId: null };
   const conversationId =
     routedConversation?.botId === botId
@@ -139,6 +160,7 @@ export type Action =
   | { type: 'snapshot'; data: AppState }
   | { type: 'connection'; status: UIState['connection']; error?: string }
   | { type: 'select'; selection: Selection; expected?: Selection }
+  | { type: 'route'; route: AppRoute }
   | { type: 'draft'; key: string; text: string }
   | { type: 'draft-sent'; key: string; text: string }
   | { type: 'bind-draft'; from: string; to: string }
@@ -173,7 +195,6 @@ export function reducer(state: UIState, action: Action): UIState {
         state.selection,
         action.data,
         state.lastConversation,
-        state.data !== null,
       );
       return {
         ...state,
@@ -183,29 +204,33 @@ export function reducer(state: UIState, action: Action): UIState {
         connectionError: null,
         files: workspaceChanged ? emptyFiles() : state.files,
         lastConversation:
-          selection.botId && selection.conversationId
+          selection.botId
             ? { ...state.lastConversation, [selection.botId]: selection.conversationId }
             : state.lastConversation,
       };
     }
     case 'connection':
       return { ...state, connection: action.status, connectionError: action.error ?? null };
+    case 'route':
     case 'select': {
       if (
+        action.type === 'select' &&
         action.expected &&
         (state.selection.botId !== action.expected.botId ||
           state.selection.conversationId !== action.expected.conversationId)
       )
         return state;
+      const next = action.type === 'route' ? action.route.selection : action.selection;
       const selection = state.data
-        ? reconcile(action.selection, state.data, state.lastConversation)
-        : action.selection;
+        ? reconcile(next, state.data, state.lastConversation)
+        : next;
       return {
         ...state,
         selection,
+        surface: action.type === 'route' ? action.route.surface : { kind: 'chat' },
         sidebarOpen: false,
         lastConversation:
-          selection.botId && selection.conversationId
+          selection.botId
             ? { ...state.lastConversation, [selection.botId]: selection.conversationId }
             : state.lastConversation,
       };

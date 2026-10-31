@@ -142,6 +142,21 @@ async function fixture(options: { args?: string[]; startupTimeoutMs?: number; pr
   };
 }
 
+test('model-only chat leaves file access unavailable until a workspace is connected', async () => {
+  const f = await fixture();
+  try {
+    const configured = await f.api('/api/settings', { baseUrl: 'http://127.0.0.1:12345/v1', model: 'fixture', workspace: '' }, 'PUT');
+    assert.equal(configured.status, 200);
+    assert.equal((await f.api('/api/files')).status, 400);
+    assert.equal((await f.api('/api/file?path=notes.txt')).status, 400);
+    assert.equal((await f.send('write')).status, 202);
+    const completed = await f.wait(conversation => conversation.run.status === 'completed');
+    assert.match(completed.messages.find(message => message.role === 'assistant')?.text ?? '', /Choose a workspace/);
+    assert.equal(completed.run.permission, undefined);
+    assert.equal(await readFile(path.join(f.workspace, 'notes.txt'), 'utf8'), 'original\n');
+  } finally { await f.close(); }
+});
+
 test('ACP text and tools stream to the selected conversation, thought streams stay private, and sessions continue without replay duplication', async () => {
   const f = await fixture();
   try {

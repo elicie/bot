@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react';
 import {
   Clock3,
+  Repeat2,
   Menu,
   Monitor,
   Plus,
@@ -12,11 +13,19 @@ import {
   ChevronRight,
   UserRound,
 } from 'lucide-react';
-import type { AppState, Conversation, SettingsInput } from '../shared/types';
+import type {
+  AppState,
+  Conversation,
+  Routine,
+  RoutineInput,
+  RoutineRunResult,
+  SettingsInput,
+} from '../shared/types';
 import { errorText, getState, request } from './api';
 import { BotDialog, History } from './Bots';
 import { Composer, Transcript } from './Conversation';
 import { Files } from './Files';
+import { Routines, type RoutineDraftStatus } from './Routines';
 import { Capabilities, Settings } from './Settings';
 import {
   activeRun,
@@ -25,17 +34,29 @@ import {
   draftKey,
   initialState,
   isDirty,
-  readSelection,
+  readRoute,
+  queuedRoutineRun,
   reducer,
   runningConversation,
   selectedBot,
   selectedConversation,
-  selectionHash,
+  routeHash,
+  type AppRoute,
   type Overlay,
   type Selection,
   type SettingsTab,
 } from './state';
 import { Avatar, ErrorNotice, IconButton, Spinner } from './ui';
+
+function writeRoute(route: AppRoute, replace = false) {
+  const hash = routeHash(route);
+  if (window.location.hash === hash) return;
+  window.history[replace ? 'replaceState' : 'pushState'](
+    null,
+    '',
+    `${window.location.pathname}${window.location.search}${hash}`,
+  );
+}
 
 export function App() {
   const [state, dispatch] = useReducer(reducer, undefined, initialState);
@@ -43,11 +64,17 @@ export function App() {
   const current = useRef(state);
   current.current = state;
   const commandLock = useRef(false);
+  const navigationVersion = useRef(0);
+  const routineDraft = useRef<RoutineDraftStatus>({ dirty: false, saving: false });
+  const reportRoutineDraft = useCallback((status: RoutineDraftStatus) => {
+    routineDraft.current = status;
+  }, []);
   const bot = selectedBot(state);
   const conversation = selectedConversation(state);
   const globalRun = runningConversation(state.data);
   const busy = state.command !== null;
   const data = state.data;
+  const queuedRun = queuedRoutineRun(data, conversation);
   const selectionKey = draftKey(state.selection);
   const draft = state.drafts[selectionKey] ?? '';
 
@@ -77,6 +104,8 @@ export function App() {
           !snapshot ||
           !Array.isArray(snapshot.bots) ||
           !Array.isArray(snapshot.conversations) ||
+          !Array.isArray(snapshot.routines) ||
+          !Array.isArray(snapshot.routineRuns) ||
           !snapshot.settings ||
           !snapshot.runtime
         )
@@ -123,24 +152,36 @@ export function App() {
     },
     [],
   );
+  const confirmRoutineChange = useCallback(() => {
+    if (routineDraft.current.saving) {
+      dispatch({ type: 'error', error: '루틴 저장이 끝난 뒤 다시 시도해 주세요.' });
+      return false;
+    }
+    return (
+      !routineDraft.current.dirty ||
+      window.confirm('저장하지 않은 루틴 변경 사항을 버리고 이동할까요?')
+    );
+  }, []);
+  const confirmNavigation = useCallback(
+    () => confirmRoutineChange() && confirmFileChange(),
+    [confirmFileChange, confirmRoutineChange],
+  );
   useEffect(() => {
     const hashChanged = () => {
-      const next = readSelection();
-      if (
-        next.botId === current.current.selection.botId &&
-        next.conversationId === current.current.selection.conversationId
-      )
-        return;
-      if (confirmFileChange()) dispatch({ type: 'select', selection: next });
-      else
-        window.history.replaceState(
-          null,
-          '',
-          `${window.location.pathname}${window.location.search}${selectionHash(current.current.selection)}`,
-        );
+      const next = readRoute();
+      if (routeHash(next) === routeHash(current.current)) return;
+      if (confirmNavigation()) {
+        navigationVersion.current++;
+        dispatch({ type: 'route', route: next });
+        dispatch({ type: 'overlay', overlay: null });
+      } else writeRoute(current.current, true);
     };
     const beforeUnload = (event: BeforeUnloadEvent) => {
-      if (isDirty(current.current.files.editor)) {
+      if (
+        isDirty(current.current.files.editor) ||
+        routineDraft.current.dirty ||
+        routineDraft.current.saving
+      ) {
         event.preventDefault();
         event.returnValue = '';
       }
@@ -151,15 +192,10 @@ export function App() {
       window.removeEventListener('hashchange', hashChanged);
       window.removeEventListener('beforeunload', beforeUnload);
     };
-  }, [confirmFileChange]);
+  }, [confirmNavigation]);
   useEffect(() => {
-    if (data)
-      window.history.replaceState(
-        null,
-        '',
-        `${window.location.pathname}${window.location.search}${selectionHash(state.selection)}`,
-      );
-  }, [data, state.selection.botId, state.selection.conversationId]);
+    if (data) writeRoute(state, true);
+  }, [data !== null, state.selection.botId, state.selection.conversationId, state.surface.kind]);
   useEffect(() => {
     const media = window.matchMedia('(max-width: 760px)');
     const update = () =>
@@ -236,30 +272,35 @@ export function App() {
     dispatch({ type: 'overlay', overlay });
   };
   const settings = (tab: SettingsTab = 'general') => openOverlay({ kind: 'settings', tab });
-  const select = (selection: Selection) => {
-    if (!confirmFileChange()) return;
-    dispatch({ type: 'select', selection });
+  const navigate = (route: AppRoute) => {
+    if (!confirmNavigation()) return false;
+    navigationVersion.current++;
+    writeRoute(route);
+    dispatch({ type: 'route', route });
+    dispatch({ type: 'overlay', overlay: null });
     dispatch({ type: 'error', error: null });
+    return true;
+  };
+  const select = (selection: Selection) => navigate({ selection, surface: { kind: 'chat' } });
+  const selectCreated = (selection: Selection, expectedVersion: number) => {
+    if (navigationVersion.current !== expectedVersion) return false;
+    navigationVersion.current++;
+    writeRoute({ selection, surface: { kind: 'chat' } });
+    dispatch({ type: 'select', selection });
+    return true;
   };
   const newConversation = async () => {
     const origin = current.current.selection;
+    const version = navigationVersion.current;
     const botId = origin.botId;
-    if (!botId || !confirmFileChange()) return;
+    if (!botId || !confirmNavigation()) return;
     await command('conversation', async () => {
       const result = await request<{ conversation: Conversation; state: AppState }>(
         '/api/conversations',
         { method: 'POST', body: { botId } },
       );
       dispatch({ type: 'snapshot', data: result.state });
-      dispatch({
-        type: 'select',
-        selection: { botId, conversationId: result.conversation.id },
-        expected: origin,
-      });
-      if (
-        current.current.selection.botId === origin.botId &&
-        current.current.selection.conversationId === origin.conversationId
-      )
+      if (selectCreated({ botId, conversationId: result.conversation.id }, version))
         dispatch({ type: 'overlay', overlay: null });
     });
   };
@@ -267,7 +308,14 @@ export function App() {
     const before = current.current;
     const selected = selectedBot(before);
     const text = (before.drafts[draftKey(before.selection)] ?? '').trim();
-    if (!selected || !text || runningConversation(before.data) || commandLock.current) return;
+    if (
+      !selected ||
+      !text ||
+      runningConversation(before.data) ||
+      queuedRoutineRun(before.data, selectedConversation(before)) ||
+      commandLock.current
+    )
+      return;
     if (before.connection !== 'online') {
       dispatch({ type: 'error', error: '서버에 다시 연결한 뒤 메시지를 보내 주세요.' });
       return;
@@ -287,6 +335,7 @@ export function App() {
     }
     const originalDraft = before.drafts[draftKey(before.selection)] ?? '';
     const origin = before.selection;
+    const version = navigationVersion.current;
     await command('message', async () => {
       let conversationId = origin.conversationId;
       let sentDraftKey = draftKey(origin);
@@ -299,11 +348,7 @@ export function App() {
         dispatch({ type: 'bind-draft', from: sentDraftKey, to: conversationId });
         sentDraftKey = conversationId;
         dispatch({ type: 'snapshot', data: created.state });
-        dispatch({
-          type: 'select',
-          selection: { botId: selected.id, conversationId },
-          expected: origin,
-        });
+        selectCreated({ botId: selected.id, conversationId }, version);
       }
       const snapshot = await request<AppState>(
         `/api/conversations/${encodeURIComponent(conversationId)}/messages`,
@@ -314,8 +359,9 @@ export function App() {
     });
   };
   const cancel = async () => {
-    const active = runningConversation(current.current.data);
-    if (!active) return;
+    const before = current.current;
+    const active = selectedConversation(before);
+    if (!active || (!activeRun(active.run.status) && !queuedRoutineRun(before.data, active))) return;
     await command('cancel', async () => {
       const snapshot = await request<AppState>(
         `/api/conversations/${encodeURIComponent(active.id)}/cancel`,
@@ -333,6 +379,48 @@ export function App() {
         { method: 'POST', body: { optionId } },
       );
       dispatch({ type: 'snapshot', data: snapshot });
+    });
+  };
+  const saveRoutine = async (id: string | null, input: RoutineInput) => {
+    return command('routine-save', async () => {
+      const previousIds = new Set(current.current.data?.routines.map((routine) => routine.id));
+      const snapshot = await request<AppState>(
+        id ? `/api/routines/${encodeURIComponent(id)}` : '/api/routines',
+        { method: id ? 'PUT' : 'POST', body: input },
+      );
+      dispatch({ type: 'snapshot', data: snapshot });
+      return snapshot.routines.find((routine) =>
+        id ? routine.id === id : !previousIds.has(routine.id),
+      );
+    });
+  };
+  const toggleRoutine = async (routine: Routine) => {
+    await command(`routine-toggle:${routine.id}`, async () => {
+      const snapshot = await request<AppState>(`/api/routines/${encodeURIComponent(routine.id)}`, {
+        method: 'PATCH',
+        body: { enabled: !routine.enabled },
+      });
+      dispatch({ type: 'snapshot', data: snapshot });
+    });
+  };
+  const deleteRoutine = async (routine: Routine) => {
+    const deleted = await command(`routine-delete:${routine.id}`, async () => {
+      const snapshot = await request<AppState>(`/api/routines/${encodeURIComponent(routine.id)}`, {
+        method: 'DELETE',
+        body: {},
+      });
+      dispatch({ type: 'snapshot', data: snapshot });
+      return true;
+    });
+    return deleted === true;
+  };
+  const runRoutine = async (routine: Routine) => {
+    await command(`routine-run:${routine.id}`, async () => {
+      const result = await request<RoutineRunResult>(
+        `/api/routines/${encodeURIComponent(routine.id)}/run`,
+        { method: 'POST', body: {} },
+      );
+      dispatch({ type: 'snapshot', data: result.state });
     });
   };
   const saveSettings = async (input: SettingsInput) => {
@@ -430,12 +518,16 @@ export function App() {
                 <button
                   type="button"
                   key={item.id}
-                  className={`bot-row ${item.id === state.selection.botId ? 'selected' : ''}`}
-                  aria-current={item.id === state.selection.botId ? 'true' : undefined}
+                  className={`bot-row ${state.surface.kind === 'chat' && item.id === state.selection.botId ? 'selected' : ''}`}
+                  aria-current={state.surface.kind === 'chat' && item.id === state.selection.botId ? 'true' : undefined}
                   onClick={() =>
                     select({
                       botId: item.id,
-                      conversationId: state.lastConversation[item.id] ?? null,
+                      conversationId: state.selection.botId === item.id
+                        ? state.selection.conversationId
+                        : Object.hasOwn(state.lastConversation, item.id)
+                          ? state.lastConversation[item.id]
+                          : latest?.id ?? null,
                     })
                   }
                 >
@@ -470,6 +562,21 @@ export function App() {
           )}
         </div>
         <footer className="sidebar-footer">
+          <button
+            type="button"
+            className={`footer-button ${state.surface.kind === 'routines' ? 'selected' : ''}`}
+            aria-current={state.surface.kind === 'routines' ? 'page' : undefined}
+            onClick={() => {
+              if (state.surface.kind === 'routines') dispatch({ type: 'sidebar', open: false });
+              else navigate({ selection: current.current.selection, surface: { kind: 'routines' } });
+            }}
+            disabled={!data}
+          >
+            <span className="footer-icon">
+              <Repeat2 size={17} />
+            </span>
+            루틴
+          </button>
           <button
             type="button"
             className="footer-button"
@@ -509,7 +616,7 @@ export function App() {
       </aside>
       <main
         className="chat-stage"
-        aria-label="대화"
+        aria-label={state.surface.kind === 'routines' ? '루틴' : '대화'}
         inert={state.viewport === 'mobile' && state.sidebarOpen}
       >
         <header className="chat-header">
@@ -521,7 +628,11 @@ export function App() {
             >
               <Menu size={19} />
             </IconButton>
-            {bot ? (
+            {state.surface.kind === 'routines' ? (
+              <span className="routines-header-title">
+                <Repeat2 size={17} />루틴
+              </span>
+            ) : bot ? (
               <button
                 type="button"
                 className="chat-identity"
@@ -536,20 +647,24 @@ export function App() {
             )}
           </div>
           <div className="chat-controls">
-            <IconButton
-              label="대화 기록"
-              onClick={() => openOverlay({ kind: 'history' })}
-              disabled={!bot}
-            >
-              <Clock3 size={17} />
-            </IconButton>
-            <IconButton
-              label="새 대화"
-              onClick={() => void newConversation()}
-              disabled={!bot || busy || !!globalRun}
-            >
-              <SquarePen size={17} />
-            </IconButton>
+            {state.surface.kind === 'chat' && (
+              <>
+                <IconButton
+                  label="대화 기록"
+                  onClick={() => openOverlay({ kind: 'history' })}
+                  disabled={!bot}
+                >
+                  <Clock3 size={17} />
+                </IconButton>
+                <IconButton
+                  label="새 대화"
+                  onClick={() => void newConversation()}
+                  disabled={!bot || busy || !!globalRun}
+                >
+                  <SquarePen size={17} />
+                </IconButton>
+              </>
+            )}
             <IconButton
               label={state.computerOpen ? '컴퓨터 닫기' : '컴퓨터 열기'}
               aria-expanded={state.computerOpen}
@@ -585,22 +700,40 @@ export function App() {
             </ErrorNotice>
           </div>
         )}
-        {data && bot ? (
+        {globalRun && (state.surface.kind === 'routines' || globalRun.id !== conversation?.id) && (
+          <div className="other-run">
+            <span>다른 대화에서 작업이 실행 중입니다.</span>
+            <button
+              type="button"
+              onClick={() => select({ botId: globalRun.botId, conversationId: globalRun.id })}
+            >
+              실행 중인 대화 보기
+            </button>
+          </div>
+        )}
+        {data && state.surface.kind === 'routines' ? (
+          <Routines
+            key={navigationVersion.current}
+            data={data}
+            selectedBotId={state.selection.botId}
+            busy={busy}
+            command={state.command}
+            online={state.connection === 'online'}
+            onSave={saveRoutine}
+            onToggle={toggleRoutine}
+            onDelete={deleteRoutine}
+            onRun={runRoutine}
+            onConversation={select}
+            onSettings={settings}
+            onCreateBot={() => openOverlay({ kind: 'bot' })}
+            onDraftStatus={reportRoutineDraft}
+          />
+        ) : data && bot ? (
           <>
-            {globalRun && globalRun.id !== conversation?.id && (
-              <div className="other-run">
-                <span>다른 대화에서 작업이 실행 중입니다.</span>
-                <button
-                  type="button"
-                  onClick={() => select({ botId: globalRun.botId, conversationId: globalRun.id })}
-                >
-                  실행 중인 대화 보기
-                </button>
-              </div>
-            )}
             <Transcript
               bot={bot}
               conversation={conversation}
+              queuedRoutine={queuedRun}
               modelConfigured={!!data.settings.baseUrl && !!data.settings.model}
               runtimeAvailable={data.runtime.available}
               runtimeError={data.runtime.error}
@@ -616,8 +749,8 @@ export function App() {
               onSend={() => void send()}
               onFiles={() => toggleComputer(true)}
               onCancel={() => void cancel()}
-              running={!!conversation && activeRun(conversation.run.status)}
-              disabled={state.connection !== 'online' || !!globalRun}
+              running={!!queuedRun || (!!conversation && activeRun(conversation.run.status))}
+              disabled={state.connection !== 'online' || !!globalRun || !!queuedRun}
               busy={busy}
               model={data.settings.model}
             />
@@ -684,7 +817,8 @@ export function App() {
           onSave={async (input) => {
             const editing = current.current.overlay;
             const editId = editing?.kind === 'bot' ? editing.bot?.id : undefined;
-            if (!editId && !confirmFileChange()) return false;
+            if (!editId && !confirmNavigation()) return false;
+            const version = navigationVersion.current;
             const originalBotIds = new Set(current.current.data?.bots.map((item) => item.id));
             const saved = await command('bot', async () => {
               const snapshot = await request<AppState>(
@@ -694,11 +828,7 @@ export function App() {
               dispatch({ type: 'snapshot', data: snapshot });
               if (!editId) {
                 const created = snapshot.bots.find((item) => !originalBotIds.has(item.id));
-                if (created)
-                  dispatch({
-                    type: 'select',
-                    selection: { botId: created.id, conversationId: null },
-                  });
+                if (created) selectCreated({ botId: created.id, conversationId: null }, version);
               }
               return true;
             });
@@ -715,10 +845,7 @@ export function App() {
           onClose={closeOverlay}
           onNew={() => void newConversation()}
           onSelect={(id) => {
-            if (confirmFileChange()) {
-              dispatch({ type: 'select', selection: { botId: bot.id, conversationId: id } });
-              closeOverlay();
-            }
+            select({ botId: bot.id, conversationId: id });
           }}
         />
       )}

@@ -189,7 +189,7 @@ skills = false
     if (!this.store.runtime.available) throw new HttpError(503, this.store.runtime.error ?? 'Grok Build is unavailable.');
     if (!this.origin) throw new HttpError(503, 'Runtime is not connected to the local server.');
     const settings = { ...this.store.settings };
-    if (!settings.workspace || !settings.baseUrl || !settings.model) throw new HttpError(400, 'Configure a provider, model, and workspace in settings first.');
+    if (!settings.baseUrl || !settings.model) throw new HttpError(400, 'Configure a provider and model in settings first.');
     const conversation = this.store.conversation(conversationId);
     const bot = { ...this.store.bot(conversation.botId) };
     const now = new Date().toISOString();
@@ -380,7 +380,9 @@ skills = false
   private rules(run: Run): string {
     return [
       'You are the assistant in a local Grok Bot web client. Use only the workspace MCP server for file access.',
-      `The user-selected workspace is ${run.settings.workspace}. All broker paths are relative to that workspace, not the agent current directory.`,
+      run.settings.workspace
+        ? `The user-selected workspace is ${run.settings.workspace}. All broker paths are relative to that workspace, not the agent current directory.`
+        : 'No workspace is connected. Chat normally. Ask the user to connect a workspace in Local files settings before using any file tools.',
       'Discover workspace__list_files, workspace__read_file, and workspace__write_file with search_tool, then call them with use_tool.',
       'Every file modification requires a separate browser approval. Do not claim a write succeeded until the broker confirms it.',
       'Shell commands, subagents, workflows, external integrations, and native file tools are intentionally unavailable.',
@@ -494,6 +496,7 @@ skills = false
   private async brokerCall(run: Run, params: unknown): Promise<unknown> {
     if (run.stopped || run.finishing) throw new HttpError(409, 'Run was cancelled or finished.');
     const call = toolArguments.parse(params);
+    if (!run.settings.workspace) throw new HttpError(400, 'Choose a workspace in Local files settings before using file tools.');
     const files = new WorkspaceFiles(run.settings.workspace);
     if (call.name === 'list_files') return files.list(call.arguments.path);
     if (call.name === 'read_file') return files.read(call.arguments.path);

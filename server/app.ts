@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { HttpError, WorkspaceFiles } from './files.js';
 import { baseUrl, checkProvider, Store } from './store.js';
 import { GrokRuntime, type RuntimeOptions } from './runtime.js';
+import { RoutineScheduler, routineInputSchema, type EnqueueCommand, type RoutineSchedulerOptions } from './routines.js';
 
 const name = z.string().trim().min(1).max(100);
 const color = z.string().regex(/^#[\da-fA-F]{6}$/);
@@ -19,6 +20,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export interface BackendOptions {
   dataDir: string;
   runtime?: RuntimeOptions;
+  routines?: RoutineSchedulerOptions;
   dev?: boolean;
   serveWeb?: boolean;
   allowedHosts?: string[];
@@ -28,9 +30,10 @@ export async function createBackend(options: BackendOptions): Promise<{
   server: Server;
   store: Store;
   runtime: GrokRuntime;
+  routines: RoutineScheduler;
   close: () => Promise<void>;
 }> {
-  const store = await Store.open(options.dataDir);
+  const store = await Store.open(options.dataDir, { now: options.routines?.now });
   const runtime = new GrokRuntime(store, options.runtime);
   await runtime.initialize();
   const app = express();
@@ -39,11 +42,12 @@ export async function createBackend(options: BackendOptions): Promise<{
   let vite: { close: () => Promise<void> } | undefined;
   let closing = false;
   let commandTail: Promise<unknown> = Promise.resolve();
-  const command = <T>(operation: () => Promise<T>): Promise<T> => {
+  const command: EnqueueCommand = operation => {
     const result = commandTail.then(operation);
     commandTail = result.catch(() => {});
     return result;
   };
+  const routines = new RoutineScheduler(store, runtime, command, options.routines);
   app.disable('x-powered-by');
   app.set('trust proxy', false);
   const normalizeHost = (value: string) => value.toLowerCase().replace(/\.$/, '');
@@ -129,6 +133,32 @@ export async function createBackend(options: BackendOptions): Promise<{
     await command(() => store.updateBot(String(request.params.id), input));
     response.json(store.snapshot());
   });
+  app.post('/api/routines', async (request, response) => {
+    const input = routineInputSchema.parse(request.body);
+    await command(() => store.addRoutine(input));
+    response.status(201).json(store.snapshot());
+  });
+  app.put('/api/routines/:id', async (request, response) => {
+    const input = routineInputSchema.parse(request.body);
+    await command(() => store.updateRoutine(String(request.params.id), input));
+    response.json(store.snapshot());
+  });
+  app.patch('/api/routines/:id', async (request, response) => {
+    const input = z.object({ enabled: z.boolean() }).strict().parse(request.body);
+    await command(() => store.setRoutineEnabled(String(request.params.id), input.enabled));
+    response.json(store.snapshot());
+  });
+  app.delete('/api/routines/:id', async (request, response) => {
+    z.object({}).strict().parse(request.body);
+    await command(() => store.deleteRoutine(String(request.params.id)));
+    response.json(store.snapshot());
+  });
+  app.post('/api/routines/:id/run', async (request, response) => {
+    z.object({}).strict().parse(request.body);
+    const run = await routines.run(String(request.params.id));
+    const state = store.snapshot();
+    response.status(202).json({ run: state.routineRuns.find(item => item.id === run.id)!, state });
+  });
   app.post('/api/conversations', async (request, response) => {
     const input = z.object({ botId: z.string().uuid() }).strict().parse(request.body);
     const conversation = await command(() => store.addConversation(input.botId));
@@ -136,12 +166,21 @@ export async function createBackend(options: BackendOptions): Promise<{
   });
   app.post('/api/conversations/:id/messages', async (request, response) => {
     const input = z.object({ text: z.string().trim().min(1).max(100000) }).strict().parse(request.body);
-    await command(() => runtime.start(String(request.params.id), input.text));
+    await command(() => {
+      const id = String(request.params.id);
+      if (store.routineRuns.some(run => run.conversationId === id && !run.result && !run.executionRunId)) {
+        throw new HttpError(409, 'This conversation is reserved for a queued routine. Wait for execution or cancel it first.');
+      }
+      return runtime.start(id, input.text);
+    });
     response.status(202).json(store.snapshot());
   });
   app.post('/api/conversations/:id/cancel', async (request, response) => {
     z.object({}).strict().parse(request.body);
-    await command(() => runtime.cancel(String(request.params.id)));
+    await command(async () => {
+      const id = String(request.params.id);
+      if (!await store.cancelQueuedRoutine(id)) await runtime.cancel(id);
+    });
     response.json(store.snapshot());
   });
   app.post('/api/conversations/:id/permissions/:permissionId', async (request, response) => {
@@ -171,7 +210,7 @@ export async function createBackend(options: BackendOptions): Promise<{
   if (options.serveWeb !== false) {
     if (options.dev) {
       const { createServer: createViteServer } = await import('vite');
-      const dev = await createViteServer({ root, cacheDir: path.join(store.dataDir, 'vite-cache'), server: { middlewareMode: true, ws: { server } }, appType: 'spa' });
+      const dev = await createViteServer({ root, cacheDir: path.join(store.dataDir, 'vite-cache'), server: { middlewareMode: true, allowedHosts: [...allowedHosts], ws: { server } }, appType: 'spa' });
       vite = dev;
       app.use(dev.middlewares);
     } else {
@@ -198,20 +237,25 @@ export async function createBackend(options: BackendOptions): Promise<{
   server.on('listening', () => {
     const address = server.address();
     if (address && typeof address !== 'string') runtime.setOrigin(`http://127.0.0.1:${address.port}`);
+    routines.start();
   });
   return {
-    server, store, runtime,
+    server, store, runtime, routines,
     close: async () => {
       closing = true;
-      await commandTail;
-      await runtime.shutdown();
-      for (const response of streams) response.end();
-      await vite?.close();
-      await new Promise<void>((resolve, reject) => {
-        if (!server.listening) { resolve(); return; }
-        server.close(error => { if (error) reject(error); else resolve(); });
-        server.closeIdleConnections();
-      });
+      try {
+        await routines.close();
+        await commandTail;
+        await runtime.shutdown();
+      } finally {
+        for (const response of streams) response.end();
+        await vite?.close();
+        await new Promise<void>((resolve, reject) => {
+          if (!server.listening) { resolve(); return; }
+          server.close(error => { if (error) reject(error); else resolve(); });
+          server.closeIdleConnections();
+        });
+      }
     },
   };
 }

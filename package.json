@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22.12" },
+  "engines": {
+    "node": ">=22.12"
+  },
   "scripts": {
     "dev": "tsx server/index.ts --dev",
     "start": "tsx server/index.ts",
@@ -14,6 +16,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "2.2.0",
+    "cron-parser": "^5.10.3",
     "express": "^5.1.0",
     "lucide-react": "^0.468.0",
     "react": "19.3.1",
