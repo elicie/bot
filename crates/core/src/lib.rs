@@ -12,6 +12,7 @@ pub mod chat_features;
 mod groups_http;
 pub mod http;
 mod http_bots;
+mod main_bot;
 pub mod permission_rules;
 pub mod provider;
 pub mod public_state;

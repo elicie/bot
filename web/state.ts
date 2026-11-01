@@ -76,6 +76,9 @@ export const conversationsFor = (data: AppState | null, botId: string | null) =>
   (data?.conversations ?? [])
     .filter((conversation) => conversation.botId === botId && !conversation.thread)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+/** The main bot ("메인 Bot"): the chosen one, or the first bot when none is chosen (or the server has none). */
+export const mainBotId = (data: AppState | null | undefined): string | null =>
+  (data?.mainBotId && data.bots.some((bot) => bot.id === data.mainBotId) ? data.mainBotId : data?.bots[0]?.id) ?? null;
 export const selectedBot = (state: UIState) =>
   state.data?.bots.find((bot) => bot.id === state.selection.botId);
 export const selectedConversation = (state: UIState) =>
@@ -152,7 +155,7 @@ function reconcile(
     (conversation) => conversation.id === selection.conversationId,
   );
   const selectedBotId = data.bots.find((bot) => bot.id === selection.botId)?.id;
-  const botId = selectedBotId ?? routedConversation?.botId ?? data.bots[0]?.id ?? null;
+  const botId = selectedBotId ?? routedConversation?.botId ?? mainBotId(data);
   if (selectedBotId && selection.conversationId === null)
     return { botId, conversationId: null };
   const conversationId =

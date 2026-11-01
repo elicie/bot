@@ -199,6 +199,7 @@ mod tests {
             routine_scheduling_error: None,
             settings: PublicSettings { base_url: String::new(), model: String::new(), has_api_key: false, workspace: String::new() },
             runtime: RuntimeInfo { available: true, version: None, error: None },
+            main_bot_id: None,
         }
     }
 

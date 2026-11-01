@@ -590,6 +590,10 @@ pub struct DiskState {
     pub permission_rules: Vec<PermissionRule>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<Group>,
+    /// The bot chosen as main bot ("메인 Bot"). Unset (the default for existing data) means the
+    /// first bot; see `grok_bot_store::main_bot`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_bot_id: Option<String>,
 }
 
 /// Public snapshot sent to browsers over HTTP and SSE.
@@ -612,6 +616,9 @@ pub struct AppState {
     pub routine_scheduling_error: Option<String>,
     pub settings: PublicSettings,
     pub runtime: RuntimeInfo,
+    /// The chosen main bot, as stored in `state.json`. Absent: the first bot is the main bot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_bot_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
