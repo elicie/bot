@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use grok_bot_files::WorkspaceFiles;
 use grok_bot_model::{
+    BotInput,
     BotDelivery, BotMessageInput, HttpError, HttpResult, PendingPermission, PermissionOption,
     SkillInput, ToolActivity, ToolStatus, new_id,
 };
@@ -51,6 +52,7 @@ pub fn broker_tools() -> Value {
         { "name": "write_file", "description": "Propose complete UTF-8 text contents for one workspace file. Every call waits for explicit browser approval. Supply the hash returned by read_file to prevent overwriting changes. Use an empty hash for a new file. Parent directories must exist.", "inputSchema": { "type": "object", "properties": { "path": { "type": "string" }, "content": { "type": "string" }, "hash": { "type": "string" } }, "required": ["path", "content"], "additionalProperties": false } },
         { "name": "list_bots", "description": "List local bot IDs and names for chat delivery. This safe read is available before connecting a directory. Returns public bot identity without instructions, credentials, conversation history, or private configuration.", "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false } },
         { "name": "send_message", "description": "Queue one chat-only message to another local bot. Every new delivery requires explicit one-use browser approval. Returns a durable receipt, not the recipient answer. At most one distinct outbound message per run and four hops per chain. Retrying the same target and text returns the original receipt. Recipient turns cannot use file tools.", "inputSchema": { "type": "object", "properties": { "toBotId": { "type": "string", "format": "uuid" }, "text": { "type": "string", "minLength": 1, "maxLength": 100000 }, "requestId": { "type": "string", "maxLength": 128 } }, "required": ["toBotId", "text"], "additionalProperties": false } },
+        { "name": "create_bot", "description": "Propose a new local bot when the user asks for one. Provide its display name and instructions; color (#rrggbb) and avatar shape are optional. Creation requires explicit one-use browser approval. At most one bot per run. Returns the new bot ID and name.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 100 }, "instructions": { "type": "string", "maxLength": 30000 }, "color": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" }, "shape": { "type": "string", "enum": ["blob", "cloud", "square", "spark", "clover", "heart", "flower", "droplet", "pill", "wedge", "house", "star", "hexagon", "pumpkin"] } }, "required": ["name"], "additionalProperties": false } },
     ])
 }
 
@@ -64,6 +66,7 @@ enum ToolCall {
     CreateSkill(SkillInput),
     ListBots,
     SendMessage(BotMessageInput),
+    CreateBot(BotInput),
     ListFiles {
         path: String,
     },
@@ -152,6 +155,15 @@ fn parse_call(params: &Value) -> BrokerResult<ToolCall> {
             ToolCall::SendMessage(
                 validate_bot_message_input(input).map_err(|_| BrokerError::Invalid)?,
             )
+        }
+        "create_bot" => {
+            let arguments = strict(arguments, &["name", "instructions", "color", "shape"])?;
+            let input: BotInput = serde_json::from_value(Value::Object(arguments.clone()))
+                .map_err(|_| BrokerError::Invalid)?;
+            if input.name.trim().is_empty() {
+                return Err(BrokerError::Invalid);
+            }
+            ToolCall::CreateBot(input)
         }
         "list_files" => ToolCall::ListFiles {
             path: string(strict(arguments, &["path"])?, "path")?.unwrap_or_default(),
@@ -394,6 +406,7 @@ impl Runtime {
                 Ok(json!({"bots": bots}))
             }
             ToolCall::SendMessage(input) => self.send_bot_message(run, input).await,
+            ToolCall::CreateBot(input) => self.create_bot(run, input).await,
             call => self.file_call(run, call).await,
         }
     }
@@ -731,6 +744,88 @@ impl Runtime {
             }
         }
     }
+
+    async fn create_bot(&self, run: &Arc<Run>, input: BotInput) -> BrokerResult<Value> {
+        if self.is_recipient(run) {
+            return Err(HttpError::forbidden(
+                "Recipient conversations are chat-only and cannot create bots.",
+            )
+            .into());
+        }
+        let request_key = hex::encode(Sha256::digest(json_value(&input).to_string().as_bytes()));
+        {
+            let flags = run.flags();
+            if let Some(prior) = flags.created_bots.get(&request_key) {
+                return Ok(json!({"id": prior, "name": run.redact(&input.name), "created": true, "existing": true}));
+            }
+            if !flags.created_bots.is_empty() {
+                return Err(HttpError::conflict("Only one bot can be created per model turn. Ask the user before proposing another.").into());
+            }
+        }
+        let shape = input.shape.map(|shape| json_value(&shape).as_str().unwrap_or_default().to_owned());
+        let title = run.redact(&format!("Create bot: {}", input.name.trim()));
+        let description = run.redact_all(&format!(
+            "Create a new local bot requested in {}'s conversation.\n\nName: {}\nColor: {}\nShape: {}\n\nInstructions:\n{}",
+            run.bot.name,
+            input.name.trim(),
+            input.color.as_deref().unwrap_or("default"),
+            shape.as_deref().unwrap_or("default"),
+            input.instructions.as_deref().filter(|text| !text.is_empty()).unwrap_or("(none)"),
+        ));
+        let tool = ToolActivity {
+            id: new_id(),
+            title: title.clone(),
+            kind: "edit".into(),
+            status: ToolStatus::Pending,
+            input: Some(description.clone()),
+            output: None,
+            paths: None,
+            local_only: None,
+        };
+        let tool_id = tool.id.clone();
+        let (allow, _, options) = approval_options("Create bot once", "Deny");
+        let permission = PendingPermission {
+            id: new_id(),
+            title,
+            kind: "edit".into(),
+            description,
+            options,
+            paths: Vec::new(),
+            local_only: None,
+        };
+        let choice = self.approve(run, permission, Some(tool)).await?;
+        if choice.as_deref() != Some(allow.as_str()) || run.inactive() {
+            let message = "Bot creation was denied or cancelled.";
+            self.settle_tool(run, &tool_id, ToolStatus::Failed, Some(message.into())).await;
+            return Err(HttpError::forbidden(message).into());
+        }
+        let created = {
+            let (store, run) = (Arc::clone(&self.store), Arc::clone(run));
+            self.queue
+                .run(async move {
+                    store
+                        .mutate(move |state| {
+                            if run.inactive() {
+                                return Err(HttpError::conflict("The run ended before the bot could be created."));
+                            }
+                            state.add_bot_from_run(input)
+                        })
+                        .await
+                })
+                .await
+        };
+        match created {
+            Ok(bot) => {
+                run.flags().created_bots.insert(request_key, bot.id.clone());
+                self.settle_tool(run, &tool_id, ToolStatus::Completed, Some(run.redact(&format!("Created bot {}.", bot.name)))).await;
+                Ok(json!({"id": bot.id, "name": run.redact(&bot.name), "created": true}))
+            }
+            Err(error) => {
+                self.settle_tool(run, &tool_id, ToolStatus::Failed, Some(run.redact(&error.message))).await;
+                Err(error.into())
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -759,7 +854,8 @@ mod tests {
                 "read_file",
                 "write_file",
                 "list_bots",
-                "send_message"
+                "send_message",
+                "create_bot"
             ]
         );
         assert!(invalid(
