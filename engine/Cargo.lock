@@ -4075,9 +4075,17 @@ dependencies = [
 name = "grok-bot-engine"
 version = "0.1.0"
 dependencies = [
+ "agent-client-protocol",
  "anyhow",
+ "async-trait",
+ "axum",
+ "futures",
+ "serde_json",
  "tokio",
+ "tokio-util",
  "toml",
+ "xai-acp-lib",
+ "xai-fsnotify",
  "xai-grok-shell",
 ]
 
