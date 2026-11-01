@@ -20,6 +20,7 @@ export const permissionCategories: { id: PermissionCategory; label: string; desc
   { id: 'bot_create', label: '새 Bot 만들기', description: '이름·지침·모양을 정한 로컬 Bot' },
   { id: 'skill_save', label: 'Bot 스킬 저장', description: '이 Bot의 이후 대화에서 쓰는 비공개 스킬' },
   { id: 'memory_save', label: 'Bot 메모리 저장', description: 'Bot이 기억해 두는 내용' },
+  { id: 'mcp_tool', label: '사용자 지정 MCP 서버 도구 사용', description: '켜 둔 사용자 지정 MCP 서버의 도구 호출. 서버 하나로 제한할 수 있어요' },
 ];
 const actions: { id: PermissionAction; label: string; description: string }[] = [
   { id: 'ask', label: '항상 묻기', description: '작업이 이 규칙과 일치하면 멈추고 물어봐요' },
@@ -32,7 +33,11 @@ interface Draft {
   category: PermissionCategory;
   botId: string;
   action: PermissionAction;
+  /** `mcp_tool` only; empty: every custom server. */
+  server: string;
 }
+/** "Bot · server" scope text of a rule. */
+const scopeText = (botName: string, rule: Pick<PermissionRule, 'server'>) => (rule.server ? `${botName} · MCP ${rule.server}` : botName);
 
 /** Whether a change can make actions proceed without asking (loopback clients only). */
 const loosens = (rule: PermissionRule | null, action: PermissionAction | 'delete') =>
@@ -90,6 +95,7 @@ export function PermissionRules({ data, disabled }: { data: AppState; disabled: 
       category: draft.category,
       action: draft.action,
       ...(draft.botId ? { botId: draft.botId } : {}),
+      ...(draft.category === 'mcp_tool' && draft.server ? { server: draft.server } : {}),
     };
     if (await mutate('add', '/api/permission-rules', 'POST', input, '규칙을 저장했어요.')) setDraft(null);
   };
@@ -98,9 +104,11 @@ export function PermissionRules({ data, disabled }: { data: AppState; disabled: 
     setStatus(null);
     const used = new Set(rules.filter((rule) => !rule.botId).map((rule) => rule.category));
     const category = permissionCategories.find((item) => !used.has(item.id))?.id ?? 'file_write';
-    setDraft({ category, botId: '', action });
+    setDraft({ category, botId: '', action, server: '' });
   };
-  const duplicate = draft && rules.some((rule) => rule.category === draft.category && (rule.botId ?? '') === draft.botId);
+  const draftServer = draft?.category === 'mcp_tool' ? draft.server : '';
+  const duplicate = draft && rules.some((rule) => rule.category === draft.category && (rule.botId ?? '') === draft.botId && (rule.server ?? '') === draftServer);
+  const serverNames = [...new Set((data.mcpServers ?? []).filter((server) => !draft?.botId || server.botId === draft.botId).map((server) => server.name))].sort();
   const localOnlyBlocked = (rule: PermissionRule | null, action: PermissionAction | 'delete') =>
     canAutoAllow === false && loosens(rule, action);
 
@@ -114,11 +122,11 @@ export function PermissionRules({ data, disabled }: { data: AppState; disabled: 
             <div className="settings-row"><span className="muted">{empty}</span></div>
           )}
           {items.map((rule) => (
-            <div className="settings-row permission-rule" key={rule.id} role="group" aria-label={`${categoryLabel(rule.category)} · ${botName(rule.botId)}`}>
+            <div className="settings-row permission-rule" key={rule.id} role="group" aria-label={`${categoryLabel(rule.category)} · ${scopeText(botName(rule.botId), rule)}`}>
               <div className="settings-copy">
                 <span>Grok Bot이 다음을 하려고 할 때:</span>
                 <strong>{categoryLabel(rule.category)}</strong>
-                <span>{botName(rule.botId)}</span>
+                <span>{scopeText(botName(rule.botId), rule)}</span>
               </div>
               <div className="permission-rule-actions">
                 <select
@@ -142,7 +150,7 @@ export function PermissionRules({ data, disabled }: { data: AppState; disabled: 
                   label="규칙 삭제"
                   disabled={blocked || localOnlyBlocked(rule, 'delete')}
                   onClick={() => {
-                    if (!window.confirm(`'${categoryLabel(rule.category)} · ${botName(rule.botId)}' 규칙을 삭제할까요?`)) return;
+                    if (!window.confirm(`'${categoryLabel(rule.category)} · ${scopeText(botName(rule.botId), rule)}' 규칙을 삭제할까요?`)) return;
                     void mutate(`delete:${rule.id}`, `/api/permission-rules/${encodeURIComponent(rule.id)}`, 'DELETE', {}, '규칙을 삭제했어요.');
                   }}
                 >
@@ -212,13 +220,22 @@ export function PermissionRules({ data, disabled }: { data: AppState; disabled: 
               <select
                 aria-label="적용할 Bot"
                 value={draft.botId}
-                onChange={(event) => setDraft({ ...draft, botId: event.target.value })}
+                onChange={(event) => setDraft({ ...draft, botId: event.target.value, server: '' })}
                 disabled={blocked}
               >
                 <option value="">모든 Bot</option>
                 {data.bots.map((bot) => <option key={bot.id} value={bot.id}>{bot.name}</option>)}
               </select>
             </label>
+            {draft.category === 'mcp_tool' && (
+              <label className="settings-field">
+                <span>MCP 서버</span>
+                <select aria-label="MCP 서버" value={draft.server} onChange={(event) => setDraft({ ...draft, server: event.target.value })} disabled={blocked}>
+                  <option value="">모든 사용자 지정 서버</option>
+                  {serverNames.map((name) => <option key={name} value={name}>{name}</option>)}
+                </select>
+              </label>
+            )}
             <fieldset className="settings-field permission-action-field" disabled={blocked}>
               <legend>규칙 동작</legend>
               {actions.map((item) => (

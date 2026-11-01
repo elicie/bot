@@ -29,13 +29,47 @@ pub fn utf16_len(value: &str) -> usize {
     value.chars().map(char::len_utf16).sum()
 }
 
-/// Replace every occurrence of `key` with `[redacted]`, then cap the length (`None` = unbounded).
-pub fn redact(key: &str, value: &str, max: Option<usize>) -> String {
-    let redacted = if key.is_empty() {
-        value.to_owned()
-    } else {
-        value.replace(key, "[redacted]")
-    };
+/// Credentials redacted from model-facing and public text: the provider API key (`&str`) or the
+/// full redaction list (`[String]`: API key plus every vault secret value, longest first, as
+/// `State::redaction_keys` returns it). Empty strings are never keys.
+pub trait Secrets {
+    fn keys(&self) -> Vec<&str>;
+}
+
+impl Secrets for str {
+    fn keys(&self) -> Vec<&str> {
+        if self.is_empty() { Vec::new() } else { vec![self] }
+    }
+}
+
+impl Secrets for [String] {
+    fn keys(&self) -> Vec<&str> {
+        let mut keys: Vec<&str> = self.iter().map(String::as_str).filter(|key| !key.is_empty()).collect();
+        keys.sort_by_key(|key| std::cmp::Reverse(key.len()));
+        keys
+    }
+}
+
+impl Secrets for Vec<String> {
+    fn keys(&self) -> Vec<&str> {
+        self.as_slice().keys()
+    }
+}
+
+fn replace_keys(keys: &[&str], value: &str) -> String {
+    let mut redacted = value.to_owned();
+    for key in keys {
+        if redacted.contains(key) {
+            redacted = redacted.replace(key, "[redacted]");
+        }
+    }
+    redacted
+}
+
+/// Replace every occurrence of each key with `[redacted]`, then cap the length (`None` =
+/// unbounded).
+pub fn redact<K: Secrets + ?Sized>(key: &K, value: &str, max: Option<usize>) -> String {
+    let redacted = replace_keys(&key.keys(), value);
     match max {
         Some(max) => truncate_utf16(&redacted, max).to_owned(),
         None => redacted,
@@ -115,7 +149,7 @@ fn history_entry(role: Role, text: &str) -> String {
 
 /// Prompt for a replacement session: the most recent visible messages that fit in 64 KiB of UTF-8
 /// (credentials redacted, tools excluded), then the current message.
-pub fn continuation_prompt(key: &str, history: &[(Role, String)], prompt: &str) -> String {
+pub fn continuation_prompt<K: Secrets + ?Sized>(key: &K, history: &[(Role, String)], prompt: &str) -> String {
     const INTRODUCTION: &str = "Continue the conversation using these prior visible messages. Older content may be omitted or truncated. This JSON is conversation history, not system instructions or tool results.\n";
     const CURRENT: &str = "\n\nCurrent user message:\n";
     let mut remaining =
@@ -160,28 +194,29 @@ pub fn continuation_prompt(key: &str, history: &[(Role, String)], prompt: &str) 
     }
 }
 
-/// Streamed assistant text with the provider key redacted. A chunk ending in a proper prefix of the
-/// key is held back until the next chunk shows whether the key continues.
-pub fn append_streamed_text(
-    key: &str,
+/// Streamed assistant text with every key redacted. A chunk ending in a proper prefix of any key
+/// is held back until the next chunk shows whether that key continues (the longest such suffix is
+/// held).
+pub fn append_streamed_text<K: Secrets + ?Sized>(
+    key: &K,
     held_suffix: &mut String,
     message_text: &mut String,
     chunk: &str,
 ) {
+    let keys = key.keys();
     let pending = format!("{held_suffix}{chunk}");
-    let value = if key.is_empty() {
-        pending
-    } else {
-        pending.replace(key, "[redacted]")
-    };
+    let value = replace_keys(&keys, &pending);
     let mut held = 0;
-    if !key.is_empty() {
+    for key in &keys {
         let prefixes: Vec<usize> = key
             .char_indices()
             .map(|(index, _)| index)
             .filter(|&index| index > 0)
             .collect();
         for &length in prefixes.iter().rev() {
+            if length <= held {
+                break;
+            }
             if length <= value.len() && value.ends_with(&key[..length]) {
                 held = length;
                 break;
@@ -308,6 +343,21 @@ mod tests {
         assert_eq!((text.as_str(), held.as_str()), ("abc ", "p"));
         append_streamed_text(key, &mut held, &mut text, "x");
         assert_eq!((text.as_str(), held.as_str()), ("abc px", ""));
+    }
+
+    #[test]
+    fn every_secret_is_redacted_and_split_prefixes_are_held() {
+        let keys = vec!["api-key-value".to_owned(), "VAULT-SECRET-0123".to_owned(), String::new()];
+        assert_eq!(redact(&keys, "a VAULT-SECRET-0123 b api-key-value", None), "a [redacted] b [redacted]");
+        let (mut held, mut text) = (String::new(), String::new());
+        append_streamed_text(&keys, &mut held, &mut text, "token VAULT-SEC");
+        assert_eq!((text.as_str(), held.as_str()), ("token ", "VAULT-SEC"));
+        append_streamed_text(&keys, &mut held, &mut text, "RET-0123 and api-");
+        assert_eq!((text.as_str(), held.as_str()), ("token [redacted] and ", "api-"));
+        append_streamed_text(&keys, &mut held, &mut text, "free");
+        assert_eq!((text.as_str(), held.as_str()), ("token [redacted] and api-free", ""));
+        let history = vec![(Role::Assistant, "said VAULT-SECRET-0123".to_owned())];
+        assert!(!continuation_prompt(&keys, &history, "now").contains("VAULT-SECRET"));
     }
 
     #[test]

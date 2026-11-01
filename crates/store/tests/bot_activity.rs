@@ -394,7 +394,7 @@ async fn deleting_a_bot_removes_its_scoped_permission_rules_only() {
     let keep = add_bot(&f, "Keep").await;
     let gone = add_bot(&f, "Gone").await;
     for bot_id in [Some(gone.clone()), Some(keep.clone()), None] {
-        let input = PermissionRuleInput { category: PermissionCategory::FileWrite, action: PermissionAction::Allow, bot_id };
+        let input = PermissionRuleInput { category: PermissionCategory::FileWrite, action: PermissionAction::Allow, bot_id, server: None };
         f.store.mutate(move |s| s.add_permission_rule(input, true)).await.unwrap();
     }
     let target = gone.clone();

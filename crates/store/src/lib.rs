@@ -33,6 +33,7 @@ pub mod schedule;
 pub mod skills;
 pub mod templates;
 pub mod validate;
+pub mod vault;
 pub mod webhooks;
 
 use std::collections::{HashMap, HashSet};
@@ -105,6 +106,8 @@ enum Job {
 
 /// `Store.snapshot()`: the public state with the API key removed and redacted.
 fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_error: Option<String>) -> AppState {
+    let keys = vault::redaction_keys(&disk);
+    let (secrets, mcp_servers) = vault::public_vault(&disk);
     let DiskState { revision, settings, bots, conversations, mut routines, routine_runs, bot_exchanges, bot_deliveries, permission_rules, groups, .. } = disk;
     webhooks::strip_webhook_secrets(&mut routines);
     let mut state = AppState {
@@ -125,8 +128,10 @@ fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_err
             workspace: settings.workspace,
         },
         runtime,
+        secrets,
+        mcp_servers,
     };
-    redact::redact_state(&mut state, &settings.api_key);
+    redact::redact_state(&mut state, &keys);
     state
 }
 
@@ -224,6 +229,8 @@ fn default_state(now: DateTime<Utc>) -> DiskState {
         bot_deliveries: Vec::new(),
         permission_rules: Vec::new(),
         groups: Vec::new(),
+        secrets: Vec::new(),
+        mcp_servers: Vec::new(),
     }
 }
 
@@ -564,10 +571,15 @@ impl State {
     pub fn settings(&self) -> &PrivateSettings {
         &self.disk.settings
     }
-    /// `[redacted]` replacement for the stored API key.
+    /// `[redacted]` replacement for the stored API key and every vault secret value.
     pub fn redact(&self, value: &str) -> String {
-        let key = &self.disk.settings.api_key;
-        if key.is_empty() { value.to_owned() } else { value.replace(key.as_str(), "[redacted]") }
+        let mut value = value.to_owned();
+        for key in vault::redaction_keys(&self.disk) {
+            if value.contains(key.as_str()) {
+                value = value.replace(key.as_str(), "[redacted]");
+            }
+        }
+        value
     }
 
     pub fn assert_writable(&self) -> HttpResult<()> {

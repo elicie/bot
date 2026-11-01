@@ -1,5 +1,5 @@
 //! Public snapshot redaction. Port of the `JSON.stringify` replacer in `Store.snapshot()`: every
-//! string has the API key replaced by `[redacted]` except
+//! string has the API key and every vault secret value replaced by `[redacted]` except
 //! - `kind`, `status`, `role`, `color`, and `hash` fields,
 //! - identifier fields (`id`, `botId`, `routineId`, ...) whose value is a UUID or 64-hex digest,
 //! - the elements of bot exchange `botIds` and message `botExchangeIds` arrays.
@@ -17,13 +17,16 @@ static IDENTIFIER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(?:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|[a-f0-9]{64})$").unwrap());
 
 struct Redactor<'a> {
-    key: &'a str,
+    /// The API key and every vault secret value, longest first, none empty.
+    keys: &'a [String],
 }
 
 impl Redactor<'_> {
     fn text(&self, value: &mut String) {
-        if value.contains(self.key) {
-            *value = value.replace(self.key, "[redacted]");
+        for key in self.keys {
+            if value.contains(key.as_str()) {
+                *value = value.replace(key.as_str(), "[redacted]");
+            }
         }
     }
 
@@ -204,12 +207,20 @@ impl Redactor<'_> {
         self.text(&mut state.settings.workspace);
         self.optional(&mut state.runtime.version);
         self.optional(&mut state.runtime.error);
+        for secret in &mut state.secrets {
+            self.text(&mut secret.name);
+        }
+        for server in &mut state.mcp_servers {
+            self.text(&mut server.name);
+        }
     }
 }
 
-/// Replace every occurrence of `key` (when non-empty) in the snapshot's redactable strings.
-pub(crate) fn redact_state(state: &mut AppState, key: &str) {
-    if !key.is_empty() {
-        Redactor { key }.state(state);
+/// Replace every occurrence of each key (`vault::redaction_keys`: the API key and every vault
+/// secret value) in the snapshot's redactable strings.
+pub(crate) fn redact_state(state: &mut AppState, keys: &[String]) {
+    let keys: Vec<String> = keys.iter().filter(|key| !key.is_empty()).cloned().collect();
+    if !keys.is_empty() {
+        Redactor { keys: &keys }.state(state);
     }
 }

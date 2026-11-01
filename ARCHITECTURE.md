@@ -32,7 +32,15 @@ Each routine can hold one webhook key. Only a SHA-256 hash is stored (the public
 
 ## Permission rules
 
-Rules map an action category (`file_write`, `bot_message`, `bot_create`, `skill_save`, `memory_save`) for all bots or one bot to "항상 묻기" (`ask`, the default) or "묻지 않고 허용" (`allow`). Ask rules win conflicts. Every broker mutation calls `Runtime::approve_category`, which records an allowed action's tool activity with `approvedByRule` (shown as "내 규칙으로 자동 승인됨") instead of showing a card. Rules never lift the safety floor: local-only approvals always ask, bot-delivery recipient conversations and webhook-triggered runs always ask, and hash, size, hop, and recipient checks run before approval. The server has no login, so only a loopback client may add or loosen allow rules; LAN clients may view rules and tighten them.
+Rules map an action category (`file_write`, `bot_message`, `bot_create`, `skill_save`, `memory_save`, `mcp_tool`; `mcp_tool` rules may name one custom MCP `server`) for all bots or one bot to "항상 묻기" (`ask`, the default) or "묻지 않고 허용" (`allow`). Ask rules win conflicts. Every broker mutation calls `Runtime::approve_category`, which records an allowed action's tool activity with `approvedByRule` (shown as "내 규칙으로 자동 승인됨") instead of showing a card. Rules never lift the safety floor: local-only approvals always ask, bot-delivery recipient conversations and webhook-triggered runs always ask, and hash, size, hop, and recipient checks run before approval. The server has no login, so only a loopback client may add or loosen allow rules; LAN clients may view rules and tighten them.
+
+## Vault secrets and custom MCP servers
+
+The vault ("보관함") holds named secrets (`^[A-Z][A-Z0-9_]{0,63}$`, values 8–8192 characters without control characters) for every bot or for one bot. Values are write-only from the browser: they are stored in `state.json` (mode 0600, like the provider API key; there is no OS keychain integration and no encryption at rest), the public snapshot carries only `{ id, name, botId?, createdAt, updatedAt }`, and every snapshot string, streamed assistant text (split-prefix holding for every key), tool activity, error, and model-facing history is redacted of the API key and every secret value (`State::redaction_keys`, longest first). The minimum length keeps redaction from mangling ordinary text.
+
+Each bot may hold up to 10 custom MCP servers, edited as one "MCP 서버 JSON" document in the common `{"mcpServers": {"name": {"command", "args", "env"} | {"url", "headers"}}}` shape (the bare server object is accepted too). Validation is strict: names `^[a-z0-9][a-z0-9_-]{0,31}$` without `__` and not starting with `workspace` (the engine joins server and tool names with `__` and pre-allows only `MCPTool(workspace__*)`), duplicate keys rejected, unknown fields rejected, absolute or `PATH` commands, `http`/`https` URLs without credentials, bounded sizes. Env and header values may reference secrets as `${secret:NAME}` (the bot's own secret wins over an all-bots secret); they are resolved only when a turn starts and reach only the in-process engine's ACP `mcpServers`. The snapshot shows `{ name, transport, enabled, secretRefs }` only; the JSON itself (which may hold literal values) is served to loopback clients only.
+
+The server has no login and a stdio server is arbitrary command execution as the server user, so every secret change and every MCP change that can make a server run (saving the JSON, enabling) requires a loopback client. New and changed servers start disabled; disabling is allowed from LAN. Enabled servers join the bot's sessions next to the `workspace` broker (recipient bot-message conversations get none) with a 10 s startup and 25 s call timeout, and their enabled configuration (unresolved, so no secret values) is part of the session fingerprint. A server with a missing secret or a missing command is skipped and an engine `x.ai/mcp/server_status` report of an unavailable server becomes a failed tool activity; the turn continues. Each custom tool call arrives as an ACP permission request that becomes an approval card ("MCP 서버 name: tool"); declining it sends the engine a follow-up so the model continues without the tool. A `mcp_tool` permission rule (all servers or one `server`, all bots or one bot) can allow calls without asking, except in webhook-triggered runs. Stdio servers inherit the server process environment (with `HOME` pointing at the engine home) plus their configured `env`. Tool results from a custom server reach the model unfiltered; a server that echoes its own credentials exposes them to the model (they stay redacted in the browser).
 
 ## Bot messages
 
@@ -105,6 +113,13 @@ All JSON mutations send `Content-Type: application/json` and `X-Grok-Bot: 1`. Th
 | POST | `/api/permission-rules` | `{ category, action, botId? }` | `AppState`, status 201; allow rules loopback only |
 | PATCH | `/api/permission-rules/:id` | `{ action }` | `AppState`; switching to allow loopback only |
 | DELETE | `/api/permission-rules/:id` | `{}` | `AppState`; deleting an ask rule loopback only |
+| GET | `/api/vault` | | `{ canEdit }` (loopback clients only may edit) |
+| POST | `/api/secrets` | `{ name, value, botId? }` | `AppState`, status 201; loopback only |
+| PUT | `/api/secrets/:id` | `{ value }` | `AppState`; loopback only |
+| DELETE | `/api/secrets/:id` | `{}` | `AppState`; loopback only |
+| GET | `/api/bots/:botId/mcp-servers` | | `{ json }` ("MCP 서버 JSON"); loopback only |
+| PUT | `/api/bots/:botId/mcp-servers` | `{ json }` | `AppState`; loopback only, idle only |
+| PATCH | `/api/bots/:botId/mcp-servers/:name` | `{ enabled }` | `AppState`; enabling loopback only |
 | POST | `/api/conversations` | `{ botId }` | `{ conversation, state }` |
 | POST | `/api/conversations/:id/messages` | `{ text }` | `AppState`, status 202 |
 | POST | `/api/conversations/:id/attachment-messages` | `{ text, attachments: [{ name, mimeType, data }] }` (body up to about 15 MiB) | `AppState`, status 202 |
@@ -125,7 +140,7 @@ All JSON mutations send `Content-Type: application/json` and `X-Grok-Bot: 1`. Th
 | GET | `/api/computer/preview?owner=&epoch=&frame=` | loopback only | no-store PNG |
 | POST | `/api/computer/actions` | `{ ownerId, requestId, epoch, frameId, action }`, loopback only | `ComputerObservation` |
 
-Errors use `{ error: string }` and an appropriate non-2xx status. Mutations that conflict with an active run return 409. Settings changes invalidate runtime session attachments. State snapshots and SSE exclude API keys.
+Errors use `{ error: string }` and an appropriate non-2xx status. Mutations that conflict with an active run return 409. Settings changes invalidate runtime session attachments. State snapshots and SSE exclude API keys and vault secret values and redact both wherever they appear.
 
 ## Implementation ownership
 

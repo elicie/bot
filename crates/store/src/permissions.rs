@@ -32,7 +32,11 @@ pub enum PermissionPolicy {
 
 /// Persisted rule shape beyond what serde checks.
 pub(crate) fn rule_valid(rule: &PermissionRule) -> bool {
-    is_uuid(&rule.id) && rule.bot_id.as_deref().is_none_or(is_uuid) && is_timestamp(&rule.created_at) && is_timestamp(&rule.updated_at)
+    is_uuid(&rule.id)
+        && rule.bot_id.as_deref().is_none_or(is_uuid)
+        && rule.server.as_deref().is_none_or(|server| rule.category == PermissionCategory::McpTool && crate::vault::server_name_valid(server))
+        && is_timestamp(&rule.created_at)
+        && is_timestamp(&rule.updated_at)
 }
 
 /// Load-time set checks: bounded count, unique IDs, one rule per (category, bot scope).
@@ -41,21 +45,30 @@ pub(crate) fn rules_valid(rules: &[PermissionRule]) -> bool {
         return false;
     }
     let ids: std::collections::HashSet<&str> = rules.iter().map(|rule| rule.id.as_str()).collect();
-    let scopes: std::collections::HashSet<(PermissionCategory, Option<&str>)> =
-        rules.iter().map(|rule| (rule.category, rule.bot_id.as_deref())).collect();
+    let scopes: std::collections::HashSet<(PermissionCategory, Option<&str>, Option<&str>)> =
+        rules.iter().map(|rule| (rule.category, rule.bot_id.as_deref(), rule.server.as_deref())).collect();
     ids.len() == rules.len() && scopes.len() == rules.len()
 }
 
 /// Rules of `rules` that govern `category` for `bot_id`, decided with ask precedence.
 pub fn policy_for(rules: &[PermissionRule], category: PermissionCategory, bot_id: &str) -> PermissionPolicy {
-    let matching = rules.iter().filter(|rule| rule.category == category && rule.bot_id.as_deref().is_none_or(|id| id == bot_id));
+    policy_for_server(rules, category, bot_id, None)
+}
+
+/// [`policy_for`] for a `mcp_tool` call to custom server `server`: rules limited to that server
+/// apply in addition to the rules for every server. A server-limited rule never matches `None`.
+pub fn policy_for_server(rules: &[PermissionRule], category: PermissionCategory, bot_id: &str, server: Option<&str>) -> PermissionPolicy {
+    let matching = rules.iter().filter(|rule| {
+        rule.category == category && rule.bot_id.as_deref().is_none_or(|id| id == bot_id) && rule.server.as_deref().is_none_or(|name| Some(name) == server)
+    });
+    let specificity = |rule: &PermissionRule| usize::from(rule.bot_id.is_some()) + usize::from(rule.server.is_some());
     let mut allow: Option<&PermissionRule> = None;
     for rule in matching {
         match rule.action {
             PermissionAction::Ask => return PermissionPolicy::Ask,
-            // A bot-specific allow is reported in preference to the all-bots allow.
+            // The most specific allow (bot and/or server) is reported in preference to broader ones.
             PermissionAction::Allow => {
-                if allow.is_none_or(|current| current.bot_id.is_none()) {
+                if allow.is_none_or(|current| specificity(current) < specificity(rule)) {
                     allow = Some(rule);
                 }
             }
@@ -86,11 +99,21 @@ impl State {
         policy_for(&self.disk.permission_rules, category, bot_id)
     }
 
+    /// The `mcp_tool` policy for one custom server of one bot.
+    pub fn mcp_tool_policy(&self, bot_id: &str, server: &str) -> PermissionPolicy {
+        policy_for_server(&self.disk.permission_rules, PermissionCategory::McpTool, bot_id, Some(server))
+    }
+
     pub fn add_permission_rule(&mut self, input: PermissionRuleInput, may_loosen: bool) -> HttpResult<PermissionRule> {
         if let Some(bot_id) = input.bot_id.as_deref()
             && !is_uuid(bot_id)
         {
             return Err(HttpError::bad_request("botId: Invalid uuid"));
+        }
+        if let Some(server) = input.server.as_deref()
+            && (input.category != PermissionCategory::McpTool || !crate::vault::server_name_valid(server))
+        {
+            return Err(HttpError::bad_request("server: only mcp_tool rules can name a custom MCP server, and the name must be a valid server name"));
         }
         self.assert_writable()?;
         if input.action == PermissionAction::Allow {
@@ -102,7 +125,7 @@ impl State {
         if self.disk.permission_rules.len() >= MAX_PERMISSION_RULES {
             return Err(HttpError::conflict("At most 100 permission rules can be saved."));
         }
-        if self.disk.permission_rules.iter().any(|rule| rule.category == input.category && rule.bot_id == input.bot_id) {
+        if self.disk.permission_rules.iter().any(|rule| rule.category == input.category && rule.bot_id == input.bot_id && rule.server == input.server) {
             return Err(HttpError::conflict("A rule for this action and bot already exists. Edit its action instead."));
         }
         let now = iso(self.now());
@@ -111,6 +134,7 @@ impl State {
             category: input.category,
             action: input.action,
             bot_id: input.bot_id,
+            server: input.server,
             created_at: now.clone(),
             updated_at: now,
         };
@@ -161,6 +185,7 @@ mod tests {
             category,
             action,
             bot_id: bot_id.map(str::to_owned),
+            server: None,
             created_at: "2026-11-01T00:00:00.000Z".into(),
             updated_at: "2026-11-01T00:00:00.000Z".into(),
         }
@@ -186,6 +211,27 @@ mod tests {
         let specific = rule(MemorySave, Allow, Some(&bot));
         let rules = [rule(MemorySave, Allow, None), specific.clone()];
         assert_eq!(policy_for(&rules, MemorySave, &bot), PermissionPolicy::Allow { rule_id: specific.id });
+    }
+
+    #[test]
+    fn mcp_tool_rules_can_be_limited_to_one_server() {
+        use PermissionAction::*;
+        let bot = new_id();
+        let server_allow = PermissionRule { server: Some("github".into()), ..rule(PermissionCategory::McpTool, Allow, Some(&bot)) };
+        let rules = [server_allow.clone()];
+        assert_eq!(policy_for_server(&rules, PermissionCategory::McpTool, &bot, Some("github")), PermissionPolicy::Allow { rule_id: server_allow.id.clone() });
+        assert_eq!(policy_for_server(&rules, PermissionCategory::McpTool, &bot, Some("other")), PermissionPolicy::Ask);
+        assert_eq!(policy_for(&rules, PermissionCategory::McpTool, &bot), PermissionPolicy::Ask);
+        let all = rule(PermissionCategory::McpTool, Allow, None);
+        let rules = [all.clone(), server_allow.clone()];
+        assert_eq!(policy_for_server(&rules, PermissionCategory::McpTool, &bot, Some("github")), PermissionPolicy::Allow { rule_id: server_allow.id.clone() });
+        assert_eq!(policy_for_server(&rules, PermissionCategory::McpTool, &bot, Some("other")), PermissionPolicy::Allow { rule_id: all.id.clone() });
+        let ask = PermissionRule { server: Some("other".into()), ..rule(PermissionCategory::McpTool, Ask, None) };
+        let rules = [all.clone(), ask];
+        assert_eq!(policy_for_server(&rules, PermissionCategory::McpTool, &bot, Some("other")), PermissionPolicy::Ask);
+        assert!(rules_valid(&[all.clone(), server_allow.clone()]), "server scopes are distinct");
+        assert!(!rule_valid(&PermissionRule { server: Some("github".into()), ..rule(PermissionCategory::FileWrite, Allow, None) }));
+        assert!(!rule_valid(&PermissionRule { server: Some("workspace".into()), ..all }));
     }
 
     #[test]

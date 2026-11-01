@@ -6,6 +6,7 @@ import { type Action, type FilesState, isDirty } from './state';
 import { Avatar, IconButton } from './ui';
 import { Files } from './Files';
 import { BotDataSections } from './BotData';
+import { BotIntegrations } from './Vault';
 import './workspace.css';
 
 export type DetailsTab = 'details' | 'library' | 'computer';
@@ -62,6 +63,7 @@ export function Details({ bot, conversation, data, files, dispatch, tab, onTab, 
           <button className="small-button routine-add" onClick={onRoutines}><Repeat2 size={14} />루틴 추가</button>
         </section>
         <BotDataSections bot={bot} data={data} dispatch={dispatch} onBotCreated={onBotCreated} />
+        <BotIntegrations bot={bot} data={data} dispatch={dispatch} />
         <section className="details-section"><h3>대화</h3><dl className="details-values"><div><dt>모델</dt><dd>{data.settings.model || '미설정'}</dd></div><div><dt>파일 접근</dt><dd>{data.settings.workspace ? '작업 폴더 연결됨' : '폴더 미연결'}</dd></div></dl></section>
       </>}
       {tab === 'library' && <section className="details-section"><header><h3>대화에서 사용한 파일</h3><button className="text-button" onClick={() => changeTab('computer')}>파일 열기</button></header>
