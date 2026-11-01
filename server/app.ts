@@ -6,6 +6,9 @@ import { z } from 'zod';
 import { HttpError, WorkspaceFiles } from './files.js';
 import { baseUrl, checkProvider, Store } from './store.js';
 import { GrokRuntime, type RuntimeOptions } from './runtime.js';
+import { ApplicationComputer, installComputerRoutes, isLocalComputerRequest } from './computer-api.js';
+import type { ManagedComputerOptions } from './computer.js';
+import { projectComputerPermissions, projectResponse } from './public-state.js';
 import { RoutineScheduler, routineInputSchema, type EnqueueCommand, type RoutineSchedulerOptions } from './routines.js';
 
 const name = z.string().trim().min(1).max(100);
@@ -20,6 +23,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export interface BackendOptions {
   dataDir: string;
   runtime?: RuntimeOptions;
+  computer?: ManagedComputerOptions;
   routines?: RoutineSchedulerOptions;
   dev?: boolean;
   serveWeb?: boolean;
@@ -45,7 +49,8 @@ export async function createBackend(options: BackendOptions): Promise<{
     commandTail = result.catch(() => {});
     return result;
   };
-  const runtime = new GrokRuntime(store, options.runtime, command);
+  const computer = new ApplicationComputer(store, options.computer);
+  const runtime = new GrokRuntime(store, options.runtime, command, computer);
   await runtime.initialize();
   const routines = new RoutineScheduler(store, runtime, command, options.routines);
   app.disable('x-powered-by');
@@ -90,19 +95,26 @@ export async function createBackend(options: BackendOptions): Promise<{
     }
     next();
   });
+  app.use('/api', (request, response, next) => {
+    const local = isLocalComputerRequest(request);
+    const json = response.json.bind(response);
+    response.json = body => json(projectResponse(body, local));
+    next();
+  });
   app.use(express.json({ limit: '2mb', strict: true }));
   const state = (_request: Request, response: Response) => { response.json(store.snapshot()); };
   const workspace = () => {
     if (!store.settings.workspace) throw new HttpError(400, 'Choose a workspace in settings first.');
     return new WorkspaceFiles(store.settings.workspace);
   };
+  installComputerRoutes(app, store, computer, command);
   app.get('/api/state', state);
   app.get('/api/events', (request, response) => {
     response.status(200).set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     response.flushHeaders();
     const send = (snapshot: ReturnType<Store['snapshot']>) => {
       if (response.writableLength > 4 * 1024 * 1024) { response.destroy(); return; }
-      response.write(`event: state\ndata: ${JSON.stringify(snapshot)}\n\n`);
+      response.write(`event: state\ndata: ${JSON.stringify(projectComputerPermissions(snapshot, isLocalComputerRequest(request)))}\n\n`);
     };
     send(store.snapshot());
     streams.add(response);
@@ -186,7 +198,7 @@ export async function createBackend(options: BackendOptions): Promise<{
   });
   app.post('/api/conversations/:id/permissions/:permissionId', async (request, response) => {
     const input = z.object({ optionId: z.string().min(1).max(256) }).strict().parse(request.body);
-    await command(() => runtime.resolve(String(request.params.id), String(request.params.permissionId), input.optionId));
+    await command(() => runtime.resolve(String(request.params.id), String(request.params.permissionId), input.optionId, isLocalComputerRequest(request)));
     response.json(store.snapshot());
   });
   app.get('/api/files', async (request, response) => {
@@ -249,6 +261,7 @@ export async function createBackend(options: BackendOptions): Promise<{
         await commandTail;
         await runtime.shutdown();
       } finally {
+        await computer.stop();
         for (const response of streams) response.end();
         await vite?.close();
         await new Promise<void>((resolve, reject) => {

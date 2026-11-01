@@ -8,6 +8,7 @@ export interface ToolActivity {
   input?: string;
   output?: string;
   paths?: string[];
+  localOnly?: boolean;
 }
 export interface Message {
   id: string;
@@ -53,6 +54,7 @@ export interface PendingPermission {
   description: string;
   options: PermissionOption[];
   paths: string[];
+  localOnly?: boolean;
 }
 export interface RunState {
   id: string;

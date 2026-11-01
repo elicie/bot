@@ -10,11 +10,12 @@ import { botDeliverySchema, botExchangeSchema, botMessageInputSchema, existingBo
 
 const toolSchema = z.object({
   id: z.string(), title: z.string(), kind: z.string(), status: z.enum(['pending', 'in_progress', 'completed', 'failed']),
-  input: z.string().optional(), output: z.string().optional(), paths: z.array(z.string()).optional(),
+  input: z.string().optional(), output: z.string().optional(), paths: z.array(z.string()).optional(), localOnly: z.boolean().optional(),
 }).strict();
 const permissionSchema = z.object({
   id: z.string(), title: z.string(), kind: z.string(), description: z.string(), paths: z.array(z.string()),
   options: z.array(z.object({ id: z.string(), label: z.string(), kind: z.string() }).strict()),
+  localOnly: z.boolean().optional(),
 }).strict();
 const botSchema = z.object({ id: z.string().uuid(), name: z.string(), color: z.string(), instructions: z.string(), createdAt: z.string() }).strict();
 const conversationSchema = z.object({
