@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 
-export async function startTestApp(options: { network?: boolean; hostname?: string } = {}) {
+export async function startTestApp(options: { network?: boolean; hostname?: string; env?: Record<string, string> } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'grok-bot-e2e-'));
   const workspace = join(root, 'workspace');
   const dataDir = join(root, 'private-data');
@@ -28,7 +28,7 @@ export async function startTestApp(options: { network?: boolean; hostname?: stri
   const [command, args] = rust ? [rustBinary, []] : [process.execPath, ['--import', 'tsx', 'server/index.ts', '--dev']];
   const child: ChildProcess = spawn(command, args, {
     cwd: process.cwd(),
-    env: { ...process.env, HOST: options.network ? '0.0.0.0' : '127.0.0.1', PORT: String(port), GROK_BOT_ALLOWED_HOSTS: options.network ? options.hostname ?? 'grok-bot.test' : '', GROK_BOT_DATA_DIR: dataDir, NODE_ENV: 'test' },
+    env: { ...process.env, HOST: options.network ? '0.0.0.0' : '127.0.0.1', PORT: String(port), GROK_BOT_ALLOWED_HOSTS: options.network ? options.hostname ?? 'grok-bot.test' : '', GROK_BOT_DATA_DIR: dataDir, NODE_ENV: 'test', ...options.env },
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: process.platform !== 'win32',
   });

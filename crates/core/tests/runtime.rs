@@ -681,8 +681,8 @@ async fn file_approvals_and_sessions(f: &Fixture) {
     );
     let outcomes = tool_outcomes(&after).join("\n");
     assert!(
-        outcomes.contains("Tool not found: workspace__computer_observe"),
-        "computer tools are not offered: {outcomes}"
+        outcomes.contains("Managed browser is unavailable."),
+        "computer tools need a managed browser: {outcomes}"
     );
     assert!(outcomes.to_lowercase().contains("traversal"), "{outcomes}");
     assert!(outcomes.contains("Symbolic links"), "{outcomes}");

@@ -1,6 +1,6 @@
 //! Per-run workspace MCP broker (`POST /internal/mcp/:runId`). Port of `mcp()`, `brokerCall()`,
-//! `sendBotMessage()`, and `createSkill()` in `server/runtime.ts`. The managed-computer tools are
-//! not offered in this build; their names fail like any unknown tool.
+//! `sendBotMessage()`, and `createSkill()` in `server/runtime.ts`. The managed-computer tools live
+//! in [`computer`].
 
 use std::sync::Arc;
 
@@ -21,6 +21,7 @@ use super::text::utf16_len;
 use super::{Run, Runtime, message_mut};
 
 pub(super) mod bot_data;
+pub(super) mod computer;
 pub(super) mod routines;
 
 const MAX_REVIEWABLE_EDIT_BYTES: usize = 160 * 1024;
@@ -44,7 +45,7 @@ fn conflict_finished() -> HttpError {
     HttpError::conflict("Run was cancelled or finished.")
 }
 
-/// `tools/list` result, verbatim from the Node broker minus `computer_observe`/`computer_act`.
+/// `tools/list` result, verbatim from the Node broker.
 pub fn broker_tools() -> Value {
     let mut tools = json!([
         { "name": "list_skills", "description": "List one complete page of enabled private skill IDs, names, and descriptions for the current bot. Pass the returned nextOffset as offset to continue when present. Use read_skill to load relevant instructions. Other bots and disabled skills are inaccessible.", "inputSchema": { "type": "object", "properties": { "offset": { "type": "integer", "minimum": 0, "maximum": 100 } }, "additionalProperties": false } },
@@ -58,6 +59,7 @@ pub fn broker_tools() -> Value {
         { "name": "create_bot", "description": "Propose a new local bot when the user asks for one. Provide its display name and instructions; color (#rrggbb) and avatar shape are optional. Creation requires explicit one-use browser approval. At most one bot per run. Returns the new bot ID and name.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 100 }, "instructions": { "type": "string", "maxLength": 30000 }, "color": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" }, "shape": { "type": "string", "enum": ["blob", "cloud", "square", "spark", "clover", "heart", "flower", "droplet", "pill", "wedge", "house", "star", "hexagon", "pumpkin"] } }, "required": ["name"], "additionalProperties": false } },
     ]);
     if let Some(list) = tools.as_array_mut() {
+        list.splice(3..3, computer::tools());
         list.extend(bot_data::tools());
         list.extend(routines::tools());
     }
@@ -76,6 +78,7 @@ enum ToolCall {
     SendMessage(BotMessageInput),
     CreateBot(BotInput),
     BotData(bot_data::Call),
+    Computer(computer::Call),
     Routine(routines::Call),
     ListFiles {
         path: String,
@@ -133,6 +136,9 @@ fn parse_call(params: &Value) -> BrokerResult<ToolCall> {
     }
     if let Some(call) = routines::parse(name, arguments) {
         return call.map(ToolCall::Routine);
+    }
+    if let Some(call) = computer::parse(name, arguments) {
+        return call.map(ToolCall::Computer);
     }
     Ok(match name {
         "list_skills" => {
@@ -425,6 +431,7 @@ impl Runtime {
             ToolCall::CreateBot(input) => self.create_bot(run, input).await,
             ToolCall::BotData(call) => self.bot_data_call(run, call).await,
             ToolCall::Routine(call) => self.routine_call(run, call).await,
+            ToolCall::Computer(call) => self.computer_call(run, call).await,
             call => self.file_call(run, call).await,
         }
     }
@@ -859,7 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_computer_tools_are_unknown_and_unlisted() {
+    fn managed_computer_tools_are_listed_after_skills_and_strict() {
         let names: Vec<String> = broker_tools()
             .as_array()
             .unwrap()
@@ -872,6 +879,8 @@ mod tests {
                 "list_skills",
                 "read_skill",
                 "create_skill",
+                "computer_observe",
+                "computer_act",
                 "list_files",
                 "read_file",
                 "write_file",
@@ -889,12 +898,30 @@ mod tests {
                 "delete_routine"
             ]
         );
-        assert!(invalid(
-            json!({"name": "computer_observe", "arguments": {}})
+        assert!(matches!(
+            parse_call(&json!({"name": "computer_observe", "arguments": {}})),
+            Ok(ToolCall::Computer(computer::Call::Observe))
         ));
+        assert!(invalid(json!({"name": "computer_observe", "arguments": {"x": 1}})));
         assert!(invalid(
             json!({"name": "computer_act", "arguments": {"epoch": "x", "frameId": null, "action": {"type": "observe"}}})
         ));
+        let epoch = new_id();
+        assert!(matches!(
+            parse_call(&json!({"name": "computer_act", "arguments": {"epoch": epoch, "frameId": null, "action": {"type": "click", "x": 10, "y": 20.5}}})),
+            Ok(ToolCall::Computer(computer::Call::Act { action, frame_id: None, .. })) if action == json!({"type": "click", "x": 10, "y": 20.5})
+        ));
+        for action in [
+            json!({"type": "click", "x": 960, "y": 1}),
+            json!({"type": "key", "key": "Control+L"}),
+            json!({"type": "scroll", "deltaY": 1.5}),
+            json!({"type": "type", "text": ""}),
+            json!({"type": "observe", "extra": true}),
+            json!({"type": "evaluate", "script": "1"}),
+        ] {
+            assert!(invalid(json!({"name": "computer_act", "arguments": {"epoch": epoch, "frameId": null, "action": action}})), "{action}");
+        }
+        assert!(invalid(json!({"name": "computer_act", "arguments": {"epoch": epoch, "action": {"type": "observe"}}})));
     }
 
     #[test]
