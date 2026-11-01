@@ -184,6 +184,7 @@ async fn dispatch(runtime: &Arc<Runtime>, event: EngineEvent) {
                 let _ = respond.send(response);
             });
         }
+        EngineEvent::Extension { method, params } => runtime.extension(&method, params).await,
     }
 }
 

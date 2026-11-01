@@ -20,4 +20,5 @@ pub mod public_state;
 pub mod queue;
 pub mod runtime;
 pub mod scheduler;
+mod vault_http;
 pub mod webhooks;

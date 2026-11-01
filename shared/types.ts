@@ -1,3 +1,4 @@
+import type { PublicMcpServer, PublicSecret } from './vault';
 export type RunStatus = 'idle' | 'starting' | 'running' | 'awaiting_permission' | 'completed' | 'cancelled' | 'error' | 'interrupted';
 export type ToolStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
 export interface ToolActivity {
@@ -228,8 +229,12 @@ export interface AppState {
   routineSchedulingError?: string;
   settings: PublicSettings;
   runtime: RuntimeInfo;
+  /** Vault secret names and scopes (never values). */
+  secrets?: PublicSecret[];
+  /** Custom MCP server summaries. */
+  mcpServers?: PublicMcpServer[];
 }
-export type PermissionCategory = 'file_write' | 'bot_message' | 'bot_create' | 'skill_save' | 'memory_save';
+export type PermissionCategory = 'file_write' | 'bot_message' | 'bot_create' | 'skill_save' | 'memory_save' | 'mcp_tool';
 export type PermissionAction = 'ask' | 'allow';
 export interface PermissionRule {
   id: string;
@@ -237,6 +242,8 @@ export interface PermissionRule {
   action: PermissionAction;
   /** Absent: the rule applies to every bot. */
   botId?: string;
+  /** `mcp_tool` only: the custom MCP server the rule is limited to (absent: every server). */
+  server?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -244,6 +251,7 @@ export interface PermissionRuleInput {
   category: PermissionCategory;
   action: PermissionAction;
   botId?: string;
+  server?: string;
 }
 export interface PermissionRuleList {
   rules: PermissionRule[];

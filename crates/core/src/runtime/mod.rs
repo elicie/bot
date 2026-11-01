@@ -12,6 +12,7 @@
 
 pub mod attachments;
 mod broker;
+mod custom_mcp;
 mod engine;
 mod permissions;
 pub mod text;
@@ -137,6 +138,10 @@ pub(crate) struct Run {
     fresh_prompt: Option<String>,
     loaded_prompt: Option<String>,
     extra_rules: Option<String>,
+    /// Redaction keys: the provider API key and every vault secret value (longest first).
+    keys: Vec<String>,
+    /// The bot's enabled custom MCP servers, resolved for this run (none for recipients).
+    mcp: custom_mcp::RunMcp,
     flags: Mutex<RunFlags>,
     /// Wakes the inactivity watcher after updates and approval changes.
     activity: tokio::sync::Notify,
@@ -158,16 +163,12 @@ impl Run {
         flags.stopped || flags.finishing
     }
 
-    fn key(&self) -> &str {
-        &self.settings.api_key
-    }
-
     fn redact(&self, value: &str) -> String {
-        redact(self.key(), value, Some(MAX_PUBLIC_TEXT))
+        redact(&self.keys, value, Some(MAX_PUBLIC_TEXT))
     }
 
     fn redact_all(&self, value: &str) -> String {
-        redact(self.key(), value, None)
+        redact(&self.keys, value, None)
     }
 
     async fn stopped(&self) {
@@ -275,11 +276,13 @@ fn mentions_computer(probe: &str) -> bool {
 }
 
 /// The approval card for an engine permission request, or `None` when the request must be
-/// cancelled: only broker tools may ask, never for execute/delete/move kinds, and only one-use
-/// options are offered (persistent "always" modes are dropped).
+/// cancelled: only broker tools (or, with `custom`, a tool of one of the run's custom MCP servers)
+/// may ask, never for execute/delete/move kinds, and only one-use options are offered (persistent
+/// "always" modes are dropped).
 fn permission_card(
-    key: &str,
+    key: &[String],
     request: &acp::RequestPermissionRequest,
+    custom: bool,
 ) -> Option<PendingPermission> {
     let call = serde_json::to_value(&request.tool_call).unwrap_or_default();
     let name = call["title"].as_str().unwrap_or_default();
@@ -292,7 +295,8 @@ fn permission_card(
         "getmcptools",
     ]
     .iter()
-    .any(|n| lowered.contains(n));
+    .any(|n| lowered.contains(n))
+        || custom;
     let kind = call["kind"].as_str().unwrap_or_default();
     if !broker_tool
         || ["execute", "delete", "move"]
@@ -460,7 +464,7 @@ impl Runtime {
         let requested = prompt.map(str::to_owned);
         let metas: Vec<grok_bot_model::Attachment> =
             attachments.iter().map(|a| a.meta.clone()).collect();
-        let (run_id, message_id, settings, plan) = self
+        let (run_id, message_id, settings, plan, extras) = self
             .store
             .mutate(move |state| {
                 state.assert_idle()?;
@@ -547,15 +551,22 @@ impl Runtime {
                 {
                     delivery.execution_run_id = Some(run_id.clone());
                 }
-                Ok((run_id, message_id, settings, plan))
+                // Recipient (bot-message) conversations get no custom MCP servers.
+                let recipient = state.disk().bot_deliveries.iter().any(|d| d.recipient_conversation_id == id);
+                let (servers, failures) = if recipient { Default::default() } else { state.resolve_mcp_servers(&plan.bot.id) };
+                let mcp_fingerprint = if recipient { None } else { state.mcp_fingerprint(&plan.bot.id) };
+                let extras = (state.redaction_keys(), (servers, failures), mcp_fingerprint);
+                Ok((run_id, message_id, settings, plan, extras))
             })
             .await?;
+        let (keys, (servers, failures), mcp_fingerprint) = extras;
+        let mcp = custom_mcp::RunMcp::new(servers, failures);
         let bot = plan.bot;
         let skills = bot.skills.clone().unwrap_or_default();
         let fingerprint = session_fingerprint(
             &settings,
             &bot,
-            &bot_context_fingerprint(&skill_fingerprint(&skills), &bot),
+            &custom_mcp::context_fingerprint(bot_context_fingerprint(&skill_fingerprint(&skills), &bot), mcp_fingerprint),
             ENGINE_SOURCE_REVISION,
         );
         let run = Arc::new(Run {
@@ -572,6 +583,8 @@ impl Runtime {
             fresh_prompt: plan.fresh_prompt,
             loaded_prompt: plan.loaded_prompt,
             extra_rules: plan.rules,
+            keys,
+            mcp,
             flags: Mutex::new(RunFlags {
                 skills,
                 ..RunFlags::default()
@@ -677,6 +690,7 @@ impl Runtime {
         ));
         lines.extend(broker::bot_data::rules(run, recipient));
         lines.extend(broker::routines::rules(recipient));
+        lines.extend(run.mcp.rules());
         Ok(lines
             .into_iter()
             .filter(|line| !line.is_empty())
@@ -685,7 +699,7 @@ impl Runtime {
     }
 
     fn session_meta(&self, run: &Run) -> HttpResult<acp::Meta> {
-        let meta = json!({
+        let mut meta = json!({
             // The rules go in the agent profile's `promptBody`, not `_meta.rules`: upstream folds
             // `_meta.rules` into the prompt only when a session is created, and a loaded session
             // that runs a turn re-renders its head without them, so from the second reload on the
@@ -701,6 +715,9 @@ impl Runtime {
                 "discoverSkills": false, "inheritSkills": false, "permissionMode": "default",
             },
         });
+        if let Some(config) = run.mcp.meta_config() {
+            meta["mcpConfig"] = config;
+        }
         Ok(meta.as_object().cloned().unwrap_or_default())
     }
 
@@ -710,13 +727,15 @@ impl Runtime {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        vec![acp::McpServer::Http(
+        let mut servers = vec![acp::McpServer::Http(
             acp::McpServerHttp::new("workspace", format!("{origin}/internal/mcp/{}", run.run_id))
                 .headers(vec![acp::HttpHeader::new(
                     "Authorization",
                     format!("Bearer {}", run.token),
                 )]),
-        )]
+        )];
+        servers.extend(run.mcp.acp_servers());
+        servers
     }
 
     /// Engine, session (loaded when the fingerprint matches, otherwise new), and the prompt to send.
@@ -781,7 +800,7 @@ impl Runtime {
                 })
                 .await
                 .map_err(|_| SAVE_ERROR.to_owned())?;
-                run.fresh_prompt.clone().unwrap_or_else(|| continuation_prompt(run.key(), &run.history, prompt))
+                run.fresh_prompt.clone().unwrap_or_else(|| continuation_prompt(&run.keys, &run.history, prompt))
             }
         };
         // Replayed history of a loaded session must not reach the new assistant message.
@@ -840,6 +859,7 @@ impl Runtime {
         else {
             return Err("Grok Build could not complete the run.".into());
         };
+        self.report_mcp_failures(run).await;
         {
             let mut flags = run.flags();
             flags.accepting_updates = true;
@@ -1050,7 +1070,7 @@ impl Runtime {
                     return Ok(());
                 }
                 let message = message_mut(state, run)?;
-                append_streamed_text(run.key(), &mut flags.text_suffix, &mut message.text, &chunk);
+                append_streamed_text(&run.keys, &mut flags.text_suffix, &mut message.text, &chunk);
                 Ok(())
             })
             .await
@@ -1153,7 +1173,10 @@ impl Runtime {
         if run.inactive() {
             return engine::cancelled_permission();
         }
-        let Some(permission) = permission_card(run.key(), &request) else {
+        if let Some((server, tool)) = run.mcp.requested_server(&request) {
+            return self.custom_tool_permission(&run, &server, &tool, request).await;
+        }
+        let Some(permission) = permission_card(&run.keys, &request, false) else {
             return engine::cancelled_permission();
         };
         match self.approve(&run, permission, None).await {
@@ -1346,12 +1369,13 @@ mod tests {
     #[test]
     fn permission_requests_keep_one_use_options_for_broker_tools_only() {
         let card = permission_card(
-            "secret",
+            &["secret".to_owned()],
             &request(
                 "use_tool",
                 acp::ToolKind::Other,
                 json!({"tool_name": "workspace__read_file", "path": "secret"}),
             ),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -1375,33 +1399,23 @@ mod tests {
             r#"{"tool_name":"workspace__read_file","path":"[redacted]"}"#
         );
         assert_eq!(card.local_only, None);
-        assert!(
-            permission_card(
-                "",
-                &request("run_terminal_cmd", acp::ToolKind::Other, json!({}))
-            )
-            .is_none()
-        );
-        assert!(
-            permission_card("", &request("use_tool", acp::ToolKind::Execute, json!({}))).is_none()
-        );
-        assert!(
-            permission_card(
-                "",
-                &request("workspace__write_file", acp::ToolKind::Delete, json!({}))
-            )
-            .is_none()
-        );
-        assert!(
-            permission_card("", &request("Use_Tool", acp::ToolKind::Edit, json!({}))).is_some()
-        );
+        let keys: Vec<String> = Vec::new();
+        assert!(permission_card(&keys, &request("run_terminal_cmd", acp::ToolKind::Other, json!({})), false).is_none());
+        assert!(permission_card(&keys, &request("use_tool", acp::ToolKind::Execute, json!({})), false).is_none());
+        assert!(permission_card(&keys, &request("workspace__write_file", acp::ToolKind::Delete, json!({})), false).is_none());
+        assert!(permission_card(&keys, &request("Use_Tool", acp::ToolKind::Edit, json!({})), false).is_some());
+        // A custom server tool may ask, but never for execute/delete/move kinds.
+        assert!(permission_card(&keys, &request("fixture__echo", acp::ToolKind::Other, json!({})), false).is_none());
+        assert!(permission_card(&keys, &request("fixture__echo", acp::ToolKind::Other, json!({})), true).is_some());
+        assert!(permission_card(&keys, &request("fixture__echo", acp::ToolKind::Execute, json!({})), true).is_none());
         let computer = permission_card(
-            "",
+            &keys,
             &request(
                 "use_tool",
                 acp::ToolKind::Other,
                 json!({"tool_name": "workspace__computer_act"}),
             ),
+            false,
         )
         .unwrap();
         assert_eq!(computer.local_only, Some(true));

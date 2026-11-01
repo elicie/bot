@@ -167,6 +167,7 @@ fn pump(mut events: tokio::sync::mpsc::UnboundedReceiver<EngineEvent>, observed:
                     };
                     let _ = respond.send(acp::RequestPermissionResponse::new(outcome));
                 }
+                EngineEvent::Extension { .. } => {}
             }
         }
     });

@@ -113,6 +113,7 @@ impl State {
         candidate.bot_exchanges.retain(|e| !exchanges.contains(&e.id) && !e.bot_ids.iter().any(|bot| bot == id));
         // Rules scoped to this bot would otherwise linger as "삭제된 Bot".
         candidate.permission_rules.retain(|rule| rule.bot_id.as_deref() != Some(id));
+        crate::vault::remove_bot(&mut candidate, id);
         // The same reference rules `state.json` loading applies; never commit a state that could not
         // be loaded again.
         crate::disk::references_valid(&candidate).map_err(|_| HttpError::conflict("This bot is still linked to other history and cannot be deleted."))?;

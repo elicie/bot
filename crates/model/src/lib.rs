@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 
 mod bot_data;
 pub use bot_data::*;
+mod vault;
+pub use vault::*;
 
 pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
@@ -590,6 +592,12 @@ pub struct DiskState {
     pub permission_rules: Vec<PermissionRule>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<Group>,
+    /// Vault secrets ("보관함"). Values never leave the server.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<VaultSecret>,
+    /// Custom MCP servers per bot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<McpServerRecord>,
 }
 
 /// Public snapshot sent to browsers over HTTP and SSE.
@@ -612,6 +620,12 @@ pub struct AppState {
     pub routine_scheduling_error: Option<String>,
     pub settings: PublicSettings,
     pub runtime: RuntimeInfo,
+    /// Secret names and scopes (no values).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<PublicSecret>,
+    /// Custom MCP server summaries (no commands, URLs, environment, or headers).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<PublicMcpServer>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -734,10 +748,12 @@ pub enum PermissionCategory {
     SkillSave,
     /// Bot memory saves.
     MemorySave,
+    /// Tool calls to a bot's custom MCP servers (optionally one server, see `PermissionRule::server`).
+    McpTool,
 }
 
 impl PermissionCategory {
-    pub const ALL: [Self; 5] = [Self::FileWrite, Self::BotMessage, Self::BotCreate, Self::SkillSave, Self::MemorySave];
+    pub const ALL: [Self; 6] = [Self::FileWrite, Self::BotMessage, Self::BotCreate, Self::SkillSave, Self::MemorySave, Self::McpTool];
 }
 
 /// "항상 묻기" (`ask`, the default without rules) or "묻지 않고 허용" (`allow`).
@@ -757,6 +773,10 @@ pub struct PermissionRule {
     pub action: PermissionAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bot_id: Option<String>,
+    /// `mcp_tool` rules only: the custom MCP server name the rule is limited to (absent: every
+    /// custom server).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -769,6 +789,8 @@ pub struct PermissionRuleInput {
     pub action: PermissionAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
 }
 
 /// `PATCH /api/permission-rules/:id` body ("규칙의 동작 편집").
