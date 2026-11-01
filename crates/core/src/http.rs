@@ -246,6 +246,7 @@ pub fn router(ctx: Ctx) -> Router {
         .merge(crate::http_bots::router())
         .merge(crate::permission_rules::routes())
         .merge(crate::webhooks::api_routes())
+        .merge(crate::chat_features::routes())
         .fallback(|| async { (StatusCode::NOT_FOUND, Json(json!({ "error": "API endpoint does not exist." }))) });
     let mut app = Router::new()
         .nest("/api", api)

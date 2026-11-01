@@ -20,6 +20,21 @@ export interface Message {
   tools: ToolActivity[];
   botExchangeIds?: string[];
   sourceBotId?: string;
+  attachments?: Attachment[];
+}
+/** A user attachment; its bytes are served by `GET /api/conversations/:id/attachments/:attachmentId`. */
+export interface Attachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  kind: 'text' | 'image';
+  size: number;
+}
+export interface AttachmentUpload {
+  name: string;
+  mimeType: string;
+  /** Standard base64. */
+  data: string;
 }
 export interface BotExchange {
   id: string;
@@ -96,6 +111,8 @@ export interface Bot {
   skills?: Skill[];
   pinned?: boolean;
   hidden?: boolean;
+  unread?: boolean;
+  notifyOnUpdates?: boolean;
   createdAt: string;
   memories?: import('./bot-data').Memory[];
   knowledge?: import('./bot-data').KnowledgeFile[];

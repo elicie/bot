@@ -138,6 +138,37 @@ pub struct Message {
     pub bot_exchange_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_bot_id: Option<String>,
+    /// Files the user attached to this message (metadata; contents live in private blobs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<Attachment>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AttachmentKind {
+    Text,
+    Image,
+}
+
+/// A user attachment stored with its message. The bytes are in
+/// `<data dir>/attachments/<conversation id>/<attachment id>`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Attachment {
+    pub id: String,
+    pub name: String,
+    pub mime_type: String,
+    pub kind: AttachmentKind,
+    pub size: u64,
+}
+
+/// One file in a message request: `data` is standard base64.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttachmentUpload {
+    pub name: String,
+    pub mime_type: String,
+    pub data: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -303,6 +334,12 @@ pub struct Bot {
     pub pinned: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden: Option<bool>,
+    /// An assistant answer finished in one of this bot's conversations and nobody opened it yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread: Option<bool>,
+    /// Show a browser notification when this bot's runs finish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_on_updates: Option<bool>,
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memories: Option<Vec<Memory>>,

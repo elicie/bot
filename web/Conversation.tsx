@@ -1,5 +1,4 @@
 import { useEffect, useLayoutEffect, useRef, type FormEvent } from 'react';
-import Markdown from 'react-markdown';
 import {
   ArrowDown,
   ArrowUp,
@@ -27,6 +26,8 @@ import type {
 import { activeRun, runLabels } from './state';
 import { Avatar, ErrorNotice, IconButton } from './ui';
 import { BotMessageLinks } from './BotChat';
+import { RichMarkdown } from './RichMarkdown';
+import { AttachButton, AttachmentTray, DropOverlay, MessageAttachments, useFileDrop, type ComposerAttachments } from './Attachments';
 
 const toolLabels = {
   pending: '대기',
@@ -82,7 +83,7 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
     </details>
   );
 }
-function MessageView({ message, bot }: { message: Message; bot: Bot }) {
+function MessageView({ message, bot, conversationId }: { message: Message; bot: Bot; conversationId?: string }) {
   return (
     <article
       className={`message-row ${message.role}`}
@@ -90,24 +91,13 @@ function MessageView({ message, bot }: { message: Message; bot: Bot }) {
     >
       {message.role === 'assistant' && <Avatar color={bot.color} seed={bot.id} shape={bot.shape} size={25} />}
       <div className="message-content">
+        {conversationId && !!message.attachments?.length && (
+          <MessageAttachments conversationId={conversationId} attachments={message.attachments} />
+        )}
         {message.text && (
           <div className="message-bubble">
             {message.role === 'assistant' ? (
-              <Markdown
-                skipHtml
-                components={{
-                  a: ({ children, href }) => (
-                    <a href={href} target="_blank" rel="noopener noreferrer">
-                      {children}
-                    </a>
-                  ),
-                  img: ({ alt }) => (
-                    <span className="markdown-image">[이미지{alt ? ` · ${alt}` : ''}]</span>
-                  ),
-                }}
-              >
-                {message.text}
-              </Markdown>
+              <RichMarkdown text={message.text} />
             ) : (
               <p>{message.text}</p>
             )}
@@ -120,7 +110,7 @@ function MessageView({ message, bot }: { message: Message; bot: Bot }) {
             ))}
           </div>
         )}
-        {(message.text || message.tools.length > 0) && (
+        {(message.text || message.tools.length > 0 || !!message.attachments?.length) && (
           <time className="message-time" dateTime={message.createdAt}>
             {formatTime(message.createdAt)}
           </time>
@@ -302,7 +292,7 @@ export function Transcript({
               {dateKey(message.createdAt) !== dateKey(messages[index - 1]?.createdAt ?? '') && (
                 <div className="date-label">{dateKey(message.createdAt)}</div>
               )}
-              <MessageView message={message} bot={bot} />
+              <MessageView message={message} bot={bot} conversationId={conversation?.id} />
               {data && onBotChat && <BotMessageLinks message={message} data={data} onOpen={onBotChat} />}
             </div>
           ))}
@@ -389,6 +379,7 @@ export function Composer({
   disabled,
   busy,
   model,
+  attachments,
 }: {
   botName: string;
   value: string;
@@ -400,8 +391,13 @@ export function Composer({
   disabled: boolean;
   busy: boolean;
   model: string;
+  /** Pending files of this draft; omitted where attachments are not offered. */
+  attachments?: ComposerAttachments;
 }) {
   const textarea = useRef<HTMLTextAreaElement>(null);
+  const attachable = !!attachments && !disabled && !busy && !running;
+  const drop = useFileDrop(attachable, (files) => attachments?.add(files));
+  const hasFiles = !!attachments?.items.length;
   useLayoutEffect(() => {
     if (!textarea.current) return;
     textarea.current.style.height = '0px';
@@ -409,14 +405,19 @@ export function Composer({
   }, [value]);
   const submit = (event?: FormEvent) => {
     event?.preventDefault();
-    if (!disabled && value.trim() && !busy && !running) onSend();
+    if (!disabled && (value.trim() || hasFiles) && !busy && !running) onSend();
   };
   return (
-    <div className="composer-dock">
+    <div className="composer-dock" {...drop.handlers}>
+      <DropOverlay show={drop.dragging} />
+      {attachments && (
+        <AttachmentTray items={attachments.items} errors={attachments.errors} disabled={busy} onRemove={attachments.remove} onDismiss={attachments.dismiss} />
+      )}
       <form className="composer" onSubmit={submit}>
         <IconButton label="작업 폴더 열기" className="attach-button" onClick={onFiles}>
           <Plus size={20} />
         </IconButton>
+        {attachments && <AttachButton disabled={!attachable} onFiles={attachments.add} />}
         <textarea
           ref={textarea}
           rows={1}
@@ -424,6 +425,12 @@ export function Composer({
           placeholder={`${botName}에게 메시지 보내기`}
           value={value}
           onChange={(event) => onChange(event.target.value)}
+          onPaste={(event) => {
+            const files = [...event.clipboardData.files];
+            if (!attachable || !files.length) return;
+            event.preventDefault();
+            attachments?.add(files);
+          }}
           onKeyDown={(event) => {
             if (
               event.key === 'Enter' &&
@@ -451,7 +458,7 @@ export function Composer({
             className="send-button"
             aria-label="메시지 보내기"
             title="메시지 보내기"
-            disabled={disabled || busy || !value.trim()}
+            disabled={disabled || busy || (!value.trim() && !hasFiles)}
           >
             <ArrowUp size={19} />
           </button>

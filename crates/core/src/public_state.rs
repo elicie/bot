@@ -167,6 +167,7 @@ mod tests {
                 tools: vec![tool("local-tool", Some(true)), tool("file-tool", None), tool("explicit-false", Some(false))],
                 bot_exchange_ids: None,
                 source_bot_id: None,
+                attachments: None,
             }],
             session_id: None,
             session_fingerprint: None,

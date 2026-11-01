@@ -63,6 +63,10 @@ impl Redactor<'_> {
                 }
             }
             self.optional_id(&mut message.source_bot_id);
+            for attachment in message.attachments.iter_mut().flatten() {
+                self.id(&mut attachment.id);
+                self.text(&mut attachment.name);
+            }
         }
         self.optional_id(&mut conversation.session_id);
         self.optional_id(&mut conversation.session_fingerprint);

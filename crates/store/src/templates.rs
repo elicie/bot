@@ -90,6 +90,8 @@ impl State {
             created_at: now,
             memories: (!memories.is_empty()).then_some(memories),
             knowledge: None,
+            unread: None,
+            notify_on_updates: None,
         };
         {
             let mut prospect = self.prospect();

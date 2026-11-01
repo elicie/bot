@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import type {
   AppState,
+  Bot,
   Conversation,
   Routine,
   RoutineInput,
@@ -51,6 +52,9 @@ import {
   type SettingsTab,
 } from './state';
 import { Avatar, ErrorNotice, IconButton, Spinner } from './ui';
+import { BotDeleteDialog, BotMenuExtras } from './BotMenu';
+import { notificationDeniedText, notificationUnavailableText, requestNotificationPermission, useBotActivity } from './activity';
+import { admitFiles, uploads, type PendingAttachment } from './Attachments';
 
 function historyPosition(): number {
   const position: unknown = window.history.state?.grokBotPosition;
@@ -92,6 +96,12 @@ export function App() {
   const queuedRun = queuedRoutineRun(data, conversation);
   const selectionKey = draftKey(state.selection);
   const draft = state.drafts[selectionKey] ?? '';
+  const [pendingFiles, setPendingFiles] = useState<Record<string, PendingAttachment[]>>({});
+  const [fileErrors, setFileErrors] = useState<Record<string, string[]>>({});
+  const pendingRef = useRef(pendingFiles);
+  pendingRef.current = pendingFiles;
+  const [deleting, setDeleting] = useState<Bot | null>(null);
+  const reading = useRef(new Set<string>());
 
   useEffect(() => {
     const controller = new AbortController();
@@ -296,6 +306,42 @@ export function App() {
       dispatch({ type: 'command', command: null });
     }
   };
+  /** Small bot-state updates that must not take the command lock (they run beside active runs). */
+  const botState = async (botId: string, route: 'unread' | 'notify', body: unknown) => {
+    try {
+      const snapshot = await request<AppState>(`/api/bots/${encodeURIComponent(botId)}/${route}`, { method: 'POST', body });
+      dispatch({ type: 'snapshot', data: snapshot });
+    } catch (error) {
+      dispatch({ type: 'error', error: errorText(error) });
+    }
+  };
+  const markRead = (botId: string) => {
+    if (reading.current.has(botId)) return;
+    reading.current.add(botId);
+    void botState(botId, 'unread', { unread: false }).finally(() => reading.current.delete(botId));
+  };
+  const setNotify = async (bot: Bot, enabled: boolean) => {
+    // Ask inside the click so the browser can show its permission prompt.
+    const permission = enabled ? requestNotificationPermission() : null;
+    await botState(bot.id, 'notify', { enabled });
+    if (!permission) return;
+    const support = await permission;
+    if (support === 'unavailable') dispatch({ type: 'error', error: notificationUnavailableText });
+    else if (support === 'denied') dispatch({ type: 'error', error: notificationDeniedText });
+  };
+  const addFiles = async (key: string, files: File[]) => {
+    const { added, errors } = await admitFiles(pendingRef.current[key] ?? [], files);
+    setPendingFiles((all) => ({ ...all, [key]: [...(all[key] ?? []), ...added] }));
+    setFileErrors((all) => ({ ...all, [key]: errors }));
+  };
+  const deleteBot = async (bot: Bot) => {
+    const deleted = await command('bot-delete', async () => {
+      const snapshot = await request<AppState>(`/api/bots/${encodeURIComponent(bot.id)}`, { method: 'DELETE', body: {} });
+      dispatch({ type: 'snapshot', data: snapshot });
+      return true;
+    });
+    if (deleted) setDeleting(null);
+  };
   const openOverlay = (overlay: Overlay) => {
     if (!confirmSkillsNavigation()) return;
     dispatch({ type: 'sidebar', open: false });
@@ -346,9 +392,10 @@ export function App() {
     const before = current.current;
     const selected = selectedBot(before);
     const text = (before.drafts[draftKey(before.selection)] ?? '').trim();
+    const files = pendingRef.current[draftKey(before.selection)] ?? [];
     if (
       !selected ||
-      !text ||
+      (!text && !files.length) ||
       runningConversation(before.data) ||
       queuedRoutineRun(before.data, selectedConversation(before)) ||
       commandLock.current
@@ -388,12 +435,23 @@ export function App() {
         dispatch({ type: 'snapshot', data: created.state });
         selectCreated({ botId: selected.id, conversationId }, version);
       }
-      const snapshot = await request<AppState>(
-        `/api/conversations/${encodeURIComponent(conversationId)}/messages`,
-        { method: 'POST', body: { text } },
-      );
+      const snapshot = files.length
+        ? await request<AppState>(
+            `/api/conversations/${encodeURIComponent(conversationId)}/attachment-messages`,
+            { method: 'POST', body: { text, attachments: await uploads(files) } },
+          )
+        : await request<AppState>(
+            `/api/conversations/${encodeURIComponent(conversationId)}/messages`,
+            { method: 'POST', body: { text } },
+          );
       dispatch({ type: 'snapshot', data: snapshot });
       dispatch({ type: 'draft-sent', key: sentDraftKey, text: originalDraft });
+      if (files.length) {
+        const sent = new Set(files.map((file) => file.key));
+        const originKey = draftKey(origin);
+        setPendingFiles((all) => ({ ...all, [originKey]: (all[originKey] ?? []).filter((file) => !sent.has(file.key)) }));
+        setFileErrors((all) => ({ ...all, [originKey]: [] }));
+      }
     });
   };
   const cancel = async () => {
@@ -496,6 +554,7 @@ export function App() {
     requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus());
   };
   const botConversations = conversationsFor(data, bot?.id ?? null);
+  useBotActivity({ data, selection: state.selection, chat: state.surface.kind === 'chat', onRead: markRead, onOpen: select });
 
 
   return (
@@ -515,6 +574,10 @@ export function App() {
         onSettings={() => settings()} onCapabilities={() => openOverlay({ kind: 'capabilities' })}
         onRoutines={() => { if (state.surface.kind === 'routines') dispatch({ type: 'sidebar', open: false }); else navigate({ selection: current.current.selection, surface: { kind: 'routines' } }); }}
         onPatch={(id, patch) => { void command('bot-layout', async () => { const snapshot = await request<AppState>(`/api/bots/${encodeURIComponent(id)}`, { method: 'PATCH', body: patch }); dispatch({ type: 'snapshot', data: snapshot }); }); }}
+        menuExtras={(item, close) => <BotMenuExtras bot={item} busy={busy || !!globalRun} close={close}
+          onUnread={(target, unread) => void botState(target.id, 'unread', { unread })}
+          onNotify={(target, enabled) => void setNotify(target, enabled)}
+          onDelete={(target) => { dispatch({ type: 'error', error: null }); setDeleting(target); }} />}
       />
       <main
         className="chat-stage reference-chat"
@@ -659,6 +722,13 @@ export function App() {
               disabled={state.connection !== 'online' || !!globalRun || !!queuedRun}
               busy={busy}
               model={data.settings.model}
+              attachments={{
+                items: pendingFiles[selectionKey] ?? [],
+                errors: fileErrors[selectionKey] ?? [],
+                add: (files) => void addFiles(selectionKey, files),
+                remove: (key) => setPendingFiles((all) => ({ ...all, [selectionKey]: (all[selectionKey] ?? []).filter((file) => file.key !== key) })),
+                dismiss: () => setFileErrors((all) => ({ ...all, [selectionKey]: [] })),
+              }}
             />
           </>
         ) : (
@@ -740,6 +810,12 @@ export function App() {
             return saved === true;
           }}
         />
+      )}
+      {deleting && data && (
+        <BotDeleteDialog bot={data.bots.find((item) => item.id === deleting.id) ?? deleting} data={data}
+          busy={state.command === 'bot-delete'} error={state.error}
+          onCancel={() => { setDeleting(null); dispatch({ type: 'error', error: null }); }}
+          onConfirm={() => void deleteBot(deleting)} />
       )}
       {state.overlay?.kind === 'history' && bot && (
         <History

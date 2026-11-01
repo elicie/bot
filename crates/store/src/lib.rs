@@ -19,6 +19,8 @@
 //! Domain methods take the inputs the HTTP layer deserializes and perform the zod validation the
 //! Node routes did (`field: message` errors, status 400) before any other check.
 
+pub mod attachments;
+mod bot_activity;
 pub mod bot_messages;
 mod cron;
 mod disk;
@@ -207,6 +209,8 @@ fn default_state(now: DateTime<Utc>) -> DiskState {
             skills: None,
             pinned: None,
             hidden: None,
+            unread: None,
+            notify_on_updates: None,
             created_at: iso(now),
             memories: None,
             knowledge: None,
@@ -694,6 +698,8 @@ impl State {
             skills: None,
             pinned: input.pinned,
             hidden: None,
+            unread: None,
+            notify_on_updates: None,
             created_at: iso(self.now()),
             memories: None,
             knowledge: None,
