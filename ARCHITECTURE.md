@@ -40,6 +40,16 @@ The recipient runs under its own identity with file and computer tools denied. I
 
 `ApplicationComputer` associates the single browser with a bot, caches local PNG frames, and adds cancellation generations so Stop invalidates pending work across both command queues. HTTP starts/actions share model-run admission. Stop bypasses that queue to interrupt slow navigation. Computer HTTP routes and model permission decisions require a loopback socket; forwarded-address headers grant no trust. LAN snapshots and SSE replace local-only approval/tool details with a content-free stub. Cached PNGs bind to the exact epoch/frame, and coordinate clicks stay disabled until that image loads. Cancellation stops only the browser epoch used by the run. A reverse proxy requires separate authentication and remains outside the deployment contract. Model computer tools operate only on a user-started browser and request one-use local approval for every observation/action. The provider receives redacted URL/title/control text and coordinates; the browser preview uses PNGs locally.
 
+## Read state, deletion, attachments, and rich text
+
+Read state is server-side: `Bot.unread` in `state.json`, shared by every browser and kept across reloads and restarts. A run that finishes as `completed` or `error` marks its bot unread in the same commit; cancellation does not. The browser showing that bot (chat view, visible tab) marks it read again when the answer arrives or when the bot is opened. A manual "읽지 않음으로 표시" stays until the bot is opened again. `Bot.notifyOnUpdates` is per bot on the server; each browser shows a `Notification` only when it holds permission in a secure context (HTTPS or localhost; LAN HTTP falls back silently with a notice). The message sound is a per-browser preference (`localStorage`), synthesized with Web Audio. Read-state and notification changes are allowed during runs.
+
+Deleting a bot requires an idle application (no active run), no queued routine run of the bot or its routines, no queued or running bot message in its delivery graph, and at least one other bot. One commit removes the bot with its skills, its conversations, its routines and their routine history, every delivery and exchange it sent or received plus the deliveries chained from those, the read-only recipient conversations those deliveries created for other bots, and links from surviving messages to removed exchanges. The candidate state must pass the same reference validation as `state.json` loading before it is committed. Afterwards the server removes the deleted conversations' attachment blobs and private engine session directories (`<data>/attachments/<id>`, `<data>/grok/<id>`). Engine-internal session records under the shared `GROK_HOME` are not pruned.
+
+Attachments are sent with `POST /api/conversations/:id/attachment-messages` (base64 JSON, body limit raised for this route only). Limits: 8 files, text 256 KB each and 512 KB together, images (PNG, JPEG, GIF, WebP by signature) 5 MB each, 10 MB per message. `state.json` keeps only metadata on the user message; bytes are owner-only blobs under `<data>/attachments/<conversation>/<attachment>`, served back as `text/plain` or the image type under a sandboxing CSP. Text files reach the engine inside the text prompt as a `<user_attachments>` section of JSON lines whose string values escape `@`, `[`, `:`, and `<`, and the combined text still passes `literal_engine_prompt`, so attachment contents cannot trigger upstream `@path` expansion, `data:` image extraction, or slash commands. Images become ACP image blocks; the pinned Grok Build accepts them although it does not advertise `promptCapabilities.image`, normalizes them, and sends them as Chat Completions `image_url` data URLs (pinned by `crates/core/tests/attachments.rs`). Replacement sessions replay only attachment names.
+
+Assistant Markdown renders KaTeX math (`$…$`, `$$…$$`, `trust: false`) and Mermaid fences (`securityLevel: 'strict'`, shown as an `<img>` of the generated SVG). Both libraries load on first use; formulas that fail show their source, and diagrams that fail show their code. Raw HTML stays skipped.
+
 ## File access
 
 Chat needs a configured provider and model. File access additionally needs an explicitly selected workspace. HTTP and MCP reads and writes use the same confined file service and reject symbolic links, hard links, traversal, binary documents, and oversized files. Linux opens parent directories through pinned descriptors and uses no-follow flags. Explicit Save uses a content hash to detect external changes. The agent runs in an app-private working directory and accesses the user workspace through the MCP broker. Native file tools, shell execution, subagents, and external tools are disabled. The profile declares its exact discovery/invocation tools and disables ambient instruction-file discovery. Attachment-shaped text and leading slash commands are delegated as a literal JSON string so upstream's pre-tool parser cannot expand local paths or dispatch native commands. The visible transcript preserves the original text. This is application-level confinement. It does not claim an OS sandbox against other programs running as the same user.
@@ -56,6 +66,9 @@ All JSON mutations send `Content-Type: application/json` and `X-Grok-Bot: 1`. Th
 | POST | `/api/provider/test` | `{ baseUrl?, apiKey? }` | `ProviderCheck` |
 | POST | `/api/bots` | `{ name, color?, instructions?, shape?, pinned? }` | `AppState` |
 | PATCH | `/api/bots/:id` | `{ name?, color?, instructions?, shape?, pinned?, hidden? }` | `AppState` |
+| DELETE | `/api/bots/:id` | `{}` | `AppState` |
+| POST | `/api/bots/:id/unread` | `{ unread }` | `AppState` |
+| POST | `/api/bots/:id/notify` | `{ enabled }` | `AppState` |
 | POST | `/api/bots/:botId/skills` | `{ name, description, instructions }` | `AppState`, status 201 |
 | POST | `/api/bots/:botId/skills/import` | `{ markdown }` | `AppState`, status 201 |
 | PATCH | `/api/bots/:botId/skills/:id` | `{ revision, name?, description?, instructions?, enabled? }` | `AppState` |
@@ -67,6 +80,8 @@ All JSON mutations send `Content-Type: application/json` and `X-Grok-Bot: 1`. Th
 | POST | `/api/routines/:id/run` | `{}` | `{ run, state }`, status 202 |
 | POST | `/api/conversations` | `{ botId }` | `{ conversation, state }` |
 | POST | `/api/conversations/:id/messages` | `{ text }` | `AppState`, status 202 |
+| POST | `/api/conversations/:id/attachment-messages` | `{ text, attachments: [{ name, mimeType, data }] }` (body up to about 15 MiB) | `AppState`, status 202 |
+| GET | `/api/conversations/:id/attachments/:attachmentId` | | stored bytes (`text/plain` or image) |
 | POST | `/api/conversations/:id/cancel` | `{}` | `AppState` |
 | POST | `/api/conversations/:id/permissions/:permissionId` | `{ optionId }` | `AppState` |
 | GET | `/api/files?path=` | workspace-relative directory | `FileListing` |

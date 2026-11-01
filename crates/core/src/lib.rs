@@ -8,6 +8,7 @@
 //! - `http`, `scheduler`, `app`: coordinator — ports of `server/app.ts` and `RoutineScheduler`
 
 pub mod app;
+pub mod chat_features;
 pub mod http;
 pub mod provider;
 pub mod public_state;

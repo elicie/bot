@@ -10,6 +10,7 @@
 //! - There is no process to kill. Cancellation and inactivity send `session/cancel`; when the prompt
 //!   does not return within `cancel_deadline` the session is abandoned (see [`Runtime::execute`]).
 
+pub mod attachments;
 mod broker;
 mod engine;
 pub mod text;
@@ -28,6 +29,7 @@ use grok_bot_model::{
     PrivateSettings, Role, RunState, RunStatus, RuntimeInfo, Skill, ToolActivity, ToolStatus, iso,
     new_id,
 };
+use grok_bot_store::attachments::PreparedAttachment;
 use grok_bot_store::skills::{skill_fingerprint, skill_response_text};
 use grok_bot_store::{State, Store};
 use serde_json::{Value, json};
@@ -118,6 +120,8 @@ pub(crate) struct Run {
     token: String,
     fingerprint: String,
     history: Vec<(Role, String)>,
+    /// Files attached to this turn's user message (text inline, images as ACP image blocks).
+    attachments: Vec<PreparedAttachment>,
     flags: Mutex<RunFlags>,
     /// Wakes the inactivity watcher after updates and approval changes.
     activity: tokio::sync::Notify,
@@ -393,6 +397,18 @@ impl Runtime {
     /// Append the user prompt and an empty assistant message, then run the turn in the background.
     /// Errors match the Node runtime (409 when busy, 503 engine unavailable, 400 no provider).
     pub async fn start(&self, conversation_id: &str, prompt: &str) -> HttpResult<()> {
+        self.start_with_attachments(conversation_id, prompt, Vec::new())
+            .await
+    }
+
+    /// [`Runtime::start`] with user attachments whose blobs the caller already stored. The prompt
+    /// may be empty when files are attached.
+    pub async fn start_with_attachments(
+        &self,
+        conversation_id: &str,
+        prompt: &str,
+        attachments: Vec<PreparedAttachment>,
+    ) -> HttpResult<()> {
         let closing = self.closing.load(Ordering::SeqCst);
         let origin = self
             .origin
@@ -401,6 +417,8 @@ impl Runtime {
             .clone();
         let id = conversation_id.to_owned();
         let text = prompt.to_owned();
+        let metas: Vec<grok_bot_model::Attachment> =
+            attachments.iter().map(|a| a.meta.clone()).collect();
         let (run_id, message_id, settings, bot, history) = self
             .store
             .mutate(move |state| {
@@ -432,7 +450,12 @@ impl Runtime {
                 let history: Vec<(Role, String)> = conversation
                     .messages
                     .iter()
-                    .map(|m| (m.role, m.text.clone()))
+                    .map(|m| {
+                        (
+                            m.role,
+                            attachments::history_text(&m.text, m.attachments.as_deref()),
+                        )
+                    })
                     .collect();
                 let delivery = state
                     .disk()
@@ -453,6 +476,7 @@ impl Runtime {
                     tools: Vec::new(),
                     bot_exchange_ids: None,
                     source_bot_id: delivery.as_ref().map(|(_, from)| from.clone()),
+                    attachments: (!metas.is_empty()).then(|| metas.clone()),
                 });
                 conversation.messages.push(Message {
                     id: message_id.clone(),
@@ -462,9 +486,13 @@ impl Runtime {
                     tools: Vec::new(),
                     bot_exchange_ids: None,
                     source_bot_id: None,
+                    attachments: None,
                 });
                 if conversation.messages.len() == 2 {
-                    conversation.title = conversation_title(&text);
+                    conversation.title = match metas.first() {
+                        Some(first) if text.trim().is_empty() => conversation_title(&first.name),
+                        _ => conversation_title(&text),
+                    };
                 }
                 conversation.updated_at = now.clone();
                 conversation.run = RunState {
@@ -501,6 +529,7 @@ impl Runtime {
             token: random_token(),
             fingerprint,
             history,
+            attachments,
             flags: Mutex::new(RunFlags {
                 skills,
                 ..RunFlags::default()
@@ -768,12 +797,14 @@ impl Runtime {
         })
         .await
         .map_err(|_| SAVE_ERROR.to_owned())?;
-        let request = acp::PromptRequest::new(
-            session_id.clone(),
-            vec![acp::ContentBlock::Text(acp::TextContent::new(
-                literal_engine_prompt(&request_prompt),
-            ))],
-        );
+        let mut blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
+            literal_engine_prompt(&attachments::attachment_prompt(
+                &request_prompt,
+                &run.attachments,
+            )),
+        ))];
+        blocks.extend(attachments::image_blocks(&run.attachments));
+        let request = acp::PromptRequest::new(session_id.clone(), blocks);
         let host = Arc::clone(&engine.host);
         let prompt = host.prompt(request);
         tokio::pin!(prompt);
@@ -911,6 +942,10 @@ impl Runtime {
                 if abandoned {
                     conversation.session_id = None;
                     conversation.session_fingerprint = None;
+                }
+                if !stopped {
+                    // A finished answer (or failure) is new activity for the bot's unread state.
+                    let _ = state.mark_conversation_unread(&run.conversation_id);
                 }
                 Ok(())
             })

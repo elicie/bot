@@ -18,6 +18,7 @@ import type { AppState, ProviderCheck, SettingsInput } from '../shared/types';
 import { errorText, request } from './api';
 import type { SettingsTab } from './state';
 import { ErrorNotice, IconButton, Modal, Spinner } from './ui';
+import { NotificationSettings } from './ActivitySettings';
 import './settings.css';
 
 interface FormState {
@@ -377,6 +378,7 @@ export function Settings({
                   </p>
                   {preferenceError && <ErrorNotice>{preferenceError}</ErrorNotice>}
                 </section>
+                <NotificationSettings />
                 <section className="settings-section">
                   <h3>실행 환경</h3>
                   <RuntimeDetails runtime={data.runtime} />

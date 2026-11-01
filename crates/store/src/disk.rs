@@ -67,6 +67,7 @@ pub(crate) fn schema_valid(disk: &mut DiskState) -> bool {
                 is_uuid(&message.id)
                     && message.bot_exchange_ids.as_ref().is_none_or(|ids| ids.len() <= 1 && ids.iter().all(|id| is_uuid(id)))
                     && message.source_bot_id.as_deref().is_none_or(is_uuid)
+                    && message.attachments.as_deref().is_none_or(crate::attachments::attachments_valid)
             })
     });
     conversations

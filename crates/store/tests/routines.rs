@@ -59,6 +59,7 @@ async fn version_one_migration_retains_bots_settings_secrets_messages_and_sessio
                 tools: vec![],
                 bot_exchange_ids: None,
                 source_bot_id: None,
+                attachments: None,
             });
             c.run = RunState { id: "saved-run".into(), status: RunStatus::Completed, ..RunState::idle() };
             Ok(())
@@ -575,6 +576,7 @@ async fn routine_count_is_bounded_and_oversize_mutations_leave_existing_state_un
             tools: vec![],
             bot_exchange_ids: None,
             source_bot_id: None,
+            attachments: None,
         }],
         session_id: None,
         session_fingerprint: None,
