@@ -14,6 +14,7 @@ grok-bot-files.workspace = true
 grok-bot-model.workspace = true
 grok-bot-store.workspace = true
 hex.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
