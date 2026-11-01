@@ -19,9 +19,15 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }
 sha2.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process"] }
 uuid.workspace = true
 axum = "0.8"
+# Managed computer: Chrome over a CDP pipe, loopback proxy, URL policy.
+base64 = "0.22"
+httparse = "1"
+libc = "0.2"
+tempfile = "3"
+url = "2"
 futures = "0.3"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs"] }

@@ -1,6 +1,6 @@
 # Rust 백엔드 전환 설계안
 
-작성일: 2026-11-01 · 상태: P0–P2 완료 (관리형 Chrome 제외), P3 대기
+작성일: 2026-11-01 · 상태: P0–P3 완료, P4 대기
 
 ## 목표
 
@@ -99,7 +99,7 @@ crates/
   broker/     MCP JSON-RPC 서버, 도구 스키마, 승인 대기열
   files/      작업 폴더 confinement
   routines/   스케줄(once/interval/daily+IANA), 클레임 복구
-  computer/   관리형 Chrome (chromiumoxide 등 CDP 라이브러리)
+  computer/   관리형 Chrome (CDP 파이프 클라이언트, loopback 프록시, 출처 정책)
 ```
 
 `async-openai` 패치와 `Cargo.lock` 고정 방식은 기존 `engine/Cargo.toml`을 그대로 따릅니다.
@@ -140,7 +140,7 @@ Rust 서버(`crates/server`, 실행 파일 `grok-bot`)가 기존 HTTP 계약, �
 | 검증 | 결과 |
 | --- | --- |
 | `npm run test:rust` (workspace 전체) | 통과. 저장소 43, 파일 15, core 25 + HTTP API·런타임 통합, 엔진 P0 |
-| `npm run test:e2e:rust` (Rust 서버 + Chrome) | 19개 통과. `computer.spec.ts`는 제외 |
+| `npm run test:e2e:rust` (Rust 서버 + Chrome) | 19개 통과 (당시 `computer.spec.ts` 제외, P3에서 포함) |
 | 기존 Node 백엔드 `npm test` | 94개 통과 (P4에서 삭제 전까지 유지) |
 | 기존 `~/.local/share/grok-bot-q/state.json` | Rust 서버에서 그대로 로드. Rust가 쓴 파일도 Node `Store.open`에서 로드 |
 
@@ -151,12 +151,32 @@ TS 대비 의도된 차이:
 - 세션 fingerprint 태그를 `broker-v7-inprocess`로 바꿨습니다. 이전 엔진 세션은 load하지 않고 최근 대화 64KiB를 넘겨 이어갑니다.
 - API 키를 엔진 설정 파일(`<data>/engine/home/.grok/config.toml`, 0600)에도 저장합니다.
 - 공급자 오류 메시지에 엔진이 보고한 상세(상태 코드 등)가 함께 표시됩니다.
-- 관리형 Chrome: 상태 조회는 "중지됨"을 반환하고 시작 요청은 503입니다. 모델에도 해당 도구를 노출하지 않습니다.
 - 파일 목록 정렬은 ICU `localeCompare`를 근사합니다. ASCII와 일반 문자는 같고, 드문 기호나 로캘별 규칙은 다를 수 있습니다.
 - 시간대는 chrono-tz(tz database)를 씁니다. ICU만 아는 일부 별칭(예: `US/Pacific-New`)은 거절합니다.
+
+## P3 결과 (2026-11-01)
+
+관리형 Chrome을 `crates/core/src/computer/`로 이식했습니다. `server/computer.ts`, `server/computer-network.ts`, `server/computer-api.ts`의 메시지, 상태 코드, 한도, 보안 속성을 그대로 따릅니다. 모델 도구 `computer_observe`/`computer_act`는 `runtime/broker/computer.rs`, HTTP 경로는 `computer_http.rs`에 있습니다.
+
+- Chrome 제어: 외부 CDP 크레이트 없이 `--remote-debugging-pipe`(fd 3/4, NUL 구분 JSON)로 직접 통신합니다. 디버깅 포트를 열지 않으므로 같은 컴퓨터의 다른 프로세스가 붙을 수 없습니다(Playwright와 같은 전송 방식). 시스템 Google Chrome(`/opt/google/chrome/chrome`)을 실행마다 새 0700 프로필로 띄우고, Node와 같은 보호 플래그·명령줄 검증·`chrome://sandbox` seccomp 확인·프록시/DNS 탐침을 통과해야 시작합니다. 실패하면 대체 실행 없이 중지합니다.
+- 프록시: `tokio` + `httparse`로 만든 인증 loopback 포워드 프록시입니다. 모든 DNS 응답이 공인 주소여야 하고, 검증한 주소에 직접 연결합니다(재해석 없음).
+- 테스트 전용 주입: `GROK_BOT_COMPUTER_TEST_ORIGINS`(loopback fixture 출처)는 debug 빌드를 `NODE_ENV=test`로 실행할 때만 읽습니다. release 빌드에서는 켤 수 없습니다.
+
+| 검증 | 결과 |
+| --- | --- |
+| `cargo test --workspace` | 통과. core 단위 43(관리형 컴퓨터 16 포함), `computer_http` 통합(loopback 전용, LAN 투영) |
+| `npm run test:e2e:rust` | 42개 통과 (`computer.spec.ts` 3개 포함) |
+
+TS 대비 의도된 차이:
+
+- 페이지 관찰 스크립트(조작 요소 추출, 클릭/입력 대상 검사, 본문 읽기)는 페이지의 메인 world가 아니라 매번 새로 만든 격리 world에서 실행합니다. 페이지 스크립트가 DOM 함수를 바꿔 민감한 입력란을 숨길 수 없습니다.
+- 새 페이지(팝업)는 실행되기 전에 닫고, 자식 프레임과 워커는 요청 가드(프레임은 초기화 스크립트도)를 건 뒤에만 실행합니다. 서비스 워커와 공유 워커는 일시 정지 상태로 둡니다. 파일 선택 대화상자는 가로채서 열지 않습니다.
+- 렌더러 충돌도 페이지 닫힘과 같이 세션을 중지합니다.
+- Chrome 프로필(겸 TMPDIR)은 `/tmp` 아래에 만듭니다. 엔진이 프로세스 TMPDIR을 데이터 폴더 깊이 바꿔 Chrome 싱글톤 소켓 경로가 Unix 소켓 길이 제한을 넘기 때문입니다.
+- 프록시는 응답 본문을 원래 프레이밍(`Content-Length`/`Transfer-Encoding`) 그대로 중계하고, `Proxy-Connection` 헤더도 홉 헤더로 제거합니다.
 
 ## 결정이 필요한 것
 
 1. 웹 버전에서 프론트 빌드 결과를 바이너리에 내장할지, `dist/` 폴더를 서빙할지 (현재 `dist/` 서빙, 데스크톱은 Tauri가 번들링)
 
-결정됨: 기존 상태 파일 호환 유지, 관리형 Chrome은 P3에서 이식.
+결정됨: 기존 상태 파일 호환 유지, 관리형 Chrome은 P3에서 이식(완료).

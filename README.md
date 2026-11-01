@@ -96,7 +96,7 @@ Google Chrome과 동작하는 호스트 샌드박스가 필요합니다. 샌드�
 
 ## Rust 서버 (전환 중)
 
-백엔드를 Rust로 옮기는 중입니다. 설계와 진행 상황은 [docs/rust-migration.md](docs/rust-migration.md)에 있습니다. Rust 서버는 같은 화면과 데이터 폴더를 사용하며, 관리형 Chrome은 아직 포함하지 않습니다.
+백엔드를 Rust로 옮기는 중입니다. 설계와 진행 상황은 [docs/rust-migration.md](docs/rust-migration.md)에 있습니다. Rust 서버는 같은 화면과 데이터 폴더를 사용하며, 관리형 Chrome도 같은 보호 조건으로 제공합니다.
 
 ```sh
 npm install
