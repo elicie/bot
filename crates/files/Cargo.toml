@@ -8,5 +8,10 @@ publish.workspace = true
 [dependencies]
 grok-bot-model.workspace = true
 hex.workspace = true
+rustix = { version = "1", features = ["fs", "std"] }
 sha2.workspace = true
+unicode-normalization = "0.1"
 uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

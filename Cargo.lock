@@ -4085,6 +4085,7 @@ dependencies = [
  "grok-bot-model",
  "grok-bot-store",
  "hex",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -4118,7 +4119,10 @@ version = "0.1.0"
 dependencies = [
  "grok-bot-model",
  "hex",
+ "rustix 1.1.6",
  "sha2 0.10.9",
+ "tempfile",
+ "unicode-normalization",
  "uuid",
 ]
 
