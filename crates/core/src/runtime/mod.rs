@@ -680,9 +680,15 @@ impl Runtime {
 
     fn session_meta(&self, run: &Run) -> HttpResult<acp::Meta> {
         let meta = json!({
-            "yoloMode": false, "autoMode": false, "rules": self.rules(run)?,
+            // The rules go in the agent profile's `promptBody`, not `_meta.rules`: upstream folds
+            // `_meta.rules` into the prompt only when a session is created, and a loaded session
+            // that runs a turn re-renders its head without them, so from the second reload on the
+            // bot would lose its instructions and tool rules. The profile is part of the agent
+            // definition and is applied on every create, load, and harness rebuild.
+            "yoloMode": false, "autoMode": false,
             "agentProfile": {
                 "name": "grok-bot-scoped", "description": "Workspace broker only", "promptMode": "extend",
+                "promptBody": self.rules(run)?,
                 "injectDefaultTools": false, "agentsMd": false,
                 "toolConfig": {"tools": [{"id": "GrokBuild:search_tool"}, {"id": "GrokBuild:use_tool"}]},
                 "tools": ["search_tool", "use_tool"], "disallowedTools": DENIED_BUILTIN_TOOLS,

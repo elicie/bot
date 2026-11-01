@@ -1490,6 +1490,26 @@ async fn chat_routines(f: &Fixture) {
     assert!(f.store.read(|s| s.disk().routines.is_empty()), "approved deletion removes the routine");
 }
 
+async fn rules_survive_session_reloads(f: &Fixture) {
+    f.configure("", false).await;
+    let bot = f.bot_id();
+    let patch = grok_bot_model::BotPatch { instructions: Some("RULES_CANARY_7Q".into()), ..grok_bot_model::BotPatch::default() };
+    let target = bot.clone();
+    f.store.mutate(move |s| s.update_bot(&target, patch)).await.unwrap();
+    let id = f.conversation(&bot).await;
+    for turn in 1..=5 {
+        f.provider.clear();
+        f.provider.plan(vec![text(&format!("answer {turn}"))]);
+        f.runtime.start(&id, &format!("turn {turn}")).await.unwrap();
+        f.completed(&id).await;
+        let requests = f.provider.inference();
+        let request = requests.last().expect("main inference request");
+        let system: String = messages(request).iter().filter(|m| m["role"] == "system").map(|m| content_text(&m["content"])).collect::<Vec<_>>().join("\n");
+        eprintln!("[runtime] turn {turn}: system prompt {} chars, canary {}", system.len(), system.contains("RULES_CANARY_7Q"));
+        assert!(system.contains("RULES_CANARY_7Q"), "turn {turn} lost the session rules");
+    }
+}
+
 async fn bot_messages(f: &Fixture) {
     f.configure("", true).await;
     let sender = f.bot_id();
@@ -1936,6 +1956,7 @@ fn runtime_on_the_in_process_engine() {
                 eprintln!("[runtime] {} ok in {:?}", $name, started.elapsed());
             }};
         }
+        scenario!("rules-reload", Options::default(), rules_survive_session_reloads);
         scenario!("files", Options::default(), file_approvals_and_sessions);
         scenario!("scripted", Options::default(), scripted_file_reply_flow);
         scenario!("fingerprint", Options::default(), fingerprint_migration);
