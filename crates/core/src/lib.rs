@@ -9,6 +9,7 @@
 
 pub mod app;
 pub mod http;
+mod http_bots;
 pub mod provider;
 pub mod public_state;
 pub mod queue;

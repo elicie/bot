@@ -7,6 +7,9 @@ use std::sync::Arc;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
+mod bot_data;
+pub use bot_data::*;
+
 pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
 pub fn system_clock() -> Clock {
@@ -297,6 +300,10 @@ pub struct Bot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden: Option<bool>,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memories: Option<Vec<Memory>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge: Option<Vec<KnowledgeFile>>,
 }
 
 /// Persisted provider settings, including the secret API key. Never sent to browsers.
