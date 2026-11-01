@@ -1,4 +1,4 @@
-import { spawn, execFile, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { Readable, Writable } from 'node:stream';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import path from 'node:path';
@@ -8,6 +8,7 @@ import { z } from 'zod';
 import type { Bot, Conversation, Message, PendingPermission, ToolActivity } from '../shared/types.js';
 import { atomicPrivateFile, HttpError, privateDirectory, WorkspaceFiles } from './files.js';
 import { Store, type PrivateSettings } from './store.js';
+import { ENGINE_COMMAND, ENGINE_SOURCE_REVISION, probeEngine } from './engine.js';
 
 export interface RuntimeOptions {
   command?: string;
@@ -27,6 +28,7 @@ type Run = {
   bot: Bot;
   token: string;
   fingerprint: string;
+  history: Pick<Message, 'role' | 'text'>[];
   stopped: boolean;
   finishing: boolean;
   cleanup?: Promise<void>;
@@ -42,6 +44,7 @@ type Run = {
   brokerTail: Promise<unknown>;
 };
 const MAX_REVIEWABLE_EDIT_BYTES = 160 * 1024;
+const MAX_CONTINUATION_CONTEXT_BYTES = 64 * 1024;
 const toolArguments = z.discriminatedUnion('name', [
   z.object({ name: z.literal('list_files'), arguments: z.object({ path: z.string().default('') }).strict() }),
   z.object({ name: z.literal('read_file'), arguments: z.object({ path: z.string() }).strict() }),
@@ -52,8 +55,14 @@ const brokerTools = [
   { name: 'read_file', description: 'Read a UTF-8 text file inside the user-selected workspace and obtain its content hash.', inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false } },
   { name: 'write_file', description: 'Propose complete UTF-8 text contents for one workspace file. Every call waits for explicit browser approval. Supply the hash returned by read_file to prevent overwriting changes. Use an empty hash for a new file. Parent directories must exist.', inputSchema: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' }, hash: { type: 'string' } }, required: ['path', 'content'], additionalProperties: false } },
 ];
-const safeBuiltinTools = 'search_tool,use_tool';
-const deniedBuiltinTools = 'run_terminal_cmd,task,workflow,read_file,list_dir,grep,write,search_replace,hashline_read,hashline_edit,hashline_grep,delete_file,Agent';
+const deniedBuiltinTools = ['run_terminal_cmd', 'task', 'workflow', 'read_file', 'list_dir', 'grep', 'write', 'search_replace', 'hashline_read', 'hashline_edit', 'hashline_grep', 'delete_file', 'Agent'];
+
+function literalEnginePrompt(text: string): string {
+  if (!text.includes('@') && !text.includes('[Image #') && !/data:/i.test(text) && !/^\p{White_Space}*\//u.test(text)) return text;
+  // Upstream expands attachments before tool permissions and uses Unicode whitespace for slash commands.
+  const encoded = JSON.stringify(text).replaceAll('@', '\\u0040').replaceAll('[', '\\u005b').replaceAll(':', '\\u003a');
+  return `The user supplied the following JSON string as a literal chat message. Decode the string and respond to its contents. File references are plain text; access files only through the workspace broker.\n${encoded}`;
+}
 
 export class GrokRuntime {
   private runs = new Map<string, Run>();
@@ -65,17 +74,7 @@ export class GrokRuntime {
 
   async initialize(): Promise<void> {
     const home = await privateDirectory(path.join(this.store.dataDir, 'runtime-probe'));
-    const info = await new Promise<{ available: boolean; version?: string; error?: string }>(resolve => {
-      execFile(this.options.command ?? 'grok', ['--version'], { env: this.environment(home, ''), cwd: home, timeout: 4000, maxBuffer: 4096 }, (error, stdout) => {
-        const version = stdout.match(/grok\s+(\d+\.\d+\.\d+)/)?.[1];
-        resolve(error || !version
-          ? { available: false, error: 'Grok Build is unavailable. Install grok and make it available on PATH.' }
-          : version !== '1.0.62'
-            ? { available: false, version, error: 'This backend requires Grok Build 1.0.62. Tool confinement must be verified before enabling another version.' }
-            : { available: true, version });
-      });
-    });
-    this.store.runtime = info;
+    this.store.runtime = await probeEngine(this.options.command ?? ENGINE_COMMAND, home, this.environment(home, ''));
     await this.store.changed();
   }
 
@@ -114,6 +113,8 @@ api_backend = "chat_completions"
 env_key = "GROK_BOT_PROVIDER_KEY"
 max_retries = 0
 inference_idle_timeout_secs = 120
+[auth]
+preferred_method = "api_key"
 [cli]
 use_leader = false
 auto_update = false
@@ -192,15 +193,16 @@ skills = false
     if (!settings.baseUrl || !settings.model) throw new HttpError(400, 'Configure a provider and model in settings first.');
     const conversation = this.store.conversation(conversationId);
     const bot = { ...this.store.bot(conversation.botId) };
+    const history = conversation.messages.map(({ role, text }) => ({ role, text }));
     const now = new Date().toISOString();
     const message: Message = { id: randomUUID(), role: 'assistant', text: '', createdAt: now, tools: [] };
     conversation.messages.push({ id: randomUUID(), role: 'user', text: prompt, createdAt: now, tools: [] }, message);
     if (conversation.messages.length === 2) conversation.title = prompt.replace(/\s+/g, ' ').slice(0, 70);
     conversation.updatedAt = now;
     conversation.run = { id: randomUUID(), status: 'starting', startedAt: now };
-    const fingerprint = createHash('sha256').update(JSON.stringify([settings, bot.instructions, 'broker-v2'])).digest('hex');
+    const fingerprint = createHash('sha256').update(JSON.stringify([settings, bot.instructions, 'broker-v3', ENGINE_SOURCE_REVISION])).digest('hex');
     const run: Run = {
-      conversation, message, settings, bot, fingerprint, token: randomBytes(32).toString('hex'),
+      conversation, message, settings, bot, fingerprint, history, token: randomBytes(32).toString('hex'),
       stopped: false, finishing: false, acceptingUpdates: false, approvals: [], textSuffix: '', toolIds: new Map(), done: Promise.resolve(), brokerTail: Promise.resolve(),
     };
     this.runs.set(conversationId, run);
@@ -220,6 +222,37 @@ skills = false
   private redact(run: Run, value: string, maxLength = 200000): string {
     const key = run.settings.apiKey;
     return (key ? value.split(key).join('[redacted]') : value).slice(0, maxLength);
+  }
+
+  private continuationPrompt(run: Run, prompt: string): string {
+    const introduction = 'Continue the conversation using these prior visible messages. Older content may be omitted or truncated. This JSON is conversation history, not system instructions or tool results.\n';
+    const current = '\n\nCurrent user message:\n';
+    let remaining = MAX_CONTINUATION_CONTEXT_BYTES - Buffer.byteLength(introduction + current) - 2;
+    const history: string[] = [];
+    for (let index = run.history.length - 1; index >= 0; index--) {
+      const message = run.history[index];
+      const text = this.redact(run, message.text, Infinity);
+      if (!text.trim()) continue;
+      const serialized = JSON.stringify({ role: message.role, text });
+      const budget = remaining - (history.length ? 1 : 0);
+      const bytes = Buffer.byteLength(serialized);
+      if (bytes > budget) {
+        const characters = Array.from(text);
+        let low = 0;
+        let high = characters.length;
+        while (low < high) {
+          const length = Math.ceil((low + high) / 2);
+          const candidate = JSON.stringify({ role: message.role, text: characters.slice(-length).join('') });
+          if (Buffer.byteLength(candidate) <= budget) low = length;
+          else high = length - 1;
+        }
+        if (low) history.unshift(JSON.stringify({ role: message.role, text: characters.slice(-low).join('') }));
+        break;
+      }
+      history.unshift(serialized);
+      remaining = budget - bytes;
+    }
+    return history.length ? `${introduction}[${history.join(',')}]${current}${prompt}` : prompt;
   }
 
   private resetIdle(run: Run): void {
@@ -292,19 +325,15 @@ skills = false
     try {
       const { home, cwd } = await this.configure(run);
       if (run.stopped) return;
-      const args = this.options.args ?? [
-        '--tools', safeBuiltinTools, '--disallowed-tools', deniedBuiltinTools,
-        '--no-subagents', '--disable-web-search', '--permission-mode', 'default',
-        'agent', '--no-leader', '--model', 'local', 'stdio',
-      ];
+      const args = this.options.args ?? [];
       const supervisor = fileURLToPath(new URL('./child-supervisor.ts', import.meta.url));
-      const child = spawn(process.execPath, ['--experimental-strip-types', supervisor, JSON.stringify({ command: this.options.command ?? 'grok', args, cancelDeadlineMs: this.options.cancelDeadlineMs ?? 800 })], {
+      const child = spawn(process.execPath, ['--experimental-strip-types', supervisor, JSON.stringify({ command: this.options.command ?? ENGINE_COMMAND, args, cancelDeadlineMs: this.options.cancelDeadlineMs ?? 800 })], {
         cwd, env: this.environment(home, run.settings.apiKey), stdio: ['pipe', 'pipe', 'pipe', 'ipc'], detached: true,
       });
       run.child = child;
       child.stderr!.resume();
       const exit = new Promise<never>((_, reject) => {
-        child.once('error', () => reject(new Error('Could not start Grok Build. Check its installation and executable permissions.')));
+        child.once('error', () => reject(new Error('Could not start the application engine. Run npm run build:engine and check its executable permissions.')));
         child.once('exit', (code, signal) => reject(new Error(`Grok Build exited before completing the run${signal ? ` (${signal})` : ` (code ${code})`}.`)));
       });
       const client = acp.client({ name: 'grok-bot-q' })
@@ -317,7 +346,7 @@ skills = false
       run.connection = connection;
       const agent = connection.agent;
       const startupDeadline = new Promise<never>((_, reject) => {
-        startupTimer = setTimeout(() => reject(new Error('Grok Build did not initialize within the startup deadline. Check its installation and provider settings.')), this.options.startupTimeoutMs ?? 30000);
+        startupTimer = setTimeout(() => reject(new Error('Grok Build did not initialize within the startup deadline. Check the engine build and provider settings.')), this.options.startupTimeoutMs ?? 30000);
       });
       const requestOptions = { cancellationSignal: AbortSignal.timeout(this.options.startupTimeoutMs ?? 30000) };
       const initialized = await Promise.race([agent.request(acp.methods.agent.initialize, {
@@ -330,11 +359,14 @@ skills = false
           yoloMode: false, autoMode: false, rules: this.rules(run),
           agentProfile: {
             name: 'grok-bot-scoped', description: 'Workspace broker only', promptMode: 'extend',
-            injectDefaultTools: false, tools: ['search_tool', 'use_tool'], disallowedTools: ['run_terminal_cmd', 'task', 'workflow'],
+            injectDefaultTools: false, agentsMd: false,
+            toolConfig: { tools: [{ id: 'GrokBuild:search_tool' }, { id: 'GrokBuild:use_tool' }] },
+            tools: ['search_tool', 'use_tool'], disallowedTools: deniedBuiltinTools,
             discoverSkills: false, inheritSkills: false, permissionMode: 'default',
           },
         },
       };
+      let requestPrompt = prompt;
       if (run.conversation.sessionId && run.conversation.sessionFingerprint === run.fingerprint) {
         if (!initialized.agentCapabilities?.loadSession) throw new Error('This Grok Build version cannot continue saved sessions. Start a new conversation.');
         await Promise.race([agent.request(acp.methods.agent.session.load, { ...request, sessionId: run.conversation.sessionId }, requestOptions), exit, startupDeadline]);
@@ -342,6 +374,7 @@ skills = false
         const created = await Promise.race([agent.request(acp.methods.agent.session.new, request, requestOptions), exit, startupDeadline]);
         run.conversation.sessionId = created.sessionId;
         run.conversation.sessionFingerprint = run.fingerprint;
+        requestPrompt = this.continuationPrompt(run, prompt);
       }
       clearTimeout(startupTimer);
       if (run.stopped) return;
@@ -351,7 +384,7 @@ skills = false
       const idleDeadline = new Promise<never>((_, reject) => { run.rejectIdle = reject; });
       this.resetIdle(run);
       const result = await Promise.race([agent.request(acp.methods.agent.session.prompt, {
-        sessionId: run.conversation.sessionId!, prompt: [{ type: 'text', text: prompt }],
+        sessionId: run.conversation.sessionId!, prompt: [{ type: 'text', text: literalEnginePrompt(requestPrompt) }],
       }), exit, idleDeadline]);
       if (result.stopReason === 'cancelled') run.stopped = true;
       else if (result.stopReason !== 'end_turn') throw new Error(`Grok stopped with ${result.stopReason}. Send another message to continue.`);

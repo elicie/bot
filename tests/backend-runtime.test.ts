@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
+import childProcess, { spawn } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { WorkspaceFiles } from '../server/files.js';
 import type { AddressInfo } from 'node:net';
 import { createBackend } from '../server/app.js';
+import { GrokRuntime } from '../server/runtime.js';
 import type { AppState, Conversation } from '../shared/types.js';
 
 const fakeAgent = `#!/usr/bin/env node
@@ -15,7 +18,10 @@ import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
-if (process.argv.includes('--version')) { console.log('grok 1.0.62 (test fixture)'); process.exit(0); }
+import { appendFileSync } from 'node:fs';
+if (process.argv.includes('--version')) { console.log('grok-bot-engine 0.1.0 (2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8)'); process.exit(0); }
+const rootIndex = process.argv.indexOf('--fixture-root');
+const fixtureRoot = rootIndex === -1 ? undefined : process.argv[rootIndex + 1];
 const send = value => process.stdout.write(JSON.stringify({jsonrpc:'2.0',...value})+'\\n');
 let sessionId;
 let broker;
@@ -35,6 +41,7 @@ async function mcp(name,args) {
 }
 createInterface({input:process.stdin}).on('line',async line=>{
  const message = JSON.parse(line);
+ if(fixtureRoot && message.method)appendFileSync(fixtureRoot+'/requests.jsonl',JSON.stringify(message)+'\\n');
  if(message.result && pending.has(message.id)){pending.get(message.id)(message.result);pending.delete(message.id);return;}
  const {id,method,params}=message;
  if(method==='initialize'&&process.argv.includes('--stall-initialize'))return;
@@ -47,9 +54,13 @@ createInterface({input:process.stdin}).on('line',async line=>{
  if(method==='session/cancel'){return;}
  if(method==='session/prompt'){
   const prompt=params.prompt[0].text;
+  if(prompt==='inspect-runtime'){
+   update({sessionUpdate:'agent_message_chunk',content:{type:'text',text:JSON.stringify({args:process.argv.slice(2),home:process.env.HOME,grokHome:process.env.GROK_HOME,cwd:process.cwd()})}});
+   response(id,{stopReason:'end_turn'});return;
+  }
   if(prompt==='finish-during-preimage'){
    process.once('SIGUSR1',()=>response(id,{stopReason:'end_turn'}));
-   await writeFile(process.argv[process.argv.indexOf('--fixture-root')+1]+'/broker.json',JSON.stringify(broker));
+   await writeFile(fixtureRoot+'/broker.json',JSON.stringify(broker));
    update({sessionUpdate:'agent_message_chunk',content:{type:'text',text:'PID '+process.pid}});
    void mcp('write_file',{path:'notes.txt',content:'Must not be saved after the turn ends'});
    return;
@@ -108,15 +119,25 @@ createInterface({input:process.stdin}).on('line',async line=>{
 
 const scratch = tmpdir();
 
-async function fixture(options: { args?: string[]; startupTimeoutMs?: number; promptIdleTimeoutMs?: number } = {}) {
+type AgentRequest = {
+  method: string;
+  params: {
+    sessionId?: string;
+    prompt?: { type: string; text: string }[];
+    _meta?: { agentProfile: { tools: string[]; toolConfig: { tools: { id: string }[] }; disallowedTools: string[]; injectDefaultTools: boolean; agentsMd: boolean; discoverSkills: boolean; inheritSkills: boolean } };
+  };
+};
+
+async function fixture(options: { args?: string[]; startupTimeoutMs?: number; promptIdleTimeoutMs?: number; version?: string } = {}) {
   await mkdir(scratch, { recursive: true });
   const root = await mkdtemp(path.join(scratch, 'grok-bot-backend-runtime-'));
   const workspace = path.join(root, 'workspace');
   await mkdir(workspace);
   await writeFile(path.join(workspace, 'notes.txt'), 'original\n');
   const command = path.join(root, 'fake-agent.mjs');
-  await writeFile(command, fakeAgent, { mode: 0o700 });
-  const backend = await createBackend({ dataDir: path.join(root, 'data'), serveWeb: false, runtime: { command, args: ['--fixture-root', root, ...(options.args ?? [])], cancelDeadlineMs: 50, startupTimeoutMs: options.startupTimeoutMs, promptIdleTimeoutMs: options.promptIdleTimeoutMs } });
+  const source = fakeAgent.replace("rootIndex === -1 ? undefined : process.argv[rootIndex + 1]", JSON.stringify(root));
+  await writeFile(command, options.version === undefined ? source : source.replace('grok-bot-engine 0.1.0 (2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8)', options.version), { mode: 0o700 });
+  const backend = await createBackend({ dataDir: path.join(root, 'data'), serveWeb: false, runtime: { command, args: options.args, cancelDeadlineMs: 50, startupTimeoutMs: options.startupTimeoutMs, promptIdleTimeoutMs: options.promptIdleTimeoutMs } });
   await new Promise<void>(resolve => backend.server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${(backend.server.address() as AddressInfo).port}`;
   async function api(route: string, body?: unknown, method = body === undefined ? 'GET' : 'POST') {
@@ -137,10 +158,101 @@ async function fixture(options: { args?: string[]; startupTimeoutMs?: number; pr
   }
   return {
     root, workspace, backend, api, conversation, wait, state,
+    requests: async () => (await readFile(path.join(root, 'requests.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as AgentRequest),
     send: (text: string) => api(`/api/conversations/${conversation.id}/messages`, { text }),
     close: async () => { await backend.close(); await rm(root, { recursive: true, force: true }); },
   };
 }
+
+test('the default runtime probes only the absolute project engine and reports how to build a missing binary', async t => {
+  const f = await fixture();
+  const calls: { command: unknown; args: unknown }[] = [];
+  t.mock.method(childProcess, 'execFile', (...args: unknown[]) => {
+    calls.push({ command: args[0], args: args[1] });
+    const callback = args[3] as (error: Error, stdout: string, stderr: string) => void;
+    queueMicrotask(() => callback(Object.assign(new Error('missing fixture engine'), { code: 'ENOENT' }), '', ''));
+    return new childProcess.ChildProcess();
+  });
+  syncBuiltinESMExports();
+  try {
+    await new GrokRuntime(f.backend.store).initialize();
+    const expected = fileURLToPath(new URL('../.engine/grok-bot-engine', import.meta.url));
+    assert.equal(path.isAbsolute(expected), true);
+    assert.deepEqual(calls, [{ command: expected, args: ['--version'] }]);
+    const runtime = (await f.state()).runtime;
+    assert.equal(runtime.available, false);
+    assert.match(runtime.error!, /npm run build:engine/);
+    assert.doesNotMatch(runtime.error!, /install|PATH/i);
+    assert.equal((await f.send('blocked while the engine is missing')).status, 503);
+    assert.equal((await f.state()).conversations[0].messages.length, 0);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    await f.close();
+  }
+});
+
+test('runtime availability requires the application engine identity, version, and pinned upstream revision', async () => {
+  for (const version of [
+    'grok 1.0.62 (fixture)',
+    'grok-bot-engine 0.1.0 (0000000000000000000000000000000000000000)',
+    'grok-bot-engine 0.2.0 (2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8)',
+  ]) {
+    const f = await fixture({ version });
+    try {
+      const { runtime } = await f.state();
+      assert.equal(runtime.available, false, version);
+      assert.match(runtime.error!, /npm run build:engine/);
+      assert.equal((await f.send('must not start')).status, 503);
+    } finally { await f.close(); }
+  }
+  const f = await fixture();
+  try {
+    assert.deepEqual((await f.state()).runtime, { available: true, version: 'grok-bot-engine 0.1.0 (2bdd1d6a6369)' });
+    await f.send('inspect-runtime');
+    const completed = await f.wait(c => c.run.status === 'completed');
+    const home = path.join(f.root, 'data', 'grok', completed.id, completed.sessionFingerprint!);
+    assert.deepEqual(JSON.parse(completed.messages[1].text), { args: [], home, grokHome: path.join(home, '.grok'), cwd: path.join(home, 'workspace') });
+    const profile = (await f.requests()).find(request => request.method === 'session/new')!.params._meta!.agentProfile;
+    assert.deepEqual(profile.tools, ['search_tool', 'use_tool']);
+    assert.equal(profile.injectDefaultTools, false);
+    assert.equal(profile.agentsMd, false);
+    assert.deepEqual(profile.toolConfig.tools.map(tool => tool.id), ['GrokBuild:search_tool', 'GrokBuild:use_tool']);
+    assert.equal(profile.discoverSkills, false);
+    assert.equal(profile.inheritSkills, false);
+    for (const name of ['run_terminal_cmd', 'task', 'workflow', 'read_file', 'write', 'list_dir', 'grep']) assert.ok(profile.disallowedTools.includes(name));
+  } finally { await f.close(); }
+});
+
+test('attachment-like text, commands, and replacement history arrive as lossless literal JSON without native expansion syntax', async () => {
+  const f = await fixture();
+  try {
+    const prompts = [
+      '@ /etc/passwd and @/tmp/example @../outside.txt and user@example.com',
+      '[Image #1: /tmp/private.png] [Image #２: /tmp/other.png]',
+      '  /mcp install unexpected',
+      '\u0085/compact synthetic',
+      'Keep DATA:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB as literal text',
+      'Unicode 😀 "quoted" \\u0040 and @/tmp/data.txt',
+    ];
+    for (let index = 0; index < prompts.length; index++) {
+      assert.equal((await f.send(prompts[index])).status, 202);
+      await f.wait(c => c.run.status === 'completed' && c.messages.length === (index + 1) * 2);
+      const text = (await f.requests()).filter(request => request.method === 'session/prompt').at(-1)!.params.prompt![0].text;
+      assert.equal(JSON.parse(text.slice(text.indexOf('\n') + 1)), prompts[index].trim());
+      assert.doesNotMatch(text, /@|\[Image #|^\s*\//);
+    }
+    await f.api('/api/settings', { baseUrl: 'http://127.0.0.1:12345/v1', model: 'replacement', workspace: f.workspace }, 'PUT');
+    await f.send('Continue with previous text');
+    const completed = await f.wait(c => c.run.status === 'completed' && c.messages.length === (prompts.length + 1) * 2);
+    assert.equal(completed.messages[0].text, prompts[0]);
+    const text = (await f.requests()).filter(request => request.method === 'session/prompt').at(-1)!.params.prompt![0].text;
+    assert.doesNotMatch(text, /@|\[Image #|^\s*\//);
+    const decoded = JSON.parse(text.slice(text.indexOf('\n') + 1)) as string;
+    assert.ok(decoded.includes(prompts[0]));
+    assert.ok(decoded.endsWith('Current user message:\nContinue with previous text'));
+  } finally { await f.close(); }
+});
 
 test('model-only chat leaves file access unavailable until a workspace is connected', async () => {
   const f = await fixture();
@@ -172,12 +284,100 @@ test('ACP text and tools stream to the selected conversation, thought streams st
     assert.equal(continued.sessionId, sessionId);
     assert.equal(continued.messages[3].text, 'Continued session.');
     assert.equal(JSON.stringify(continued).includes('HISTORICAL'), false);
+    const stableRequests = await f.requests();
+    assert.deepEqual(stableRequests.filter(request => request.method === 'session/new' || request.method === 'session/load').map(request => request.method), ['session/new', 'session/load']);
+    assert.deepEqual(stableRequests.filter(request => request.method === 'session/prompt').map(request => request.params.prompt), [[{ type: 'text', text: 'hello' }], [{ type: 'text', text: 'continue' }]]);
     const update = await f.api('/api/settings', { baseUrl: 'http://127.0.0.1:12345/v1', model: 'changed-model', workspace: f.workspace }, 'PUT');
     assert.equal(update.status, 200);
     assert.equal(((await update.json()) as AppState).conversations[0].sessionId, undefined);
     await f.send('hello again');
     const changed = await f.wait(c => c.run.status === 'completed' && c.messages.length === 6);
     assert.notEqual(changed.sessionId, sessionId);
+    const requests = await f.requests();
+    assert.deepEqual(requests.filter(request => request.method === 'session/new' || request.method === 'session/load').map(request => request.method), ['session/new', 'session/load', 'session/new']);
+    const replayed = requests.filter(request => request.method === 'session/prompt').at(-1)!.params.prompt!;
+    assert.equal(replayed.length, 1);
+    const text = replayed[0].text;
+    assert.deepEqual(JSON.parse(text.slice(text.indexOf('\n') + 1, text.indexOf('\n\nCurrent user message:\n'))), [
+      { role: 'user', text: 'hello' }, { role: 'assistant', text: 'Hello from fake ACP.' },
+      { role: 'user', text: 'continue' }, { role: 'assistant', text: 'Continued session.' },
+    ]);
+    assert.equal(text.split('hello again').length - 1, 1);
+    assert.equal(text.endsWith('Current user message:\nhello again'), true);
+    assert.doesNotMatch(text, /private chain of thought|read-id|read complete|Read notes/);
+  } finally { await f.close(); }
+});
+
+test('legacy and different-source session fingerprints rebuild context once and then load the replacement session', async () => {
+  for (const source of [undefined, '1111111111111111111111111111111111111111']) {
+    const f = await fixture();
+    try {
+      const key = 'continuation-fixture-secret';
+      await f.api('/api/settings', { baseUrl: 'http://127.0.0.1:12345/v1', model: 'fixture', workspace: f.workspace, apiKey: key }, 'PUT');
+      await f.send(`Remember the visible detail ${key}`);
+      const first = await f.wait(c => c.run.status === 'completed');
+      const conversation = f.backend.store.conversation(first.id);
+      const legacySettings = [f.backend.store.settings, f.backend.store.bot(first.botId).instructions, 'broker-v2'];
+      const legacyFingerprint = createHash('sha256').update(JSON.stringify(source ? [...legacySettings, source] : legacySettings)).digest('hex');
+      conversation.sessionFingerprint = legacyFingerprint;
+      await f.backend.store.changed();
+      const prompt = 'Use the remembered detail after the source switch';
+      assert.equal((await f.send(prompt)).status, 202);
+      const migrated = await f.wait(c => c.run.status === 'completed' && c.messages.length === 4);
+      assert.notEqual(migrated.sessionId, first.sessionId);
+      assert.notEqual(migrated.sessionFingerprint, legacyFingerprint);
+      const migratedRequests = await f.requests();
+      assert.deepEqual(migratedRequests.filter(request => request.method === 'session/new' || request.method === 'session/load').map(request => request.method), ['session/new', 'session/new']);
+      const replayed = migratedRequests.filter(request => request.method === 'session/prompt').at(-1)!.params.prompt!;
+      assert.equal(replayed.length, 1);
+      const text = replayed[0].text;
+      assert.deepEqual(JSON.parse(text.slice(text.indexOf('\n') + 1, text.indexOf('\n\nCurrent user message:\n'))), [
+        { role: 'user', text: 'Remember the visible detail [redacted]' }, { role: 'assistant', text: 'Hello from fake ACP.' },
+      ]);
+      assert.equal(text.split(prompt).length - 1, 1);
+      assert.equal(text.endsWith(`Current user message:\n${prompt}`), true);
+      assert.doesNotMatch(text, /continuation-fixture-secret|private chain of thought|read-id|read complete|notes\.txt/);
+      assert.equal((await f.send('Continue without replay')).status, 202);
+      const continued = await f.wait(c => c.run.status === 'completed' && c.messages.length === 6);
+      assert.equal(continued.sessionId, migrated.sessionId);
+      assert.equal(continued.messages.at(-1)!.text, 'Continued session.');
+      assert.equal(JSON.stringify(continued).includes('HISTORICAL'), false);
+      const continuedRequests = await f.requests();
+      assert.deepEqual(continuedRequests.filter(request => request.method === 'session/new' || request.method === 'session/load').map(request => request.method), ['session/new', 'session/new', 'session/load']);
+      assert.deepEqual(continuedRequests.filter(request => request.method === 'session/prompt').at(-1)!.params.prompt, [{ type: 'text', text: 'Continue without replay' }]);
+    } finally { await f.close(); }
+  }
+});
+
+test('replacement session history is bounded in UTF-8 bytes, keeps recent visible messages, and excludes tools and credentials', async () => {
+  const f = await fixture();
+  try {
+    const key = 'bounded-history-fixture-secret';
+    await f.api('/api/settings', { baseUrl: 'http://127.0.0.1:12345/v1', model: 'fixture', workspace: f.workspace, apiKey: key }, 'PUT');
+    const conversation = f.backend.store.conversation(f.conversation.id);
+    const createdAt = new Date().toISOString();
+    conversation.messages.push(
+      { id: randomUUID(), role: 'user', text: 'OLDEST CONTENT SHOULD BE OMITTED', createdAt, tools: [] },
+      { id: randomUUID(), role: 'assistant', text: `OLD PREFIX ${'😀\n"'.repeat(30000)} Visible tail ${key}`, createdAt, tools: [{ id: 'hidden-tool', title: 'TOOL TITLE MUST STAY OUT', kind: 'read', status: 'completed', input: 'TOOL INPUT MUST STAY OUT', output: 'TOOL OUTPUT MUST STAY OUT' }] },
+      { id: randomUUID(), role: 'user', text: 'Recent user detail', createdAt, tools: [] },
+      { id: randomUUID(), role: 'assistant', text: '', createdAt, tools: [] },
+    );
+    await f.backend.store.changed();
+    const prompt = 'Current unicode request 😀';
+    assert.equal((await f.send(prompt)).status, 202);
+    await f.wait(c => c.run.status === 'completed');
+    const requests = await f.requests();
+    const replayed = requests.find(request => request.method === 'session/prompt')!.params.prompt!;
+    assert.equal(replayed.length, 1);
+    const text = replayed[0].text;
+    const historyBytes = Buffer.byteLength(text) - Buffer.byteLength(prompt);
+    assert.ok(historyBytes > 60 * 1024 && historyBytes <= 64 * 1024, `Continuation history used ${historyBytes} bytes.`);
+    const history = JSON.parse(text.slice(text.indexOf('\n') + 1, text.indexOf('\n\nCurrent user message:\n'))) as { role: string; text: string }[];
+    assert.deepEqual(history.map(message => message.role), ['assistant', 'user']);
+    assert.equal(history[0].text.endsWith('Visible tail [redacted]'), true);
+    assert.deepEqual(history[1], { role: 'user', text: 'Recent user detail' });
+    assert.doesNotMatch(text, /OLDEST CONTENT|OLD PREFIX|bounded-history-fixture-secret|TOOL (?:TITLE|INPUT|OUTPUT)|hidden-tool|\uFFFD/);
+    assert.equal(text.split(prompt).length - 1, 1);
   } finally { await f.close(); }
 });
 

@@ -4,13 +4,9 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
-import { execFileSync } from 'node:child_process';
+import { ENGINE_COMMAND } from '../server/engine.js';
 import { createBackend } from '../server/app.js';
 import { startMockProvider, type MockCompletion, type MockProviderRequest } from './mock-provider.js';
-function hasGrok() {
-  try { return /^grok\s+1\.0\.62\b/.test(execFileSync('grok', ['--version'], { encoding: 'utf8', timeout: 5000 })); }
-  catch { return false; }
-}
 export function scriptedFileReply(request: MockProviderRequest): MockCompletion {
   const names = request.tools?.map(tool => tool.function.name) ?? [];
   if (!names.includes('search_tool')) return { text: 'Local fixture title' };
@@ -39,7 +35,7 @@ async function eventually<T>(read: () => T | Promise<T>, check: (value: T) => bo
   return value;
 }
 
-test('real Grok Build uses compatible provider, pauses file writes, denies, and continues sessions', { skip: !hasGrok(), timeout: 100_000 }, async () => {
+test('source-linked Grok Build engine uses compatible provider, pauses file writes, denies, and continues sessions', { timeout: 100_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'grok-runtime-test-'));
   const workspace = join(root, 'workspace');
   await mkdir(workspace);
@@ -55,6 +51,8 @@ test('real Grok Build uses compatible provider, pauses file writes, denies, and 
     return result;
   };
   try {
+    assert.ok(ENGINE_COMMAND.endsWith('/.engine/grok-bot-engine'));
+    assert.equal(backend.store.runtime.available, true, backend.store.runtime.error);
     await api('/api/settings', { baseUrl: provider.baseUrl, model: 'local-test-model', workspace, apiKey: 'private-local-fixture-key' }, 'PUT');
     const botId = backend.store.snapshot().bots[0].id;
     const { conversation } = await api('/api/conversations', { botId });

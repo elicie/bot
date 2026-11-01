@@ -1,0 +1,13 @@
+Grok Bot application engine
+
+This application directly links the Grok Build agent runtime from
+https://github.com/xai-org/grok-build
+Revision: 2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8
+Original monorepo revision: 559751fdcec02d413e4c57c8832ab275e4f44980
+
+The upstream runtime is licensed under Apache-2.0. Its license, third-party
+notices, and tool-source notices are preserved in engine/licenses/.
+
+The application-owned engine entry point, configuration, web integration,
+scheduler, and confined file broker are maintained in this repository.
+The upstream CLI and terminal UI composition root are not built or invoked.

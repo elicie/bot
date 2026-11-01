@@ -4,15 +4,13 @@ import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, symlink } from 'node:
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
-import { execFileSync } from 'node:child_process';
+import { ENGINE_COMMAND } from '../server/engine.js';
 import { createBackend } from '../server/app.js';
 import { startMockProvider, type MockCompletion, type MockProviderRequest } from './mock-provider.js';
+import { randomUUID } from 'node:crypto';
 import type { AppState, Conversation } from '../shared/types.js';
 
-let available = false;
-try { available = /grok 1\.0\.62/.test(execFileSync('grok', ['--version'], { encoding: 'utf8', timeout: 3000 })); } catch {}
-
-test('real Grok exposes only broker tools, blocks bypasses, approves exact disk writes, and continues its ACP session', { skip: !available && 'Requires installed Grok 1.0.62', timeout: 45000 }, async () => {
+test('source-linked app engine exposes only broker tools, blocks bypasses, approves exact disk writes, and continues its ACP session', { timeout: 45000 }, async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'grok-bot-backend-real-'));
   const workspace = path.join(root, 'workspace');
   await mkdir(workspace);
@@ -46,10 +44,13 @@ test('real Grok exposes only broker tools, blocks bypasses, approves exact disk 
     throw new Error(`Timed out waiting for actual Grok. ${JSON.stringify(current)}`);
   }
   try {
+    assert.equal(path.isAbsolute(ENGINE_COMMAND), true);
+    assert.equal(backend.store.runtime.available, true, backend.store.runtime.error);
+    assert.match(backend.store.runtime.version ?? '', /2bdd1d6a/);
     assert.equal((await api('/api/settings', { baseUrl: provider.baseUrl, model: 'local-test-model', workspace }, 'PUT')).status, 200);
     const { conversation } = await (await api('/api/conversations', { botId: backend.store.bots[0].id })).json() as { conversation: Conversation };
     plan = [
-      { tool: { name: 'search_tool', arguments: { query: 'workspace', limit: 3 } } },
+      { tool: { name: 'search_tool', arguments: { query: 'workspace write_file', limit: 3 } } },
       { tool: { name: 'use_tool', arguments: { tool_name: 'workspace__write_file', tool_input: { path: 'notes.txt', content: 'approved by browser\n' } } } },
       { text: 'The approved write succeeded.' },
     ];
@@ -65,7 +66,7 @@ test('real Grok exposes only broker tools, blocks bypasses, approves exact disk 
     assert.ok(inference.length >= 3);
     assert.equal(provider.requests.every(request => request.model === 'local-test-model'), true);
     for (const request of inference) assert.deepEqual(request.tools!.map(tool => tool.function.name).sort(), ['search_tool', 'use_tool']);
-    assert.equal(inference[1].messages.some(message => message.role === 'tool' && String(message.content).includes('workspace__write_file')), true);
+    assert.ok(inference.some(request => request.messages.some(message => message.role === 'tool' && String(message.content).includes('workspace__write_file'))));
     const originalSession = completed.sessionId;
     const beforeContinuation = inference.length;
     plan = [
@@ -129,6 +130,14 @@ test('real Grok exposes only broker tools, blocks bypasses, approves exact disk 
     await api(`/api/conversations/${conversation.id}/messages`, { text: 'Test provider credential redaction.' });
     const redacted = await wait(conversation.id, c => c.run.status === 'completed' && c.messages.length === 10);
     assert.equal(redacted.messages.at(-1)!.text, 'Authenticated local provider reply.');
+    assert.notEqual(redacted.sessionId, originalSession);
+    assert.deepEqual(redacted.messages.slice(0, 2), completed.messages);
+    const replacement = inference.at(-1)!;
+    const replacementPrompt = replacement.messages.filter(message => message.role === 'user').map(message => typeof message.content === 'string' ? message.content : JSON.stringify(message.content)).join('\n');
+    assert.match(replacementPrompt, /The approved write succeeded\./);
+    assert.ok(replacementPrompt.includes('Current user message:'));
+    assert.ok(replacementPrompt.includes('Test provider credential redaction.'));
+    assert.equal(replacement.messages.some(message => message.role === 'tool' || message.tool_calls?.length), false);
     assert.equal(JSON.stringify(await state()).includes(apiKey), false);
     const checkRuntimeFiles = async (directory: string): Promise<void> => {
       for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -138,6 +147,43 @@ test('real Grok exposes only broker tools, blocks bypasses, approves exact disk 
       }
     };
     await checkRuntimeFiles(path.join(root, 'data', 'grok'));
+    const canary = `PRIVATE_CONTENT_${randomUUID()}`;
+    const outside = path.join(root, 'private-canary.txt');
+    await writeFile(outside, canary);
+    const literalPrompts = [
+      `@${outside}`,
+      `@ ${outside}`,
+      `Quoted \`@${outside}\` and (@${outside})`,
+      `/mcp install unexpected @${outside}`,
+      '[Image #1: /tmp/private-image.png]',
+      '\u0085/mcp install unexpected',
+      'Keep DATA:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB as literal text',
+    ];
+    let firstLiteralId = '';
+    for (const text of literalPrompts) {
+      const previous = inference.length;
+      const { conversation: literal } = await (await api('/api/conversations', { botId: backend.store.bots[0].id })).json() as { conversation: Conversation };
+      firstLiteralId ||= literal.id;
+      plan = [{ text: 'Literal prompt accepted.' }];
+      await api(`/api/conversations/${literal.id}/messages`, { text });
+      const finished = await wait(literal.id, c => c.run.status === 'completed');
+      assert.equal(finished.messages[0].text, text);
+      assert.equal(finished.messages[1].text, 'Literal prompt accepted.');
+      const requests = inference.slice(previous);
+      assert.ok(requests.length >= 1);
+      assert.equal(JSON.stringify(requests).includes(canary), false, 'Prompt expansion must never read the external file.');
+      const wireText = requests.flatMap(request => request.messages.filter(message => message.role === 'user').map(message => JSON.stringify(message.content))).join('\n');
+      assert.equal(wireText.includes('<attached_files>'), false);
+      assert.equal(wireText.includes('@'), false);
+    }
+    await api('/api/settings', { baseUrl: provider.baseUrl, model: 'local-test-model', workspace }, 'PUT');
+    plan = [{ text: 'History stayed literal.' }];
+    const beforeReplay = inference.length;
+    const literalConversation = backend.store.conversation(firstLiteralId);
+    await api(`/api/conversations/${literalConversation.id}/messages`, { text: 'Continue after engine context replacement' });
+    await wait(literalConversation.id, c => c.run.status === 'completed' && c.messages.length === 4);
+    assert.equal(JSON.stringify(inference.slice(beforeReplay)).includes(canary), false);
+    assert.equal(await readFile(outside, 'utf8'), canary);
   } finally {
     await backend.close();
     await provider.close();
