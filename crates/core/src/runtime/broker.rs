@@ -21,6 +21,7 @@ use super::text::utf16_len;
 use super::{Run, Runtime, message_mut};
 
 pub(super) mod bot_data;
+pub(super) mod routines;
 
 const MAX_REVIEWABLE_EDIT_BYTES: usize = 160 * 1024;
 const MAX_WRITE_CHARACTERS: usize = 1024 * 1024;
@@ -58,6 +59,7 @@ pub fn broker_tools() -> Value {
     ]);
     if let Some(list) = tools.as_array_mut() {
         list.extend(bot_data::tools());
+        list.extend(routines::tools());
     }
     tools
 }
@@ -74,6 +76,7 @@ enum ToolCall {
     SendMessage(BotMessageInput),
     CreateBot(BotInput),
     BotData(bot_data::Call),
+    Routine(routines::Call),
     ListFiles {
         path: String,
     },
@@ -127,6 +130,9 @@ fn parse_call(params: &Value) -> BrokerResult<ToolCall> {
         .ok_or(BrokerError::Invalid)?;
     if let Some(call) = bot_data::parse(name, arguments) {
         return call.map(ToolCall::BotData);
+    }
+    if let Some(call) = routines::parse(name, arguments) {
+        return call.map(ToolCall::Routine);
     }
     Ok(match name {
         "list_skills" => {
@@ -418,6 +424,7 @@ impl Runtime {
             ToolCall::SendMessage(input) => self.send_bot_message(run, input).await,
             ToolCall::CreateBot(input) => self.create_bot(run, input).await,
             ToolCall::BotData(call) => self.bot_data_call(run, call).await,
+            ToolCall::Routine(call) => self.routine_call(run, call).await,
             call => self.file_call(run, call).await,
         }
     }
@@ -875,7 +882,11 @@ mod tests {
                 "save_memory",
                 "forget_memory",
                 "list_knowledge",
-                "read_knowledge"
+                "read_knowledge",
+                "list_routines",
+                "save_routine",
+                "set_routine_enabled",
+                "delete_routine"
             ]
         );
         assert!(invalid(

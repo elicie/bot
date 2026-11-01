@@ -1426,6 +1426,70 @@ async fn bot_creation(f: &Fixture) {
     assert!(!f.store.read(|s| s.disk().bots.iter().any(|b| b.name == "Denied")), "denied bot must not exist");
 }
 
+async fn chat_routines(f: &Fixture) {
+    f.configure("", true).await;
+    let owner = f.bot_id();
+    let id = f.conversation(&owner).await;
+    let daily = json!({"name": "아침 브리핑", "prompt": "오늘 할 일을 정리해줘", "schedule": {"kind": "daily", "time": "09:30", "timezone": "Asia/Seoul"}});
+    f.provider.clear();
+    f.provider.plan(vec![
+        discover("workspace routines"),
+        use_tool("list_routines", json!({})),
+        use_tool("save_routine", daily.clone()),
+        text("루틴을 만들었어요."),
+    ]);
+    f.runtime.start(&id, "매일 아침 9시 반에 브리핑 루틴 만들어줘").await.unwrap();
+    let pending = f.pending(&id).await;
+    let permission = pending.run.permission.clone().unwrap();
+    assert!(permission.description.contains("루틴을 저장하도록 허용할까요?") && permission.description.contains("매일 09:30 (Asia/Seoul)"), "{permission:?}");
+    assert!(f.store.read(|s| s.disk().routines.is_empty()), "no routine before approval");
+    f.decide(&id, "allow_once").await;
+    let completed = f.completed(&id).await;
+    let routines = f.store.read(|s| s.disk().routines.clone());
+    assert_eq!(routines.len(), 1, "{routines:?}");
+    let routine = routines[0].clone();
+    assert_eq!((routine.bot_id.as_str(), routine.name.as_str(), routine.enabled), (owner.as_str(), "아침 브리핑", true));
+    assert!(routine.next_run_at.is_some());
+    let outcomes = tool_outcomes(&f.provider.inference());
+    assert!(outcomes.iter().any(|o| o.contains("\"now\"")), "list_routines returns the server time: {outcomes:?}");
+    let tool = completed.messages.last().unwrap().tools.iter().find(|t| t.title.starts_with("루틴 생성")).cloned().expect("routine tool card");
+    assert!(tool.output.unwrap_or_default().contains("생성됨 루틴"), "card shows the created label");
+
+    f.provider.clear();
+    f.provider.plan(vec![
+        discover("workspace routines"),
+        use_tool("set_routine_enabled", json!({"id": routine.id, "enabled": false})),
+        text("일시 중지했어요."),
+    ]);
+    f.runtime.start(&id, "그 루틴 잠깐 멈춰줘").await.unwrap();
+    f.decide(&id, "allow_once").await;
+    f.completed(&id).await;
+    let paused = f.store.read(|s| s.disk().routines[0].clone());
+    assert!(!paused.enabled && paused.next_run_at.is_none(), "{paused:?}");
+
+    f.provider.clear();
+    f.provider.plan(vec![
+        discover("workspace routines"),
+        use_tool("delete_routine", json!({"id": routine.id})),
+        text("삭제하지 않았어요."),
+    ]);
+    f.runtime.start(&id, "그 루틴 지워줘").await.unwrap();
+    f.decide(&id, "reject_once").await;
+    f.completed(&id).await;
+    assert_eq!(f.store.read(|s| s.disk().routines.len()), 1, "denied deletion keeps the routine");
+
+    f.provider.clear();
+    f.provider.plan(vec![
+        discover("workspace routines"),
+        use_tool("delete_routine", json!({"id": routine.id})),
+        text("삭제했어요."),
+    ]);
+    f.runtime.start(&id, "이제 정말 지워줘").await.unwrap();
+    f.decide(&id, "allow_once").await;
+    f.completed(&id).await;
+    assert!(f.store.read(|s| s.disk().routines.is_empty()), "approved deletion removes the routine");
+}
+
 async fn bot_messages(f: &Fixture) {
     f.configure("", true).await;
     let sender = f.bot_id();
@@ -1891,6 +1955,7 @@ fn runtime_on_the_in_process_engine() {
         scenario!("bot-creation", Options::default(), bot_creation);
         scenario!("bot-data", Options::default(), bot_memory_and_knowledge);
         scenario!("permission-rules", Options::default(), permission_rules);
+        scenario!("chat-routines", Options::default(), chat_routines);
         scenario!("restart", Options::default(), restart_continuation);
         startup_errors(&base, &engine_root).await;
     });

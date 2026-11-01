@@ -106,6 +106,8 @@ struct RunFlags {
     created_bots: HashMap<String, String>,
     /// Memories saved through `save_memory` this turn.
     memory_saves: usize,
+    /// Routine changes saved in this turn.
+    routine_changes: usize,
     /// `run.bot.skills`, extended by skills created during this run.
     skills: Vec<Skill>,
     text_suffix: String,
@@ -604,6 +606,7 @@ impl Runtime {
             skill_response_text(&Value::Array(index))
         ));
         lines.extend(broker::bot_data::rules(run, recipient));
+        lines.extend(broker::routines::rules(recipient));
         Ok(lines
             .into_iter()
             .filter(|line| !line.is_empty())
