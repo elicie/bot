@@ -147,13 +147,20 @@ export class RoutineScheduler {
     }
     await this.store.setRoutineSchedulingError(schedulingError);
     if (this.closed || this.store.active) return;
-    const run = this.store.routineRuns.filter(item => !item.result && !item.executionRunId && this.store.conversation(item.conversationId).run.status === 'idle')
-      .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))[0];
-    if (!run) return;
-    try { await this.runtime.start(run.conversationId, run.prompt); }
+    const work = [
+      ...this.store.routineRuns.filter(item => !item.result && !item.executionRunId && this.store.conversation(item.conversationId).run.status === 'idle')
+        .map(run => ({ kind: 'routine' as const, run, conversationId: run.conversationId, prompt: run.prompt, createdAt: run.createdAt })),
+      ...this.store.botDeliveries.filter(delivery => delivery.status === 'queued')
+        .map(delivery => ({ kind: 'bot-message' as const, delivery, conversationId: delivery.recipientConversationId, prompt: delivery.text, createdAt: delivery.createdAt })),
+    ].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt)
+      || this.store.conversations.findIndex(conversation => conversation.id === a.conversationId)
+        - this.store.conversations.findIndex(conversation => conversation.id === b.conversationId))[0];
+    if (!work) return;
+    try { await this.runtime.start(work.conversationId, work.prompt); }
     catch (error) {
       this.store.assertWritable();
-      await this.store.failRoutineRun(run, error instanceof HttpError ? error.message : 'Routine could not start. Check runtime and provider settings.', now);
+      if (work.kind === 'routine') await this.store.failRoutineRun(work.run, error instanceof HttpError ? error.message : 'Routine could not start. Check runtime and provider settings.', now);
+      else await this.store.failBotDelivery(work.delivery, error instanceof HttpError ? error.message : 'Bot delivery could not start. Check runtime and provider settings.', now);
     }
   }
 

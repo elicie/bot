@@ -15,6 +15,35 @@ export interface Message {
   text: string;
   createdAt: string;
   tools: ToolActivity[];
+  botExchangeIds?: string[];
+  sourceBotId?: string;
+}
+export interface BotExchange {
+  id: string;
+  botIds: [string, string];
+  messages: { id: string; botId: string; text: string; createdAt: string }[];
+  sourceConversationId: string;
+  sourceMessageId: string;
+  updatedAt: string;
+}
+export interface BotDelivery {
+  id: string;
+  exchangeId: string;
+  sourceConversationId: string;
+  sourceMessageId: string;
+  recipientConversationId: string;
+  fromBotId: string;
+  toBotId: string;
+  text: string;
+  chainId: string;
+  hop: number;
+  createdAt: string;
+  status: 'queued' | 'running' | 'completed' | 'cancelled' | 'error' | 'interrupted';
+  requestId?: string;
+  executionRunId?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  error?: string;
 }
 export interface PermissionOption { id: string; label: string; kind: string }
 export interface PendingPermission {
@@ -119,6 +148,8 @@ export interface AppState {
   conversations: Conversation[];
   routines: Routine[];
   routineRuns: RoutineRun[];
+  botExchanges?: BotExchange[];
+  botDeliveries?: BotDelivery[];
   routineSchedulingError?: string;
   settings: PublicSettings;
   runtime: RuntimeInfo;

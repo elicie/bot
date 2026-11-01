@@ -34,8 +34,6 @@ export async function createBackend(options: BackendOptions): Promise<{
   close: () => Promise<void>;
 }> {
   const store = await Store.open(options.dataDir, { now: options.routines?.now });
-  const runtime = new GrokRuntime(store, options.runtime);
-  await runtime.initialize();
   const app = express();
   const server = createServer(app);
   const streams = new Set<Response>();
@@ -47,6 +45,8 @@ export async function createBackend(options: BackendOptions): Promise<{
     commandTail = result.catch(() => {});
     return result;
   };
+  const runtime = new GrokRuntime(store, options.runtime, command);
+  await runtime.initialize();
   const routines = new RoutineScheduler(store, runtime, command, options.routines);
   app.disable('x-powered-by');
   app.set('trust proxy', false);
@@ -168,8 +168,8 @@ export async function createBackend(options: BackendOptions): Promise<{
     const input = z.object({ text: z.string().trim().min(1).max(100000) }).strict().parse(request.body);
     await command(() => {
       const id = String(request.params.id);
-      if (store.routineRuns.some(run => run.conversationId === id && !run.result && !run.executionRunId)) {
-        throw new HttpError(409, 'This conversation is reserved for a queued routine. Wait for execution or cancel it first.');
+      if (store.isReservedConversation(id)) {
+        throw new HttpError(409, 'This conversation is reserved for queued work or a read-only bot delivery.');
       }
       return runtime.start(id, input.text);
     });
@@ -177,10 +177,11 @@ export async function createBackend(options: BackendOptions): Promise<{
   });
   app.post('/api/conversations/:id/cancel', async (request, response) => {
     z.object({}).strict().parse(request.body);
-    await command(async () => {
+    const cancellation = await command(async () => {
       const id = String(request.params.id);
-      if (!await store.cancelQueuedRoutine(id)) await runtime.cancel(id);
+      return { done: await store.cancelQueuedWork(id) ? Promise.resolve() : runtime.cancel(id) };
     });
+    await cancellation.done;
     response.json(store.snapshot());
   });
   app.post('/api/conversations/:id/permissions/:permissionId', async (request, response) => {

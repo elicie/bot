@@ -3,9 +3,10 @@ import { open } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { z } from 'zod';
-import type { AppState, Bot, Conversation, PublicSettings, Routine, RoutineInput, RoutineRun, RuntimeInfo, SettingsInput } from '../shared/types.js';
+import type { AppState, Bot, BotDelivery, BotExchange, Conversation, PublicSettings, Routine, RoutineInput, RoutineRun, RuntimeInfo, SettingsInput } from '../shared/types.js';
 import { atomicPrivateFile, canonicalDirectory, HttpError, isMissing, privateDirectory } from './files.js';
 import { latestRoutineTime, nextRoutineTime, routineInputSchema, routineRunSchema, routineSchema } from './routines.js';
+import { botDeliverySchema, botExchangeSchema, botMessageInputSchema, existingBotDelivery, MAX_BOT_DELIVERIES, MAX_BOT_HOPS, MAX_BOT_MESSAGE_BYTES, MAX_BOT_REPLY_CHARACTERS, reconcileBotDeliveries, validBotMessageReferences, type BotMessageInput } from './bot-messages.js';
 
 const toolSchema = z.object({
   id: z.string(), title: z.string(), kind: z.string(), status: z.enum(['pending', 'in_progress', 'completed', 'failed']),
@@ -21,6 +22,7 @@ const conversationSchema = z.object({
   sessionId: z.string().optional(), sessionFingerprint: z.string().optional(),
   messages: z.array(z.object({
     id: z.string().uuid(), role: z.enum(['user', 'assistant']), text: z.string(), createdAt: z.string(), tools: z.array(toolSchema),
+    botExchangeIds: z.array(z.string().uuid()).max(1).optional(), sourceBotId: z.string().uuid().optional(),
   }).strict()),
   run: z.object({
     id: z.string(), status: z.enum(['idle', 'starting', 'running', 'awaiting_permission', 'completed', 'cancelled', 'error', 'interrupted']),
@@ -34,9 +36,12 @@ const MAX_ROUTINE_RUNS = 10000;
 const diskSchema = z.object({
   version: z.literal(1), revision: z.number().int().nonnegative().default(0), settings: settingsSchema, bots: z.array(botSchema).min(1), conversations: z.array(conversationSchema),
   routines: z.array(routineSchema).max(MAX_ROUTINES).default([]), routineRuns: z.array(routineRunSchema).max(MAX_ROUTINE_RUNS).default([]),
+  botExchanges: z.array(botExchangeSchema).max(MAX_BOT_DELIVERIES).default([]), botDeliveries: z.array(botDeliverySchema).max(MAX_BOT_DELIVERIES).default([]),
 }).strict();
 type DiskState = Pick<AppState, 'revision' | 'bots' | 'conversations' | 'routines' | 'routineRuns'> & {
   version: 1;
+  botExchanges: BotExchange[];
+  botDeliveries: BotDelivery[];
   settings: z.infer<typeof settingsSchema>;
 };
 export type PrivateSettings = DiskState['settings'];
@@ -80,7 +85,7 @@ export class Store {
       if (disk.settings.baseUrl) baseUrl(disk.settings.baseUrl);
       const botIds = new Set(disk.bots.map(bot => bot.id));
       const conversationIds = new Set(disk.conversations.map(conversation => conversation.id));
-      const entityIds = [...botIds, ...conversationIds, ...disk.routines.map(routine => routine.id), ...disk.routineRuns.map(run => run.id)];
+      const entityIds = [...botIds, ...conversationIds, ...disk.routines.map(routine => routine.id), ...disk.routineRuns.map(run => run.id), ...disk.botExchanges.map(exchange => exchange.id), ...disk.botDeliveries.map(delivery => delivery.id)];
       const uniqueIds = new Set(entityIds);
       const linkedConversations = new Set<string>();
       const pendingRoutines = new Set<string>();
@@ -100,13 +105,13 @@ export class Store {
         || disk.conversations.some(conversation => !botIds.has(conversation.botId))
         || disk.routines.some(routine => !botIds.has(routine.botId) || (routine.enabled && !routine.nextRunAt)
           || (routine.schedule.kind === 'once' && routine.nextRunAt && Date.parse(routine.nextRunAt) !== Date.parse(routine.schedule.at)))
-        || invalidRuns) {
+        || invalidRuns || !validBotMessageReferences(disk.botDeliveries, disk.botExchanges, disk.conversations, botIds, linkedConversations)) {
         throw new Error('Application state contains invalid references.');
       }
     } catch (error) {
       if (!isMissing(error)) throw new Error('Cannot load application state. The existing state.json was not replaced.', { cause: error });
       disk = {
-        version: 1, revision: 0, settings: { baseUrl: '', model: '', workspace: '', apiKey: '' }, conversations: [], routines: [], routineRuns: [],
+        version: 1, revision: 0, settings: { baseUrl: '', model: '', workspace: '', apiKey: '' }, conversations: [], routines: [], routineRuns: [], botExchanges: [], botDeliveries: [],
         bots: [{ id: randomUUID(), name: 'Grok', color: '#8b5cf6', instructions: '', createdAt: now().toISOString() }],
       };
     }
@@ -130,18 +135,23 @@ export class Store {
   get bots(): Bot[] { return this.disk.bots; }
   get routines(): Routine[] { return this.disk.routines; }
   get routineRuns(): RoutineRun[] { return this.disk.routineRuns; }
+  get botExchanges(): BotExchange[] { return this.disk.botExchanges; }
+  get botDeliveries(): BotDelivery[] { return this.disk.botDeliveries; }
   get active(): Conversation | undefined { return this.conversations.find(c => activeStatus(c.run.status)); }
 
   snapshot(): AppState {
     const { apiKey, ...settings } = this.disk.settings;
     const state: AppState = {
-      revision: this.disk.revision, bots: this.bots, conversations: this.conversations, routines: this.routines, routineRuns: this.routineRuns,
+      revision: this.disk.revision, bots: this.bots, conversations: this.conversations, routines: this.routines, routineRuns: this.routineRuns, botExchanges: this.botExchanges, botDeliveries: this.botDeliveries,
       settings: { ...settings, hasApiKey: Boolean(apiKey) }, runtime: this.runtime,
       ...(this.routineSchedulingError ? { routineSchedulingError: this.routineSchedulingError } : {}),
     };
-    return JSON.parse(JSON.stringify(state, (field, value: unknown) => {
+    const publicLinkArrays = new Set<unknown>([...this.botExchanges.map(exchange => exchange.botIds),
+      ...this.conversations.flatMap(conversation => conversation.messages.flatMap(message => message.botExchangeIds ? [message.botExchangeIds] : []))]);
+    return JSON.parse(JSON.stringify(state, function (this: unknown, field, value: unknown) {
+      if (publicLinkArrays.has(this)) return value;
       if (['kind', 'status', 'role', 'color', 'hash'].includes(field)) return value;
-      if (['id', 'botId', 'routineId', 'conversationId', 'executionRunId', 'sessionId', 'sessionFingerprint'].includes(field) && typeof value === 'string' && /^(?:[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}|[a-f\d]{64})$/i.test(value)) return value;
+      if (['id', 'botId', 'routineId', 'conversationId', 'executionRunId', 'sessionId', 'sessionFingerprint', 'exchangeId', 'sourceConversationId', 'sourceMessageId', 'recipientConversationId', 'fromBotId', 'toBotId', 'chainId', 'sourceBotId'].includes(field) && typeof value === 'string' && /^(?:[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}|[a-f\d]{64})$/i.test(value)) return value;
       return typeof value === 'string' && apiKey ? value.split(apiKey).join('[redacted]') : value;
     })) as AppState;
   }
@@ -166,6 +176,7 @@ export class Store {
         };
       }
     }
+    reconcileBotDeliveries(this.botDeliveries, this.botExchanges, this.conversations, this.now());
     this.disk.revision += 1;
     const bytes = JSON.stringify(this.disk);
     const state = this.snapshot();
@@ -242,8 +253,10 @@ export class Store {
 
   async updateBot(id: string, input: Partial<Pick<Bot, 'name' | 'color' | 'instructions'>>): Promise<void> {
     this.assertIdle();
-    Object.assign(this.bot(id), input);
-    for (const conversation of this.conversations.filter(c => c.botId === id)) { delete conversation.sessionId; delete conversation.sessionFingerprint; }
+    const bot = this.bot(id);
+    const instructionsChanged = input.instructions !== undefined && input.instructions !== bot.instructions;
+    Object.assign(bot, input);
+    if (instructionsChanged) for (const conversation of this.conversations.filter(c => c.botId === id)) { delete conversation.sessionId; delete conversation.sessionFingerprint; }
     await this.changed();
   }
 
@@ -269,17 +282,26 @@ export class Store {
     if (this.pendingRoutine(id)) throw new HttpError(409, 'Wait for or cancel this routine’s queued or active run first.');
   }
 
-  private checkRoutineCapacity(routines: Routine[], routineRuns = this.routineRuns, conversations = this.conversations): void {
+  private checkCapacity(
+    routines = this.routines, routineRuns = this.routineRuns, conversations = this.conversations,
+    botExchanges = this.botExchanges, botDeliveries = this.botDeliveries,
+  ): void {
     if (routines.length > MAX_ROUTINES) throw new HttpError(409, 'The application supports at most 1000 routines.');
     if (routineRuns.length > MAX_ROUTINE_RUNS) throw new HttpError(409, 'Routine history is full. Existing history and conversations are retained.');
+    if (botDeliveries.length > MAX_BOT_DELIVERIES) throw new HttpError(409, 'Bot delivery history is full. Existing exchanges and conversations are retained.');
     const queued = new Set(conversations.filter(conversation => conversation.run.status === 'idle').map(conversation => conversation.id));
     const dispatchBytes = routineRuns.reduce((bytes, run) => bytes + (
       !run.result && !run.executionRunId && queued.has(run.conversationId)
         ? Buffer.byteLength(JSON.stringify(run.prompt), 'utf8') + 4096
         : 0
+    ), 0) + botDeliveries.reduce((bytes, delivery) => bytes + (
+      delivery.status === 'queued' || delivery.status === 'running'
+        ? (delivery.status === 'queued' ? Buffer.byteLength(JSON.stringify(delivery.text), 'utf8') : 0)
+          + MAX_BOT_REPLY_CHARACTERS * 12 + 8192
+        : 0
     ), 0);
-    if (Buffer.byteLength(JSON.stringify({ ...this.disk, routines, routineRuns, conversations, revision: this.disk.revision + 1 }), 'utf8') + dispatchBytes > MAX_STATE_BYTES) {
-      throw new HttpError(413, 'Application state and reserved routine startup would exceed the 64 MiB limit. Existing history and conversations are retained.');
+    if (Buffer.byteLength(JSON.stringify({ ...this.disk, routines, routineRuns, conversations, botExchanges, botDeliveries, revision: this.disk.revision + 1 }), 'utf8') + dispatchBytes > MAX_STATE_BYTES) {
+      throw new HttpError(413, 'Application state and reserved queued work would exceed the 64 MiB limit. Existing history and conversations are retained.');
     }
   }
 
@@ -294,7 +316,7 @@ export class Store {
     this.assertWritable();
     const now = this.now();
     const routine: Routine = { ...this.routineFields(input, now), id: randomUUID(), createdAt: now.toISOString(), updatedAt: now.toISOString() };
-    this.checkRoutineCapacity([...this.routines, routine]);
+    this.checkCapacity([...this.routines, routine]);
     this.routines.push(routine);
     await this.changed();
     return routine;
@@ -306,7 +328,7 @@ export class Store {
     const now = this.now();
     const updated: Routine = { ...routine, ...this.routineFields(input, now), updatedAt: now.toISOString() };
     if (!updated.enabled) delete updated.nextRunAt;
-    this.checkRoutineCapacity(this.routines.map(item => item.id === id ? updated : item));
+    this.checkCapacity(this.routines.map(item => item.id === id ? updated : item));
     Object.assign(routine, updated);
     if (!updated.enabled) delete routine.nextRunAt;
     await this.changed();
@@ -322,7 +344,7 @@ export class Store {
       if (routine.schedule.kind === 'once' && Date.parse(routine.schedule.at) <= now.getTime()) throw new HttpError(400, 'A one-time schedule must be in the future. Edit its time before enabling it.');
       updated.nextRunAt = nextRoutineTime(routine.schedule, now);
     } else delete updated.nextRunAt;
-    this.checkRoutineCapacity(this.routines.map(item => item.id === id ? updated : item));
+    this.checkCapacity(this.routines.map(item => item.id === id ? updated : item));
     Object.assign(routine, updated);
     if (!enabled) delete routine.nextRunAt;
     await this.changed();
@@ -352,7 +374,7 @@ export class Store {
     const { run, conversation } = this.routineClaim(routine, 'manual', now.toISOString(), now);
     const updated = { ...routine };
     if (routine.schedule.kind === 'once') { updated.enabled = false; delete updated.nextRunAt; updated.updatedAt = now.toISOString(); }
-    this.checkRoutineCapacity(this.routines.map(item => item.id === id ? updated : item), [...this.routineRuns, run], [...this.conversations, conversation]);
+    this.checkCapacity(this.routines.map(item => item.id === id ? updated : item), [...this.routineRuns, run], [...this.conversations, conversation]);
     Object.assign(routine, updated);
     if (routine.schedule.kind === 'once') delete routine.nextRunAt;
     this.routineRuns.push(run);
@@ -385,7 +407,7 @@ export class Store {
       updates.set(routine.id, updated);
     }
     if (!updates.size) return;
-    this.checkRoutineCapacity(this.routines.map(item => updates.get(item.id) ?? item), [...this.routineRuns, ...runs], [...this.conversations, ...conversations]);
+    this.checkCapacity(this.routines.map(item => updates.get(item.id) ?? item), [...this.routineRuns, ...runs], [...this.conversations, ...conversations]);
     this.disk.routines = this.routines.map(item => updates.get(item.id) ?? item);
     this.routineRuns.push(...runs);
     this.conversations.push(...conversations);
@@ -393,9 +415,15 @@ export class Store {
   }
 
   async cancelQueuedRoutine(conversationId: string): Promise<boolean> {
+    return this.cancelQueuedWork(conversationId);
+  }
+
+  async cancelQueuedWork(conversationId: string): Promise<boolean> {
     this.assertWritable();
     const conversation = this.conversation(conversationId);
-    if (conversation.run.status !== 'idle' || !this.routineRuns.some(run => !run.result && !run.executionRunId && run.conversationId === conversationId)) return false;
+    const queued = this.routineRuns.some(run => !run.result && !run.executionRunId && run.conversationId === conversationId)
+      || this.botDeliveries.some(delivery => delivery.status === 'queued' && delivery.recipientConversationId === conversationId);
+    if (conversation.run.status !== 'idle' || !queued) return false;
     const timestamp = this.now().toISOString();
     conversation.run = { ...conversation.run, status: 'cancelled', finishedAt: timestamp };
     conversation.updatedAt = timestamp;
@@ -414,6 +442,65 @@ export class Store {
     };
     conversation.updatedAt = timestamp;
     await this.changed();
+  }
+
+  async queueBotMessage(conversationId: string, executionRunId: string, sourceMessageId: string, input: BotMessageInput): Promise<BotDelivery> {
+    this.assertWritable();
+    const parsed = botMessageInputSchema.parse(input);
+    if (Buffer.byteLength(parsed.text, 'utf8') > MAX_BOT_MESSAGE_BYTES) throw new HttpError(413, 'Bot messages must be at most 160 KiB of UTF-8 text so the complete message can be reviewed.');
+    const source = this.conversation(conversationId);
+    const message = source.messages.findLast(item => item.role === 'assistant');
+    if (source.run.id !== executionRunId || !activeStatus(source.run.status) || message?.id !== sourceMessageId) throw new HttpError(409, 'The sending run is no longer active.');
+    const existing = existingBotDelivery(this.botDeliveries, sourceMessageId, parsed);
+    if (existing) return existing;
+    const recipient = this.bot(parsed.toBotId);
+    if (recipient.id === source.botId) throw new HttpError(400, 'Choose another bot as the recipient.');
+    const parent = this.botDeliveries.find(delivery => delivery.recipientConversationId === source.id);
+    const hop = (parent?.hop ?? 0) + 1;
+    if (hop > MAX_BOT_HOPS) throw new HttpError(409, 'Bot message chains are limited to four hops.');
+    const timestamp = this.now().toISOString();
+    const recipientConversation: Conversation = {
+      id: randomUUID(), botId: recipient.id, title: `Message from ${this.bot(source.botId).name}`.slice(0, 100),
+      messages: [], run: { id: '', status: 'idle' }, updatedAt: timestamp,
+    };
+    const exchange: BotExchange = {
+      id: randomUUID(), botIds: [source.botId, recipient.id], sourceConversationId: source.id, sourceMessageId,
+      messages: [{ id: randomUUID(), botId: source.botId, text: parsed.text, createdAt: timestamp }], updatedAt: timestamp,
+    };
+    const id = randomUUID();
+    const delivery: BotDelivery = {
+      id, exchangeId: exchange.id, sourceConversationId: source.id, sourceMessageId, recipientConversationId: recipientConversation.id,
+      fromBotId: source.botId, toBotId: recipient.id, text: parsed.text, chainId: parent?.chainId ?? id, hop, createdAt: timestamp,
+      status: 'queued', ...(parsed.requestId ? { requestId: parsed.requestId } : {}),
+    };
+    const conversations = this.conversations.map(conversation => conversation.id === source.id
+      ? { ...source, messages: source.messages.map(item => item.id === sourceMessageId ? { ...item, botExchangeIds: [exchange.id] } : item) }
+      : conversation);
+    conversations.push(recipientConversation);
+    this.checkCapacity(this.routines, this.routineRuns, conversations, [...this.botExchanges, exchange], [...this.botDeliveries, delivery]);
+    message.botExchangeIds = [exchange.id];
+    this.conversations.push(recipientConversation);
+    this.botExchanges.push(exchange);
+    this.botDeliveries.push(delivery);
+    await this.changed();
+    return delivery;
+  }
+
+  async failBotDelivery(delivery: BotDelivery, error: string, now = this.now()): Promise<void> {
+    this.assertWritable();
+    const conversation = this.conversation(delivery.recipientConversationId);
+    const key = this.settings.apiKey;
+    const timestamp = now.toISOString();
+    conversation.run = {
+      id: conversation.run.id, status: 'error', error: (key ? error.split(key).join('[redacted]') : error).slice(0, 1000), finishedAt: timestamp,
+    };
+    conversation.updatedAt = timestamp;
+    await this.changed();
+  }
+
+  isReservedConversation(id: string): boolean {
+    return this.botDeliveries.some(delivery => delivery.recipientConversationId === id)
+      || this.routineRuns.some(run => run.conversationId === id && !run.result && !run.executionRunId);
   }
 
   async addConversation(botId: string): Promise<Conversation> {

@@ -12,7 +12,7 @@ import type { AppState, RoutineInput, RoutineRunResult } from '../shared/types.j
 const fakeAgent = `#!/usr/bin/env node
 import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
-if (process.argv.includes('--version')) { console.log('grok 1.0.62 (routine fixture)'); process.exit(0); }
+if (process.argv.includes('--version')) { console.log('grok-bot-engine 0.1.0 (2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8)'); process.exit(0); }
 let sessionId;
 const send = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n');
 createInterface({ input: process.stdin }).on('line', line => {
