@@ -1,0 +1,15 @@
+[package]
+name = "grok-bot-server"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "grok-bot"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+grok-bot-core.workspace = true
+tokio.workspace = true

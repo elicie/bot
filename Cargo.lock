@@ -4072,6 +4072,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "grok-bot-core"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "chrono",
+ "grok-bot-engine",
+ "grok-bot-files",
+ "grok-bot-model",
+ "grok-bot-store",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "grok-bot-engine"
 version = "0.1.0"
 dependencies = [
@@ -4087,6 +4106,51 @@ dependencies = [
  "xai-acp-lib",
  "xai-fsnotify",
  "xai-grok-shell",
+]
+
+[[package]]
+name = "grok-bot-files"
+version = "0.1.0"
+dependencies = [
+ "grok-bot-model",
+ "hex",
+ "sha2 0.10.9",
+ "uuid",
+]
+
+[[package]]
+name = "grok-bot-model"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "grok-bot-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "grok-bot-core",
+ "tokio",
+]
+
+[[package]]
+name = "grok-bot-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "grok-bot-files",
+ "grok-bot-model",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

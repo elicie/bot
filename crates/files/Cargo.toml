@@ -1,0 +1,12 @@
+[package]
+name = "grok-bot-files"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+grok-bot-model.workspace = true
+hex.workspace = true
+sha2.workspace = true
+uuid.workspace = true
