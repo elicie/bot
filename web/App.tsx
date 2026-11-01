@@ -702,6 +702,7 @@ export function App() {
               conversation={conversation}
               data={data}
               onBotChat={exchangeId => navigate({ selection: current.current.selection, surface: { kind: 'bot-chat', exchangeId } })}
+              onRoutines={() => navigate({ selection: current.current.selection, surface: { kind: 'routines' } })}
               queuedRoutine={queuedRun}
               modelConfigured={!!data.settings.baseUrl && !!data.settings.model}
               runtimeAvailable={data.runtime.available}

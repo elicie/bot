@@ -35,6 +35,21 @@ const toolLabels = {
   completed: '완료',
   failed: '실패',
 } as const;
+/** "생성됨 루틴 · <이름> 루틴 열기" under a message whose routine tool finished. */
+const ROUTINE_RESULT = /^(생성됨|업데이트됨|일시 중지됨|재개됨) 루틴: (.+)$/;
+function RoutineLinks({ message, onOpen }: { message: Message; onOpen: () => void }) {
+  const changes = message.tools.flatMap((tool) => {
+    const match = tool.status === 'completed' && tool.output ? ROUTINE_RESULT.exec(tool.output) : null;
+    return match ? [{ id: tool.id, label: match[1], name: match[2] }] : [];
+  });
+  return <>{changes.map((change) => (
+    <div className="bot-exchange-summary routine-change-summary" key={change.id}>
+      <Clock3 size={13} /><span>{change.label} 루틴 ·</span>
+      <button type="button" onClick={onOpen} aria-label={`${change.name} 루틴 열기`}>{change.name}</button>
+    </div>
+  ))}</>;
+}
+
 function ToolCard({ tool }: { tool: ToolActivity }) {
   const StatusIcon =
     tool.status === 'completed'
@@ -198,6 +213,7 @@ export function Transcript({
   onPermission,
   data,
   onBotChat,
+  onRoutines,
 }: {
   bot: Bot;
   conversation?: Conversation;
@@ -211,6 +227,7 @@ export function Transcript({
   onPermission: (optionId: string) => void;
   data?: AppState;
   onBotChat?: (id: string) => void;
+  onRoutines?: () => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const nearBottom = useRef(true);
@@ -294,6 +311,7 @@ export function Transcript({
               )}
               <MessageView message={message} bot={bot} conversationId={conversation?.id} />
               {data && onBotChat && <BotMessageLinks message={message} data={data} onOpen={onBotChat} />}
+              {onRoutines && <RoutineLinks message={message} onOpen={onRoutines} />}
             </div>
           ))}
           {queuedRoutine && (
