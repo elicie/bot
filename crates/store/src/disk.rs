@@ -41,6 +41,7 @@ fn run_valid(run: &RoutineRun) -> bool {
 
 /// `diskSchema.parse` beyond the JSON shape. Applies the schema's transforms in place.
 pub(crate) fn schema_valid(disk: &mut DiskState) -> bool {
+    crate::groups::normalize(disk);
     if disk.version != 1
         || disk.bots.is_empty()
         || disk.routines.len() > MAX_ROUTINES
@@ -70,6 +71,7 @@ pub(crate) fn schema_valid(disk: &mut DiskState) -> bool {
             })
     });
     conversations
+        && crate::groups::schema_valid(disk)
         && disk.routines.iter_mut().all(routine_valid)
         && disk.routine_runs.iter().all(run_valid)
         && disk.bot_exchanges.iter().all(exchange_valid)
@@ -132,7 +134,8 @@ pub(crate) fn references_valid(disk: &DiskState) -> Result<(), String> {
             .routine_runs
             .iter()
             .any(|run| unique_ids.contains(run.routine_id.as_str()) && !disk.routines.iter().any(|routine| routine.id == run.routine_id))
-        || disk.conversations.iter().any(|conversation| !bot_ids.contains(conversation.bot_id.as_str()))
+        || disk.conversations.iter().any(|conversation| !bot_ids.contains(conversation.bot_id.as_str()) && !crate::groups::is_group_conversation(conversation))
+        || !crate::groups::references_valid(disk)
         || disk.routines.iter().any(|routine| {
             !bot_ids.contains(routine.bot_id.as_str())
                 || (routine.enabled && !truthy(&routine.next_run_at))

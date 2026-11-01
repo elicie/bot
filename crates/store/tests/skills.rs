@@ -245,6 +245,7 @@ async fn skill_capacity_checks_size_prospective_state_exactly_and_preserve_queue
             tools: vec![],
             bot_exchange_ids: None,
             source_bot_id: None,
+            speaker_bot_id: None,
         }];
         let current = serde_json::to_vec(s.disk()).unwrap().len();
         s.disk_mut().conversations[0].messages[0].text = "p".repeat(limit - remaining - current);

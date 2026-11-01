@@ -63,6 +63,7 @@ impl Redactor<'_> {
                 }
             }
             self.optional_id(&mut message.source_bot_id);
+            self.optional_id(&mut message.speaker_bot_id);
         }
         self.optional_id(&mut conversation.session_id);
         self.optional_id(&mut conversation.session_fingerprint);
@@ -176,6 +177,13 @@ impl Redactor<'_> {
         state.routine_runs.iter_mut().for_each(|run| self.routine_run(run));
         state.bot_exchanges.iter_mut().for_each(|exchange| self.exchange(exchange));
         state.bot_deliveries.iter_mut().for_each(|delivery| self.delivery(delivery));
+        for group in &mut state.groups {
+            self.id(&mut group.id);
+            self.text(&mut group.name);
+            group.member_bot_ids.iter_mut().for_each(|id| self.id(id));
+            self.text(&mut group.created_at);
+            self.text(&mut group.updated_at);
+        }
         self.optional(&mut state.routine_scheduling_error);
         self.text(&mut state.settings.base_url);
         self.text(&mut state.settings.model);

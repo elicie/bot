@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, type FormEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, type FormEvent, type ReactNode } from 'react';
 import Markdown from 'react-markdown';
 import {
   ArrowDown,
@@ -81,7 +81,7 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
     </details>
   );
 }
-function MessageView({ message, bot }: { message: Message; bot: Bot }) {
+function MessageView({ message, bot, named }: { message: Message; bot: Bot; named?: boolean }) {
   return (
     <article
       className={`message-row ${message.role}`}
@@ -89,6 +89,7 @@ function MessageView({ message, bot }: { message: Message; bot: Bot }) {
     >
       {message.role === 'assistant' && <Avatar color={bot.color} seed={bot.id} shape={bot.shape} size={25} />}
       <div className="message-content">
+        {named && message.role === 'assistant' && <strong className="message-speaker" style={{ color: bot.color === '#ffffff' ? undefined : bot.color }}>{bot.name}</strong>}
         {message.text && (
           <div className="message-bubble">
             {message.role === 'assistant' ? (
@@ -207,6 +208,8 @@ export function Transcript({
   onPermission,
   data,
   onBotChat,
+  speakerFor,
+  messageExtras,
 }: {
   bot: Bot;
   conversation?: Conversation;
@@ -220,6 +223,10 @@ export function Transcript({
   onPermission: (optionId: string) => void;
   data?: AppState;
   onBotChat?: (id: string) => void;
+  /** Group conversations: the member bot that wrote an assistant message. */
+  speakerFor?: (message: Message) => Bot | undefined;
+  /** Extra controls under a message (thread links). */
+  messageExtras?: (message: Message) => ReactNode;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const nearBottom = useRef(true);
@@ -301,8 +308,9 @@ export function Transcript({
               {dateKey(message.createdAt) !== dateKey(messages[index - 1]?.createdAt ?? '') && (
                 <div className="date-label">{dateKey(message.createdAt)}</div>
               )}
-              <MessageView message={message} bot={bot} />
+              <MessageView message={message} bot={speakerFor?.(message) ?? bot} named={!!speakerFor} />
               {data && onBotChat && <BotMessageLinks message={message} data={data} onOpen={onBotChat} />}
+              {messageExtras?.(message)}
             </div>
           ))}
           {queuedRoutine && (
@@ -388,17 +396,22 @@ export function Composer({
   disabled,
   busy,
   model,
+  placeholder,
+  label = '메시지',
 }: {
   botName: string;
   value: string;
   onChange: (value: string) => void;
   onSend: () => void;
-  onFiles: () => void;
+  /** Omitted where no workspace panel exists (group chats, threads). */
+  onFiles?: () => void;
   onCancel: () => void;
   running: boolean;
   disabled: boolean;
   busy: boolean;
   model: string;
+  placeholder?: string;
+  label?: string;
 }) {
   const textarea = useRef<HTMLTextAreaElement>(null);
   useLayoutEffect(() => {
@@ -413,14 +426,16 @@ export function Composer({
   return (
     <div className="composer-dock">
       <form className="composer" onSubmit={submit}>
-        <IconButton label="작업 폴더 열기" className="attach-button" onClick={onFiles}>
-          <Plus size={20} />
-        </IconButton>
+        {onFiles && (
+          <IconButton label="작업 폴더 열기" className="attach-button" onClick={onFiles}>
+            <Plus size={20} />
+          </IconButton>
+        )}
         <textarea
           ref={textarea}
           rows={1}
-          aria-label="메시지"
-          placeholder={`${botName}에게 메시지 보내기`}
+          aria-label={label}
+          placeholder={placeholder ?? `${botName}에게 메시지 보내기`}
           value={value}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={(event) => {

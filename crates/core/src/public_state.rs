@@ -165,6 +165,7 @@ mod tests {
                 tools: vec![tool("local-tool", Some(true)), tool("file-tool", None), tool("explicit-false", Some(false))],
                 bot_exchange_ids: None,
                 source_bot_id: None,
+                speaker_bot_id: None,
             }],
             session_id: None,
             session_fingerprint: None,
@@ -177,6 +178,10 @@ mod tests {
                 finished_at: None,
             },
             updated_at: "2026-11-01T00:00:00.000Z".into(),
+            group_id: None,
+            thread: None,
+            group_round: None,
+            member_sessions: None,
         };
         AppState {
             revision: 3,
@@ -186,6 +191,7 @@ mod tests {
             routine_runs: Vec::new(),
             bot_exchanges: Vec::new(),
             bot_deliveries: Vec::new(),
+            groups: Vec::new(),
             routine_scheduling_error: None,
             settings: PublicSettings { base_url: String::new(), model: String::new(), has_api_key: false, workspace: String::new() },
             runtime: RuntimeInfo { available: true, version: None, error: None },
