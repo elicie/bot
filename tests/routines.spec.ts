@@ -47,7 +47,7 @@ test('LAN HTTP users create a bot, chat without a workspace, manage routines, an
     await page.getByRole('button', { name: '루틴 만들기', exact: true }).first().click();
     await page.getByLabel('루틴 이름', { exact: true }).fill('반복 점검');
     await page.getByLabel('실행할 봇', { exact: true }).selectOption(bot.id);
-    await page.getByLabel('실행할 지시', { exact: true }).fill('반복 점검 결과를 알려 줘');
+    await page.getByLabel('실행할 지시', { exact: true }).fill('반복 점검 결과를 알려 줘 @notes.txt');
     await page.getByLabel('실행 일정', { exact: true }).selectOption('interval');
     await page.getByLabel('반복 간격(분)', { exact: true }).fill('5');
     await page.getByRole('button', { name: '루틴 저장', exact: true }).click();
@@ -69,7 +69,7 @@ test('LAN HTTP users create a bot, chat without a workspace, manage routines, an
     await page.getByRole('button', { name: '지금 실행', exact: true }).click();
     await expect.poll(async () => (await state(page)).routineRuns.find(run => run.routineId === routine.id)?.result?.status, { timeout: 30_000 }).toBe('completed');
     await page.getByRole('button', { name: '대화 보기', exact: true }).first().click();
-    await expect(page.getByRole('article', { name: '내 메시지', exact: true }).getByText('반복 점검 결과를 알려 줘', { exact: true })).toBeVisible();
+    await expect(page.getByRole('article', { name: '내 메시지', exact: true }).getByText('반복 점검 결과를 알려 줘 @notes.txt', { exact: true })).toBeVisible();
     await expect(page.getByRole('log').getByText('봇과 루틴의 실제 모델 응답입니다.', { exact: true })).toBeVisible();
     await page.getByLabel('메시지', { exact: true }).fill('루틴 후속 대화');
     await page.getByRole('button', { name: '메시지 보내기', exact: true }).click();

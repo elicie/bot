@@ -18,6 +18,9 @@ function reply(request: MockProviderRequest): MockCompletion {
 
 async function configure(page: Page, baseUrl: string, workspace: string) {
   await page.getByRole('button', { name: '설정', exact: true }).click();
+  await expect(page.getByText('Grok Build 기반 엔진', { exact: true })).toBeVisible();
+  await expect(page.getByText('grok-bot-engine 0.1.0 (2bdd1d6a6369)', { exact: true })).toBeVisible();
+  await expect(page.getByText('사용 가능', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: '모델 설정', exact: true }).first().click();
   await page.getByRole('textbox', { name: 'Base URL', exact: true }).fill(baseUrl);
   await page.getByLabel('Model ID', { exact: true }).fill('local-test-model');
@@ -84,7 +87,8 @@ test('browser configures provider, edits local files, approves and denies AI wri
     expect(await readFile(join(app.workspace, 'notes.txt'), 'utf8')).toBe('approved by browser\n');
     await expect(editor).toHaveValue('approved by browser\n');
     await page.getByRole('button', { name: '컴퓨터 닫기', exact: true }).last().click();
-    const firstConversationHash = new URL(page.url()).hash;
+    const firstConversationUrl = page.url();
+    expect(new URL(firstConversationUrl).hash).toBe('');
     await page.reload();
     await expect(page.getByRole('log', { name: '대화 메시지' }).getByText('fixture denied write', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: '봇 추가', exact: true }).click();
@@ -92,12 +96,14 @@ test('browser configures provider, edits local files, approves and denies AI wri
     await page.getByRole('textbox', { name: '봇 지침', exact: true }).fill('로컬 파일 작업을 도와주세요.');
     await page.getByRole('dialog', { name: '봇 추가' }).getByRole('button', { name: '봇 추가', exact: true }).click();
     await expect(page.getByRole('heading', { name: '파일 도우미', exact: true })).toBeVisible();
-    await send(page, '새 봇 연결 확인');
+    await send(page, '새 봇 연결 확인 @notes.txt');
+    await expect(page.getByRole('article', { name: '내 메시지', exact: true }).getByText('새 봇 연결 확인 @notes.txt', { exact: true })).toBeVisible();
     await expect(page.getByRole('log').getByText('OpenAI 호환 대화 응답이 도착했습니다.', { exact: true })).toBeVisible({ timeout: 30_000 });
+    await page.getByRole('button', { name: '검색', exact: true }).click();
     await page.getByRole('textbox', { name: '봇 검색', exact: true }).fill('존재하지않는봇');
     await expect(page.getByText('검색 결과가 없습니다.')).toBeVisible();
     await page.getByRole('button', { name: '검색 지우기', exact: true }).click();
-    await page.goto(`${app.url}/${firstConversationHash}`);
+    await page.goto(firstConversationUrl);
     await expect(page.getByRole('log').getByText('fixture denied write', { exact: true })).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath('desktop-chat.png'), fullPage: true });
     await page.getByRole('button', { name: '설정', exact: true }).click();
@@ -118,6 +124,13 @@ test('browser configures provider, edits local files, approves and denies AI wri
     await page.screenshot({ path: testInfo.outputPath('mobile-files.png'), fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.getByRole('button', { name: '컴퓨터 닫기', exact: true }).last().click();
+    await page.getByRole('button', { name: '봇 목록 열기', exact: true }).click();
+    await page.getByRole('button', { name: '설정', exact: true }).click();
+    await page.getByRole('button', { name: '일반', exact: true }).click();
+    await expect(page.getByText('Grok Build 기반 엔진', { exact: true })).toBeVisible();
+    await expect(page.getByText('grok-bot-engine 0.1.0 (2bdd1d6a6369)', { exact: true })).toBeVisible();
+    expect(await page.getByRole('dialog').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await page.getByRole('button', { name: '설정 닫기', exact: true }).click();
     expect(consoleErrors).toEqual([]);
     expect(provider.requests.some(request => request.model === 'local-test-model')).toBe(true);
   } finally {

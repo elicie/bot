@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { HttpError, WorkspaceFiles } from './files.js';
-import { baseUrl, checkProvider, Store } from './store.js';
+import { avatarShapeSchema, baseUrl, checkProvider, Store } from './store.js';
 import { GrokRuntime, type RuntimeOptions } from './runtime.js';
 import { ApplicationComputer, installComputerRoutes, isLocalComputerRequest } from './computer-api.js';
 import type { ManagedComputerOptions } from './computer.js';
@@ -135,12 +135,12 @@ export async function createBackend(options: BackendOptions): Promise<{
     response.json(result);
   });
   app.post('/api/bots', async (request, response) => {
-    const input = z.object({ name, color: color.default('#8b5cf6'), instructions: instructions.default('') }).strict().parse(request.body);
+    const input = z.object({ name, color: color.default('#8b5cf6'), instructions: instructions.default(''), shape: avatarShapeSchema.optional(), pinned: z.boolean().optional() }).strict().parse(request.body);
     await command(() => store.addBot(input));
     response.status(201).json(store.snapshot());
   });
   app.patch('/api/bots/:id', async (request, response) => {
-    const input = z.object({ name: name.optional(), color: color.optional(), instructions: instructions.optional() }).strict().parse(request.body);
+    const input = z.object({ name: name.optional(), color: color.optional(), instructions: instructions.optional(), shape: avatarShapeSchema.optional(), pinned: z.boolean().optional(), hidden: z.boolean().optional() }).strict().parse(request.body);
     if (!Object.keys(input).length) throw new HttpError(400, 'Provide a bot field to update.');
     await command(() => store.updateBot(String(request.params.id), input));
     response.json(store.snapshot());

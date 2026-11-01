@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { reducer, emptyFiles, draftKey, readRoute, routeHash, type UIState } from '../web/state.js';
+import { reducer, emptyFiles, draftKey, readRoute, routeSearch, type UIState } from '../web/state.js';
 import type { AppState } from '../shared/types.js';
 
 function snapshot(revision: number, status: 'running' | 'completed'): AppState {
@@ -14,7 +14,7 @@ function snapshot(revision: number, status: 'running' | 'completed'): AppState {
     bots: [{ id: botId, name: 'Grok', color: '#75a9c0', instructions: '', createdAt: '2026-10-31T00:00:00Z' }],
     conversations: [{ id: conversationId, botId, title: 'Conversation', updatedAt: '2026-10-31T00:00:00Z', messages: [{ id: randomUUID(), role: 'assistant', text: status === 'completed' ? 'Final answer' : '', tools: [], createdAt: '2026-10-31T00:00:00Z' }], run: { id: 'run', status } }],
     settings: { baseUrl: 'http://127.0.0.1:8000/v1', model: 'test', hasApiKey: false, workspace: '/tmp/test-workspace' },
-    runtime: { available: true, version: '1.0.62' },
+    runtime: { available: true, version: 'grok-bot-engine 0.1.0 (2bdd1d6a6369)' },
   };
 }
 
@@ -52,13 +52,29 @@ test('an explicit new-chat draft stays selected across routines, new background 
   updated.revision++;
   updated.conversations.push({ ...updated.conversations[0], id: randomUUID(), updatedAt: '2026-10-31T00:01:00Z' });
   state = reducer(state, { type: 'snapshot', data: updated });
-  const restored = readRoute(routeHash(route));
+  const restored = readRoute(routeSearch(route));
   state = reducer(state, { type: 'route', route: restored });
   state = reducer(state, { type: 'select', selection: state.selection });
   assert.deepEqual(state.selection, selection);
   assert.equal(state.drafts[draftKey(state.selection)], 'Unsent new conversation');
   assert.equal(state.surface.kind, 'chat');
-  assert.deepEqual(reducer({ ...ui(), ...readRoute(routeHash({ selection, surface: { kind: 'chat' } })) }, { type: 'snapshot', data: updated }).selection, selection);
+  assert.deepEqual(reducer({ ...ui(), ...readRoute(routeSearch({ selection, surface: { kind: 'chat' } })) }, { type: 'snapshot', data: updated }).selection, selection);
+});
+
+test('chat, routine, and bot-pair routes round-trip through query parameters without fragments', () => {
+  const selection = { botId: 'bot-id', conversationId: 'conversation-id' };
+  for (const kind of ['chat', 'routines'] as const) {
+    const route = { selection, surface: { kind } };
+    const search = routeSearch(route);
+    assert.ok(search.startsWith('?'));
+    assert.equal(search.includes('#'), false);
+    assert.deepEqual(readRoute(search), route);
+  }
+  const pair = { selection, surface: { kind: 'bot-chat' as const, exchangeId: 'exchange-id' } };
+  assert.deepEqual(readRoute(routeSearch(pair)), pair);
+  assert.equal(routeSearch(pair).includes('#'), false);
+  assert.equal(routeSearch({ selection: { botId: null, conversationId: null }, surface: { kind: 'chat' } }), '');
+  assert.deepEqual(readRoute('?bot=bot-id'), { selection: { botId: 'bot-id', conversationId: null }, surface: { kind: 'chat' } });
 });
 
 test('external document refresh updates clean editors and preserves unsaved edits with a warning', () => {

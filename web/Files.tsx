@@ -1,4 +1,4 @@
-import { useEffect, useRef, type Dispatch } from 'react';
+import { useEffect, useId, useRef, type Dispatch } from 'react';
 import {
   ChevronRight,
   FileText,
@@ -21,13 +21,16 @@ export function Files({
   dispatch,
   onClose,
   onSettings,
+  embedded = false,
 }: {
+  embedded?: boolean;
   workspace: string;
   files: FilesState;
   dispatch: Dispatch<Action>;
   onClose: () => void;
   onSettings: () => void;
 }) {
+  const requestPrefix = useId();
   const requestSequence = useRef(0);
   const filesRef = useRef(files);
   filesRef.current = files;
@@ -100,7 +103,7 @@ export function Files({
     }
   };
   const reloadFile = async (path: string) => {
-    const id = String(++requestSequence.current);
+    const id = `${requestPrefix}-${++requestSequence.current}`;
     const root = workspace;
     dispatch({ type: 'open-file', path, requestId: id });
     try {
@@ -127,11 +130,11 @@ export function Files({
   const saving = editor.kind === 'ready' && editor.save === 'saving';
   const segments = files.directory.split('/').filter(Boolean);
   return (
-    <aside className="computer-panel" aria-label="로컬 파일 탐색기">
+    <aside className={`computer-panel ${embedded ? 'embedded-files' : ''}`} aria-label="로컬 파일 탐색기">
       <header className="computer-header">
         <span>
           <Monitor size={16} />
-          컴퓨터
+          {embedded ? '작업 폴더' : '컴퓨터'}
         </span>
         <div>
           <IconButton label="파일 새로고침" onClick={refresh} disabled={!workspace || saving}>

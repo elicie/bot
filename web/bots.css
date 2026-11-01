@@ -1,0 +1,213 @@
+.modal.bot-dialog {
+  width: 440px;
+  color: var(--text, #fcfcfc);
+  background: var(--elevated);
+}
+
+.bot-dialog .modal-header {
+  min-height: 56px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.bot-dialog .modal-header h2 {
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.bot-dialog .modal-header .icon-button {
+  width: 32px;
+  height: 32px;
+}
+
+.bot-dialog > form {
+  min-height: 0;
+}
+
+.bot-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  min-height: 0;
+  padding: 20px 16px 24px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable both-edges;
+}
+
+.bot-dialog-preview {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  min-height: 100px;
+  padding-bottom: 12px;
+}
+
+.bot-dialog-name,
+.bot-dialog-instructions {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.bot-dialog-name > span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.bot-dialog-name input,
+.bot-dialog-instructions textarea {
+  width: 100%;
+  color: inherit;
+  background: var(--canvas);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.bot-dialog-name input {
+  height: 36px;
+  text-align: center;
+}
+
+.bot-dialog-name input::placeholder,
+.bot-dialog-instructions textarea::placeholder {
+  color: var(--secondary);
+  opacity: 1;
+}
+
+.bot-dialog-instructions textarea {
+  min-height: 54px;
+  max-height: 180px;
+  resize: vertical;
+}
+
+.bot-dialog-instructions small,
+.bot-dialog-optional {
+  color: var(--secondary);
+  font-size: 11px;
+  line-height: 17px;
+}
+
+.bot-dialog-optional {
+  margin-left: 4px;
+}
+
+.bot-dialog-shapes {
+  display: grid;
+  grid-template-columns: repeat(10, 20px);
+  gap: 8px;
+  align-self: center;
+}
+
+.bot-dialog-shape {
+  display: grid;
+  grid-column: span 2;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  padding: 3px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px;
+}
+
+.bot-dialog-shape:nth-child(11) {
+  grid-column: 2 / span 2;
+}
+
+.bot-dialog-shape[aria-pressed='true'] {
+  background: var(--panel);
+  border-color: var(--secondary);
+}
+
+.bot-dialog-shape:hover:not(:disabled) {
+  background: var(--panel);
+  filter: none;
+}
+
+.bot-dialog-colors {
+  display: grid;
+  grid-template-columns: repeat(12, 12px);
+  gap: 8px;
+  align-self: center;
+  margin-top: 4px;
+}
+
+.bot-dialog-color {
+  grid-column: span 2;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid #0002;
+  border-radius: 50%;
+}
+
+.bot-dialog-color:nth-child(7) {
+  grid-column: 2 / span 2;
+}
+
+.bot-dialog-color[aria-pressed='true'] {
+  outline: 2px solid var(--text, #fcfcfc);
+  outline-offset: 3px;
+}
+
+.bot-dialog .modal-footer {
+  min-height: 60px;
+  padding: 13px 24px;
+  border-top-color: var(--line);
+}
+
+.bot-dialog .modal-footer > button {
+  min-height: 32px;
+  border-radius: 18px;
+}
+
+.bot-dialog .modal-footer .small-button {
+  color: inherit;
+  background: var(--panel);
+  border-color: var(--line);
+}
+
+.bot-dialog .modal-footer .primary-button {
+  color: #fff;
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+
+
+.bot-dialog :is(button, input, textarea):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+@media (max-width: 480px) {
+  .modal.bot-dialog {
+    max-width: calc(100vw - 24px);
+    max-height: calc(100dvh - 24px);
+  }
+
+  .bot-dialog .modal-header {
+    padding-left: 16px;
+    padding-right: 12px;
+  }
+
+  .bot-dialog-body {
+    padding-right: 10px;
+    padding-left: 16px;
+  }
+
+  .bot-dialog .modal-footer {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+}

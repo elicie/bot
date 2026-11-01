@@ -48,7 +48,7 @@ test('LAN state, mutation responses, and already-open SSE hide local computer ap
     assert.match(lanState, /localhost/);
     const localState = await (await fetch(local + '/api/state')).text();
     assert.equal(localState.includes(canary), true);
-    const options = { method: 'PATCH', headers: { Origin: lan, 'Content-Type': 'application/json', 'X-Grok-Bot': '1' }, body: JSON.stringify({ name: 'Privacy fixture' }) };
+    const options = { method: 'PATCH', headers: { Origin: lan, 'Content-Type': 'application/json', 'X-Grok-Bot': '1' }, body: JSON.stringify({ pinned: true }) };
     conversation.run.status = 'completed';
     const mutation = await fetch(lan + '/api/bots/' + backend.store.bots[0].id, options);
     assert.equal(mutation.status, 200);

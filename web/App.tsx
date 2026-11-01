@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import {
   Clock3,
   Repeat2,
@@ -24,9 +24,12 @@ import type {
 import { errorText, getState, request } from './api';
 import { BotDialog, History } from './Bots';
 import { Composer, Transcript } from './Conversation';
-import { Files } from './Files';
+import { BotChat } from './BotChat';
+import { Sidebar } from './Sidebar';
+import { Details, type DetailsTab } from './Details';
+import { Computer } from './Computer';
 import { Routines, type RoutineDraftStatus } from './Routines';
-import { Capabilities, Settings } from './Settings';
+import { Settings } from './Settings';
 import {
   activeRun,
   conversationPreview,
@@ -40,7 +43,7 @@ import {
   runningConversation,
   selectedBot,
   selectedConversation,
-  routeHash,
+  routeSearch,
   type AppRoute,
   type Overlay,
   type Selection,
@@ -48,23 +51,34 @@ import {
 } from './state';
 import { Avatar, ErrorNotice, IconButton, Spinner } from './ui';
 
-function writeRoute(route: AppRoute, replace = false) {
-  const hash = routeHash(route);
-  if (window.location.hash === hash) return;
-  window.history[replace ? 'replaceState' : 'pushState'](
-    null,
-    '',
-    `${window.location.pathname}${window.location.search}${hash}`,
-  );
+function historyPosition(): number {
+  const position: unknown = window.history.state?.grokBotPosition;
+  return typeof position === 'number' && Number.isSafeInteger(position) ? position : 0;
 }
 
 export function App() {
   const [state, dispatch] = useReducer(reducer, undefined, initialState);
+  const [detailsTab, setDetailsTab] = useState<DetailsTab>('computer');
   const [connectionAttempt, reconnect] = useReducer((attempt: number) => attempt + 1, 0);
   const current = useRef(state);
   current.current = state;
   const commandLock = useRef(false);
   const navigationVersion = useRef(0);
+  const position = useRef(historyPosition());
+  const returningToPosition = useRef<number | null>(null);
+  const writeRoute = (route: AppRoute, replace = false) => {
+    const search = routeSearch(route);
+    const unchanged = window.location.search === search && !window.location.hash;
+    const recorded = window.history.state?.grokBotPosition === position.current;
+    if (unchanged && recorded) return;
+    const nextPosition = replace || unchanged ? position.current : position.current + 1;
+    window.history[replace || unchanged ? 'replaceState' : 'pushState'](
+      { ...window.history.state, grokBotPosition: nextPosition },
+      '',
+      `${window.location.pathname}${search}`,
+    );
+    position.current = nextPosition;
+  };
   const routineDraft = useRef<RoutineDraftStatus>({ dirty: false, saving: false });
   const reportRoutineDraft = useCallback((status: RoutineDraftStatus) => {
     routineDraft.current = status;
@@ -167,14 +181,28 @@ export function App() {
     [confirmFileChange, confirmRoutineChange],
   );
   useEffect(() => {
-    const hashChanged = () => {
+    const routeChanged = () => {
+      const nextPosition = historyPosition();
+      if (returningToPosition.current !== null) {
+        const delta = returningToPosition.current - nextPosition;
+        if (delta) window.history.go(delta);
+        else returningToPosition.current = null;
+        return;
+      }
       const next = readRoute();
-      if (routeHash(next) === routeHash(current.current)) return;
+      if (routeSearch(next) === routeSearch(current.current)) {
+        position.current = nextPosition;
+        return;
+      }
       if (confirmNavigation()) {
+        position.current = nextPosition;
         navigationVersion.current++;
         dispatch({ type: 'route', route: next });
         dispatch({ type: 'overlay', overlay: null });
-      } else writeRoute(current.current, true);
+      } else {
+        returningToPosition.current = position.current;
+        window.history.go(position.current - nextPosition);
+      }
     };
     const beforeUnload = (event: BeforeUnloadEvent) => {
       if (
@@ -186,10 +214,10 @@ export function App() {
         event.returnValue = '';
       }
     };
-    window.addEventListener('hashchange', hashChanged);
+    window.addEventListener('popstate', routeChanged);
     window.addEventListener('beforeunload', beforeUnload);
     return () => {
-      window.removeEventListener('hashchange', hashChanged);
+      window.removeEventListener('popstate', routeChanged);
       window.removeEventListener('beforeunload', beforeUnload);
     };
   }, [confirmNavigation]);
@@ -268,11 +296,18 @@ export function App() {
     }
   };
   const openOverlay = (overlay: Overlay) => {
+    dispatch({ type: 'sidebar', open: false });
     dispatch({ type: 'error', error: null });
     dispatch({ type: 'overlay', overlay });
   };
   const settings = (tab: SettingsTab = 'general') => openOverlay({ kind: 'settings', tab });
   const navigate = (route: AppRoute) => {
+    if (returningToPosition.current !== null) return false;
+    if (routeSearch(route) === routeSearch(current.current)) {
+      dispatch({ type: 'sidebar', open: false });
+      dispatch({ type: 'overlay', overlay: null });
+      return true;
+    }
     if (!confirmNavigation()) return false;
     navigationVersion.current++;
     writeRoute(route);
@@ -329,7 +364,7 @@ export function App() {
         type: 'error',
         error:
           before.data.runtime.error ||
-          'Grok Build CLI를 사용할 수 없습니다. 서버 컴퓨터의 설치 상태를 확인해 주세요.',
+          '앱 엔진을 사용할 수 없습니다. 서버 컴퓨터의 앱 폴더에서 npm run build:engine 명령으로 엔진을 빌드한 뒤 서버를 다시 시작해 주세요.',
       });
       return;
     }
@@ -449,16 +484,10 @@ export function App() {
   };
   const closeOverlay = () => dispatch({ type: 'overlay', overlay: null });
   const botConversations = conversationsFor(data, bot?.id ?? null);
-  const filteredBots =
-    data?.bots.filter((item) => {
-      const preview = conversationPreview(conversationsFor(data, item.id)[0]);
-      return `${item.name} ${preview}`
-        .toLocaleLowerCase()
-        .includes(state.search.toLocaleLowerCase());
-    }) ?? [];
+
 
   return (
-    <div className={`app-shell ${state.computerOpen ? 'computer-is-open' : ''}`}>
+    <div className={`app-shell ${state.computerOpen && state.surface.kind !== 'bot-chat' ? 'computer-is-open' : ''}`}>
       {state.sidebarOpen && (
         <button
           type="button"
@@ -467,159 +496,20 @@ export function App() {
           onClick={() => dispatch({ type: 'sidebar', open: false })}
         />
       )}
-      <aside
-        className={`sidebar ${state.sidebarOpen ? 'is-open' : ''}`}
-        aria-label="봇 목록"
-        inert={state.viewport === 'mobile' && !state.sidebarOpen}
-      >
-        <header className="sidebar-header">
-          <span className="app-title">
-            Grok Bot <small>Local</small>
-          </span>
-          <div>
-            <IconButton
-              label="봇 추가"
-              onClick={() => openOverlay({ kind: 'bot' })}
-              disabled={!data || busy}
-            >
-              <Plus size={19} />
-            </IconButton>
-            <IconButton
-              label="사이드바 닫기"
-              className="mobile-only"
-              onClick={() => dispatch({ type: 'sidebar', open: false })}
-            >
-              <X size={18} />
-            </IconButton>
-          </div>
-        </header>
-        <label className="search-box">
-          <Search size={15} />
-          <input
-            aria-label="봇 검색"
-            placeholder="검색"
-            value={state.search}
-            onChange={(event) => dispatch({ type: 'search', value: event.target.value })}
-          />
-          {state.search && (
-            <IconButton label="검색 지우기" onClick={() => dispatch({ type: 'search', value: '' })}>
-              <X size={13} />
-            </IconButton>
-          )}
-        </label>
-        <div className="bot-list">
-          {data ? (
-            filteredBots.map((item) => {
-              const latest = conversationsFor(data, item.id)[0];
-              const running = data.conversations.some(
-                (entry) => entry.botId === item.id && activeRun(entry.run.status),
-              );
-              return (
-                <button
-                  type="button"
-                  key={item.id}
-                  className={`bot-row ${state.surface.kind === 'chat' && item.id === state.selection.botId ? 'selected' : ''}`}
-                  aria-current={state.surface.kind === 'chat' && item.id === state.selection.botId ? 'true' : undefined}
-                  onClick={() =>
-                    select({
-                      botId: item.id,
-                      conversationId: state.selection.botId === item.id
-                        ? state.selection.conversationId
-                        : Object.hasOwn(state.lastConversation, item.id)
-                          ? state.lastConversation[item.id]
-                          : latest?.id ?? null,
-                    })
-                  }
-                >
-                  <span className="bot-avatar">
-                    <Avatar color={item.color} seed={item.id} />
-                    {running && <span className="running-dot" />}
-                  </span>
-                  <span className="bot-copy">
-                    <span>{item.name}</span>
-                    <small>{conversationPreview(latest)}</small>
-                  </span>
-                  {latest && (
-                    <time dateTime={latest.updatedAt}>
-                      {new Date(latest.updatedAt).toLocaleDateString('ko-KR', {
-                        month: 'numeric',
-                        day: 'numeric',
-                      })}
-                    </time>
-                  )}
-                </button>
-              );
-            })
-          ) : (
-            <div className="sidebar-loading">
-              <Spinner />
-            </div>
-          )}
-          {data && filteredBots.length === 0 && (
-            <p className="sidebar-empty">
-              {state.search ? '검색 결과가 없습니다.' : '봇을 추가해 대화를 시작하세요.'}
-            </p>
-          )}
-        </div>
-        <footer className="sidebar-footer">
-          <button
-            type="button"
-            className={`footer-button ${state.surface.kind === 'routines' ? 'selected' : ''}`}
-            aria-current={state.surface.kind === 'routines' ? 'page' : undefined}
-            onClick={() => {
-              if (state.surface.kind === 'routines') dispatch({ type: 'sidebar', open: false });
-              else navigate({ selection: current.current.selection, surface: { kind: 'routines' } });
-            }}
-            disabled={!data}
-          >
-            <span className="footer-icon">
-              <Repeat2 size={17} />
-            </span>
-            루틴
-          </button>
-          <button
-            type="button"
-            className="footer-button"
-            onClick={() => openOverlay({ kind: 'capabilities' })}
-          >
-            <span className="footer-icon">
-              <Plug size={17} />
-            </span>
-            Plugins
-          </button>
-          <button
-            type="button"
-            className="footer-button"
-            onClick={() => settings()}
-            disabled={!data}
-          >
-            <span className="footer-icon">
-              <Settings2 size={17} />
-            </span>
-            설정
-          </button>
-          <button
-            type="button"
-            className="footer-button profile-button"
-            onClick={() => settings()}
-            disabled={!data}
-          >
-            <span className="profile-avatar">
-              <UserRound size={18} />
-            </span>
-            <span>
-              로컬 사용자<small>이 컴퓨터에서 실행</small>
-            </span>
-            <ChevronRight size={14} />
-          </button>
-        </footer>
-      </aside>
+      <Sidebar data={data} selection={state.selection} lastConversation={state.lastConversation}
+        chat={state.surface.kind === 'chat'} search={state.search} open={state.sidebarOpen} mobile={state.viewport === 'mobile'} busy={busy || !!globalRun}
+        onSearch={value => dispatch({ type: 'search', value })} onSelect={select}
+        onClose={() => dispatch({ type: 'sidebar', open: false })} onNew={() => openOverlay({ kind: 'bot' })}
+        onSettings={() => settings()}
+        onRoutines={() => { if (state.surface.kind === 'routines') dispatch({ type: 'sidebar', open: false }); else navigate({ selection: current.current.selection, surface: { kind: 'routines' } }); }}
+        onPatch={(id, patch) => { void command('bot-layout', async () => { const snapshot = await request<AppState>(`/api/bots/${encodeURIComponent(id)}`, { method: 'PATCH', body: patch }); dispatch({ type: 'snapshot', data: snapshot }); }); }}
+      />
       <main
-        className="chat-stage"
+        className="chat-stage reference-chat"
         aria-label={state.surface.kind === 'routines' ? '루틴' : '대화'}
         inert={state.viewport === 'mobile' && state.sidebarOpen}
       >
-        <header className="chat-header">
+        <header className="chat-header" hidden={state.surface.kind === 'bot-chat'}>
           <div className="chat-identity-wrap">
             <IconButton
               label="봇 목록 열기"
@@ -637,9 +527,9 @@ export function App() {
                 type="button"
                 className="chat-identity"
                 aria-label="봇 편집"
-                onClick={() => openOverlay({ kind: 'bot', bot })}
+                onClick={() => { if (state.computerOpen && !confirmFileChange()) return; setDetailsTab('details'); dispatch({ type: 'computer', open: true }); }}
               >
-                <Avatar color={bot.color} seed={bot.id} size={25} />
+                <Avatar color={bot.color} seed={bot.id} shape={bot.shape} size={28} />
                 <span>{bot.name}</span>
               </button>
             ) : (
@@ -669,7 +559,7 @@ export function App() {
               label={state.computerOpen ? '컴퓨터 닫기' : '컴퓨터 열기'}
               aria-expanded={state.computerOpen}
               className={state.computerOpen ? 'active' : ''}
-              onClick={() => toggleComputer(!state.computerOpen)}
+              onClick={() => { if (!state.computerOpen) setDetailsTab('computer'); toggleComputer(!state.computerOpen); }}
               disabled={!data}
             >
               <Monitor size={17} />
@@ -728,11 +618,15 @@ export function App() {
             onCreateBot={() => openOverlay({ kind: 'bot' })}
             onDraftStatus={reportRoutineDraft}
           />
+        ) : data && state.surface.kind === 'bot-chat' ? (
+          <BotChat data={data} exchangeId={state.surface.exchangeId} onClose={() => navigate({ selection: current.current.selection, surface: { kind: 'chat' } })} onExecution={(botId, conversationId) => select({ botId, conversationId })} />
         ) : data && bot ? (
           <>
             <Transcript
               bot={bot}
               conversation={conversation}
+              data={data}
+              onBotChat={exchangeId => navigate({ selection: current.current.selection, surface: { kind: 'bot-chat', exchangeId } })}
               queuedRoutine={queuedRun}
               modelConfigured={!!data.settings.baseUrl && !!data.settings.model}
               runtimeAvailable={data.runtime.available}
@@ -787,14 +681,12 @@ export function App() {
           </div>
         )}
       </main>
-      {state.computerOpen && data && (
-        <Files
-          workspace={data.settings.workspace}
-          files={state.files}
-          dispatch={dispatch}
-          onClose={() => toggleComputer(false)}
-          onSettings={() => settings('files')}
-        />
+      {state.computerOpen && data && bot && state.surface.kind !== 'bot-chat' && (
+        <Details bot={bot} conversation={conversation} data={data} files={state.files} dispatch={dispatch}
+          tab={detailsTab} onTab={setDetailsTab} onClose={() => toggleComputer(false)}
+          computer={<Computer ownerId={bot.id} canControl={!globalRun} />}
+          onEdit={() => openOverlay({ kind: 'bot', bot })} onSettings={() => settings('files')}
+          onRoutines={() => { toggleComputer(false); navigate({ selection: current.current.selection, surface: { kind: 'routines' } }); }} />
       )}
       {state.overlay?.kind === 'settings' && data && (
         <Settings
@@ -849,7 +741,7 @@ export function App() {
           }}
         />
       )}
-      {state.overlay?.kind === 'capabilities' && <Capabilities onClose={closeOverlay} />}
+
     </div>
   );
 }

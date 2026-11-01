@@ -7,7 +7,7 @@ import type {
   RunStatus,
 } from '../shared/types';
 
-export type SettingsTab = 'general' | 'models' | 'files';
+export type SettingsTab = 'general' | 'models' | 'files' | 'permissions' | 'vault' | 'usage' | 'updates';
 export type Overlay =
   | { kind: 'settings'; tab: SettingsTab }
   | { kind: 'bot'; bot?: Bot }
@@ -18,7 +18,7 @@ export interface Selection {
   botId: string | null;
   conversationId: string | null;
 }
-export type Surface = { kind: 'chat' } | { kind: 'routines' };
+export type Surface = { kind: 'chat' } | { kind: 'routines' } | { kind: 'bot-chat'; exchangeId: string };
 export interface AppRoute {
   selection: Selection;
   surface: Surface;
@@ -92,27 +92,20 @@ export const emptyFiles = (): FilesState => ({
   documentRevision: 0,
 });
 
-export function readSelection(hash = window.location.hash): Selection {
-  const params = new URLSearchParams(hash.replace(/^#/, ''));
-  return { botId: params.get('bot'), conversationId: params.get('conversation') };
-}
-export function selectionHash(selection: Selection): string {
-  const params = new URLSearchParams();
-  if (selection.botId) params.set('bot', selection.botId);
-  if (selection.conversationId) params.set('conversation', selection.conversationId);
-  return params.size ? `#${params}` : '';
-}
-export function readRoute(hash = window.location.hash): AppRoute {
-  const params = new URLSearchParams(hash.replace(/^#/, ''));
+export function readRoute(search = window.location.search): AppRoute {
+  const params = new URLSearchParams(search);
   return {
-    selection: readSelection(hash),
-    surface: { kind: params.get('view') === 'routines' ? 'routines' : 'chat' },
+    selection: { botId: params.get('bot'), conversationId: params.get('conversation') },
+    surface: params.get('view') === 'routines' ? { kind: 'routines' } : params.get('view') === 'bot-chat' && params.get('exchange') ? { kind: 'bot-chat', exchangeId: params.get('exchange')! } : { kind: 'chat' },
   };
 }
-export function routeHash(route: AppRoute): string {
-  const params = new URLSearchParams(selectionHash(route.selection).replace(/^#/, ''));
+export function routeSearch(route: AppRoute): string {
+  const params = new URLSearchParams();
+  if (route.selection.botId) params.set('bot', route.selection.botId);
+  if (route.selection.conversationId) params.set('conversation', route.selection.conversationId);
   if (route.surface.kind === 'routines') params.set('view', 'routines');
-  return params.size ? `#${params}` : '';
+  if (route.surface.kind === 'bot-chat') { params.set('view', 'bot-chat'); params.set('exchange', route.surface.exchangeId); }
+  return params.size ? `?${params}` : '';
 }
 export function initialState(): UIState {
   return {

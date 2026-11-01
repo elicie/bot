@@ -1,0 +1,157 @@
+import { test, expect, type Page } from '@playwright/test';
+import { startTestApp } from './app-fixture';
+import { startMockProvider } from './mock-provider';
+import type { AppState } from '../shared/types';
+
+const snapshot = (page: Page): Promise<AppState> => page.evaluate(async () => (await fetch('/api/state')).json());
+
+async function completed(page: Page, id: string) {
+  await expect.poll(async () => (await snapshot(page)).conversations.find(item => item.id === id)?.run.status, { timeout: 30_000 }).toBe('completed');
+}
+
+function expectRoute(page: Page, id: string) {
+  expect(new URL(page.url()).hash).toBe('');
+  expect(new URL(page.url()).searchParams.get('conversation')).toBe(id);
+}
+
+const userMessage = (page: Page, text: string) => page.getByRole('article', { name: '내 메시지', exact: true }).getByText(text, { exact: true });
+
+test('new chats retain accessible history with query routes, browser navigation, drafts, and mobile selection', async ({ page }, testInfo) => {
+  const app = await startTestApp();
+  const provider = await startMockProvider({ reply: () => ({ text: '저장된 대화의 답변입니다.' }) });
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    await page.goto(app.url);
+    await page.evaluate(async baseUrl => {
+      const response = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Grok-Bot': '1' }, body: JSON.stringify({ baseUrl, model: 'local-test-model', workspace: '' }) });
+      if (!response.ok) throw new Error(await response.text());
+    }, provider.baseUrl);
+    await page.getByLabel('메시지', { exact: true }).fill('첫 번째 대화에 남긴 내용');
+    await page.getByRole('button', { name: '메시지 보내기', exact: true }).click();
+    await expect(userMessage(page, '첫 번째 대화에 남긴 내용')).toBeVisible();
+    const first = (await snapshot(page)).conversations[0];
+    await completed(page, first.id);
+    const original = (await snapshot(page)).conversations.find(item => item.id === first.id)!;
+    const firstUrl = page.url();
+    expectRoute(page, first.id);
+    await page.getByRole('button', { name: '새 대화', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Grok', exact: true })).toBeVisible();
+    const second = (await snapshot(page)).conversations.find(item => item.id !== first.id)!;
+    expectRoute(page, second.id);
+    await page.getByLabel('메시지', { exact: true }).fill('두 번째 대화의 미전송 초안');
+    await expect(page.getByText('최근 대화', { exact: true })).toHaveCount(0);
+    await page.getByRole('button', { name: '대화 기록', exact: true }).click();
+    await page.getByRole('dialog', { name: '대화 기록', exact: true }).getByRole('button').filter({ hasText: original.title }).click();
+    await expect(userMessage(page, '첫 번째 대화에 남긴 내용')).toBeVisible();
+    expectRoute(page, first.id);
+    await page.goBack();
+    await expect(page.getByLabel('메시지', { exact: true })).toHaveValue('두 번째 대화의 미전송 초안');
+    expectRoute(page, second.id);
+    await page.goForward();
+    await expect(userMessage(page, '첫 번째 대화에 남긴 내용')).toBeVisible();
+    expectRoute(page, first.id);
+    await page.reload();
+    await expect(userMessage(page, '첫 번째 대화에 남긴 내용')).toBeVisible();
+    expectRoute(page, first.id);
+    await page.getByRole('button', { name: '대화 기록', exact: true }).click();
+    await page.getByRole('dialog', { name: '대화 기록', exact: true }).getByRole('button').filter({ hasText: 'New conversation' }).click();
+    await page.getByLabel('메시지', { exact: true }).fill('두 번째 대화에 남긴 내용');
+    await page.getByRole('button', { name: '메시지 보내기', exact: true }).click();
+    await completed(page, second.id);
+    await page.getByRole('button', { name: '대화 기록', exact: true }).click();
+    await page.getByRole('dialog', { name: '대화 기록', exact: true }).getByRole('button').filter({ hasText: original.title }).click();
+    await expect(userMessage(page, '첫 번째 대화에 남긴 내용')).toBeVisible();
+    await page.getByRole('button', { name: '루틴', exact: true }).click();
+    expect(new URL(page.url()).searchParams.get('view')).toBe('routines');
+    expect(new URL(page.url()).hash).toBe('');
+    await page.goBack();
+    await expect(userMessage(page, '첫 번째 대화에 남긴 내용')).toBeVisible();
+    await page.goForward();
+    await expect(page.getByRole('heading', { name: '루틴', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '루틴 만들기', exact: true }).first().click();
+    await page.getByLabel('루틴 이름', { exact: true }).fill('이동 후 보존할 루틴 초안');
+    page.once('dialog', dialog => dialog.dismiss());
+    await page.goBack();
+    await expect(page.getByLabel('루틴 이름', { exact: true })).toHaveValue('이동 후 보존할 루틴 초안');
+    expect(new URL(page.url()).searchParams.get('view')).toBe('routines');
+    page.once('dialog', dialog => dialog.accept());
+    await page.goBack();
+    await expect(userMessage(page, '첫 번째 대화에 남긴 내용')).toBeVisible();
+    expectRoute(page, first.id);
+    await page.goForward();
+    await expect(page.getByRole('heading', { name: '루틴', exact: true })).toBeVisible();
+    await page.getByRole('complementary', { name: '봇 목록', exact: true }).getByRole('button', { name: /^Grok/ }).click();
+    await expect(userMessage(page, '첫 번째 대화에 남긴 내용')).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath('conversation-history-desktop.png'), fullPage: true });
+    await page.getByRole('button', { name: '설정', exact: true }).click();
+    await page.getByRole('button', { name: '로컬 파일 설정', exact: true }).click();
+    await page.getByLabel('로컬 작업 폴더 경로', { exact: true }).fill(app.workspace);
+    await page.getByRole('button', { name: '설정 저장', exact: true }).click();
+    await expect(page.getByText('설정을 저장했습니다', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '설정 닫기', exact: true }).click();
+    await page.getByRole('button', { name: '컴퓨터 열기', exact: true }).click();
+    await page.getByRole('button', { name: '파일 notes.txt', exact: true }).click();
+    const editor = page.getByLabel('파일 내용', { exact: true });
+    await expect(editor).toHaveValue('original local content\n');
+    await editor.fill('저장 전 파일 변경');
+    let unexpectedDialogs = 0;
+    const rejectUnexpectedDialog = async (dialog: import('@playwright/test').Dialog) => { unexpectedDialogs++; await dialog.dismiss(); };
+    page.on('dialog', rejectUnexpectedDialog);
+    await page.getByRole('complementary', { name: '봇 목록', exact: true }).getByRole('button', { name: /^Grok/ }).click();
+    await page.getByRole('button', { name: '대화 기록', exact: true }).click();
+    await page.getByRole('dialog', { name: '대화 기록', exact: true }).getByRole('button').filter({ hasText: original.title }).click();
+    await expect(editor).toHaveValue('저장 전 파일 변경');
+    expect(unexpectedDialogs).toBe(0);
+    page.off('dialog', rejectUnexpectedDialog);
+    page.once('dialog', dialog => dialog.dismiss());
+    await page.goBack();
+    await expect(editor).toHaveValue('저장 전 파일 변경');
+    await expect.poll(() => new URL(page.url()).searchParams.get('view')).toBe(null);
+    page.once('dialog', dialog => dialog.accept());
+    await page.goBack();
+    await expect(page.getByRole('heading', { name: '루틴', exact: true })).toBeVisible();
+    await page.goForward();
+    await expect(userMessage(page, '첫 번째 대화에 남긴 내용')).toBeVisible();
+    await page.getByRole('button', { name: '파일 notes.txt', exact: true }).click();
+    await expect(editor).toHaveValue('original local content\n');
+    await editor.fill('앞으로 이동 전 파일 변경');
+    page.once('dialog', dialog => dialog.dismiss());
+    await page.goBack();
+    await expect(editor).toHaveValue('앞으로 이동 전 파일 변경');
+    page.once('dialog', dialog => dialog.accept());
+    await page.goBack();
+    await expect(page.getByRole('heading', { name: '루틴', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '파일 notes.txt', exact: true }).click();
+    await expect(editor).toHaveValue('original local content\n');
+    await editor.fill('앞으로 이동 취소 검증');
+    page.once('dialog', dialog => dialog.dismiss());
+    await page.goForward();
+    await expect(editor).toHaveValue('앞으로 이동 취소 검증');
+    await expect.poll(() => new URL(page.url()).searchParams.get('view')).toBe('routines');
+    page.once('dialog', dialog => dialog.accept());
+    await page.goForward();
+    await expect(userMessage(page, '첫 번째 대화에 남긴 내용')).toBeVisible();
+    await page.getByRole('button', { name: '컴퓨터 닫기', exact: true }).last().click();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole('button', { name: '새 대화', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Grok', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '대화 기록', exact: true }).click();
+    await page.getByRole('dialog', { name: '대화 기록', exact: true }).getByRole('button').filter({ hasText: original.title }).click();
+    await expect(userMessage(page, '첫 번째 대화에 남긴 내용')).toBeVisible();
+    await expect(page.getByRole('complementary', { name: '봇 목록', exact: true })).not.toBeVisible();
+    expectRoute(page, first.id);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath('conversation-history-mobile.png'), fullPage: true });
+    await page.goto(firstUrl);
+    await expect(userMessage(page, '첫 번째 대화에 남긴 내용')).toBeVisible();
+    const restored = (await snapshot(page)).conversations.find(item => item.id === first.id)!;
+    expect(restored.messages).toEqual(original.messages);
+    expect(restored.run).toEqual(original.run);
+    expect(restored.title).toBe(original.title);
+    expect(errors).toEqual([]);
+  } finally {
+    await app.stop();
+    await provider.close();
+  }
+});

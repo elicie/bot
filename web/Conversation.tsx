@@ -16,6 +16,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import type {
+  AppState,
   Bot,
   Conversation,
   Message,
@@ -25,6 +26,7 @@ import type {
 } from '../shared/types';
 import { activeRun, runLabels } from './state';
 import { Avatar, ErrorNotice, IconButton } from './ui';
+import { BotMessageLinks } from './BotChat';
 
 const toolLabels = {
   pending: '대기',
@@ -85,7 +87,7 @@ function MessageView({ message, bot }: { message: Message; bot: Bot }) {
       className={`message-row ${message.role}`}
       aria-label={message.role === 'user' ? '내 메시지' : `${bot.name} 메시지`}
     >
-      {message.role === 'assistant' && <Avatar color={bot.color} seed={bot.id} size={25} />}
+      {message.role === 'assistant' && <Avatar color={bot.color} seed={bot.id} shape={bot.shape} size={25} />}
       <div className="message-content">
         {message.text && (
           <div className="message-bubble">
@@ -159,7 +161,7 @@ function PermissionCard({
         </div>
       )}
       <p className="permission-hint">
-        입력·출력과 경로를 확인한 뒤 선택하세요. 파일은 서버 컴퓨터에서 변경됩니다.
+        {permission.localOnly ? '서버의 localhost 연결에서 페이지 정보 공유와 브라우저 조작을 한 번만 승인합니다.' : '입력·출력과 경로를 확인한 뒤 선택하세요. 승인한 작업은 서버에서 실행됩니다.'}
       </p>
       <div className="permission-actions">
         {permission.options.map((option) => (
@@ -203,6 +205,8 @@ export function Transcript({
   onSettings,
   onRuntimeSettings,
   onPermission,
+  data,
+  onBotChat,
 }: {
   bot: Bot;
   conversation?: Conversation;
@@ -214,6 +218,8 @@ export function Transcript({
   onSettings: () => void;
   onRuntimeSettings: () => void;
   onPermission: (optionId: string) => void;
+  data?: AppState;
+  onBotChat?: (id: string) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const nearBottom = useRef(true);
@@ -274,7 +280,7 @@ export function Transcript({
           )}
           {messages.length === 0 && (
             <div className="conversation-empty">
-              <Avatar size={54} color={bot.color} seed={bot.id} />
+              <Avatar size={54} color={bot.color} seed={bot.id} shape={bot.shape} />
               <h1>{bot.name}</h1>
               <p>
                 {queuedRoutine ? '다른 작업이 끝나면 이 루틴을 실행합니다.' : '무엇을 함께 해볼까요?'}
@@ -296,6 +302,7 @@ export function Transcript({
                 <div className="date-label">{dateKey(message.createdAt)}</div>
               )}
               <MessageView message={message} bot={bot} />
+              {data && onBotChat && <BotMessageLinks message={message} data={data} onOpen={onBotChat} />}
             </div>
           ))}
           {queuedRoutine && (
@@ -344,9 +351,9 @@ export function Transcript({
             <div className="runtime-notice">
               <Terminal size={16} />
               <div>
-                <strong>Grok Build CLI를 사용할 수 없습니다.</strong>
+                <strong>앱 엔진을 사용할 수 없습니다.</strong>
                 <span>
-                  {runtimeError || '서버 컴퓨터에 CLI를 설치하고 로컬 서버를 다시 시작해 주세요.'}
+                  {runtimeError || '서버 컴퓨터의 앱 폴더에서 npm run build:engine 명령으로 엔진을 빌드한 뒤 서버를 다시 시작해 주세요.'}
                 </span>
               </div>
               <button type="button" className="text-button" onClick={onRuntimeSettings}>

@@ -74,11 +74,15 @@ export interface Conversation {
   run: RunState;
   updatedAt: string;
 }
+export type AvatarShape = 'blob' | 'cloud' | 'square' | 'spark' | 'clover' | 'heart' | 'flower' | 'droplet' | 'pill' | 'wedge' | 'house' | 'star' | 'hexagon' | 'pumpkin';
 export interface Bot {
   id: string;
   name: string;
   color: string;
   instructions: string;
+  shape?: AvatarShape;
+  pinned?: boolean;
+  hidden?: boolean;
   createdAt: string;
 }
 export interface PublicSettings {

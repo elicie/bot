@@ -17,7 +17,8 @@ const permissionSchema = z.object({
   options: z.array(z.object({ id: z.string(), label: z.string(), kind: z.string() }).strict()),
   localOnly: z.boolean().optional(),
 }).strict();
-const botSchema = z.object({ id: z.string().uuid(), name: z.string(), color: z.string(), instructions: z.string(), createdAt: z.string() }).strict();
+export const avatarShapeSchema = z.enum(['blob', 'cloud', 'square', 'spark', 'clover', 'heart', 'flower', 'droplet', 'pill', 'wedge', 'house', 'star', 'hexagon', 'pumpkin']);
+const botSchema = z.object({ id: z.string().uuid(), name: z.string(), color: z.string(), instructions: z.string(), shape: avatarShapeSchema.optional(), pinned: z.boolean().optional(), hidden: z.boolean().optional(), createdAt: z.string() }).strict();
 const conversationSchema = z.object({
   id: z.string().uuid(), botId: z.string().uuid(), title: z.string(), updatedAt: z.string(),
   sessionId: z.string().optional(), sessionFingerprint: z.string().optional(),
@@ -244,7 +245,7 @@ export class Store {
     await this.changed();
   }
 
-  async addBot(input: Pick<Bot, 'name' | 'color' | 'instructions'>): Promise<Bot> {
+  async addBot(input: Pick<Bot, 'name' | 'color' | 'instructions'> & Partial<Pick<Bot, 'shape' | 'pinned'>>): Promise<Bot> {
     this.assertIdle();
     const bot = { ...input, id: randomUUID(), createdAt: new Date().toISOString() };
     this.bots.push(bot);
@@ -252,7 +253,7 @@ export class Store {
     return bot;
   }
 
-  async updateBot(id: string, input: Partial<Pick<Bot, 'name' | 'color' | 'instructions'>>): Promise<void> {
+  async updateBot(id: string, input: Partial<Pick<Bot, 'name' | 'color' | 'instructions' | 'shape' | 'pinned' | 'hidden'>>): Promise<void> {
     this.assertIdle();
     const bot = this.bot(id);
     const instructionsChanged = input.instructions !== undefined && input.instructions !== bot.instructions;

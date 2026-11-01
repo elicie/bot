@@ -41,7 +41,8 @@ test('a scheduled one-time routine runs automatically while its browser history 
     await page.getByRole('complementary', { name: '봇 목록', exact: true }).getByRole('button', { name: /^두 번째 봇/ }).click();
     await page.getByRole('complementary', { name: '봇 목록', exact: true }).getByRole('button', { name: /^Grok/ }).click();
     await expect(page.getByLabel('메시지', { exact: true })).toHaveValue('전송 전 대화 초안');
-    expect(new URL(page.url()).hash).not.toContain('conversation=');
+    expect(new URL(page.url()).hash).toBe('');
+    expect(new URL(page.url()).searchParams.has('conversation')).toBe(false);
     await page.getByRole('button', { name: '루틴', exact: true }).click();
     await page.getByRole('button', { name: /자동 예약 검증/ }).click();
     await page.getByRole('button', { name: '대화 보기', exact: true }).first().click();
