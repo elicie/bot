@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import { Clock3, Plus, X } from 'lucide-react';
 import type { AvatarShape, Bot, Conversation } from '../shared/types';
 import { activeRun, conversationPreview, runLabels } from './state';
@@ -37,6 +37,10 @@ export function BotDialog({
   const [instructions, setInstructions] = useState(bot?.instructions ?? '');
   const [color, setColor] = useState(bot?.color ?? botColors[0]);
   const [shape, setShape] = useState<AvatarShape>(bot?.shape ?? 'blob');
+  const errorRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (error) errorRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [error]);
   const dirty =
     name !== (bot?.name ?? '') ||
     instructions !== (bot?.instructions ?? '') ||
@@ -126,7 +130,7 @@ export function BotDialog({
             />
             <small>새 작업에 적용되는 에이전트 지침입니다.</small>
           </label>
-          {error && <ErrorNotice>{error}</ErrorNotice>}
+          {error && <div ref={errorRef}><ErrorNotice>{error}</ErrorNotice></div>}
         </div>
         <footer className="modal-footer">
           <button type="button" className="small-button" onClick={close} disabled={busy}>
