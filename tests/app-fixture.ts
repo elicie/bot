@@ -22,7 +22,11 @@ export async function startTestApp(options: { network?: boolean; hostname?: stri
   await new Promise<void>(resolve => listener.close(() => resolve()));
   const url = `http://${options.network ? options.hostname ?? 'grok-bot.test' : '127.0.0.1'}:${port}`;
   const probeUrl = `http://127.0.0.1:${port}`;
-  const child: ChildProcess = spawn(process.execPath, ['--import', 'tsx', 'server/index.ts', '--dev'], {
+  // GROK_BOT_BACKEND=rust runs the Rust server binary against the built frontend (`npm run build`).
+  const rust = process.env.GROK_BOT_BACKEND === 'rust';
+  const rustBinary = process.env.GROK_BOT_SERVER_BIN ?? join(process.cwd(), 'target', 'debug', 'grok-bot');
+  const [command, args] = rust ? [rustBinary, []] : [process.execPath, ['--import', 'tsx', 'server/index.ts', '--dev']];
+  const child: ChildProcess = spawn(command, args, {
     cwd: process.cwd(),
     env: { ...process.env, HOST: options.network ? '0.0.0.0' : '127.0.0.1', PORT: String(port), GROK_BOT_ALLOWED_HOSTS: options.network ? options.hostname ?? 'grok-bot.test' : '', GROK_BOT_DATA_DIR: dataDir, NODE_ENV: 'test' },
     stdio: ['ignore', 'pipe', 'pipe'],
