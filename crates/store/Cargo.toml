@@ -16,3 +16,12 @@ serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+chrono-tz = { version = "0.10", features = ["case-insensitive"] }
+libc = "0.2"
+regex = "1"
+url = "2"
+yaml-rust2 = { version = "0.13", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
