@@ -79,6 +79,7 @@ pub(crate) fn schema_valid(disk: &mut DiskState) -> bool {
         && disk.bot_exchanges.iter().all(exchange_valid)
         && disk.bot_deliveries.iter_mut().all(delivery_valid)
         && crate::permissions::rules_valid(&disk.permission_rules)
+        && crate::vault::schema_valid(disk)
 }
 
 fn truthy(value: &Option<String>) -> bool {
@@ -94,6 +95,9 @@ pub(crate) fn references_valid(disk: &DiskState) -> Result<(), String> {
         validate_skill_set(bot.skills.as_deref().unwrap_or_default()).map_err(|error| error.message)?;
     }
     let bot_ids: HashSet<&str> = disk.bots.iter().map(|bot| bot.id.as_str()).collect();
+    if disk.main_bot_id.as_deref().is_some_and(|id| !bot_ids.contains(id)) {
+        return Err("The main bot must be an existing bot.".into());
+    }
     let conversation_ids: HashSet<&str> = disk.conversations.iter().map(|conversation| conversation.id.as_str()).collect();
     let entity_ids: Vec<&str> = bot_ids
         .iter()
@@ -140,6 +144,7 @@ pub(crate) fn references_valid(disk: &DiskState) -> Result<(), String> {
             .any(|run| unique_ids.contains(run.routine_id.as_str()) && !disk.routines.iter().any(|routine| routine.id == run.routine_id))
         || disk.conversations.iter().any(|conversation| !bot_ids.contains(conversation.bot_id.as_str()) && !crate::groups::is_group_conversation(conversation))
         || !crate::groups::references_valid(disk)
+        || !crate::vault::references_valid(disk)
         || disk.routines.iter().any(|routine| {
             !bot_ids.contains(routine.bot_id.as_str())
                 || (routine.enabled && !truthy(&routine.next_run_at))

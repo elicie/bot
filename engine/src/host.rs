@@ -55,6 +55,9 @@ pub enum EngineEvent {
         request: acp::RequestPermissionRequest,
         respond: oneshot::Sender<acp::RequestPermissionResponse>,
     },
+    /// An agent extension notification (`method` as sent, e.g. `x.ai/mcp/server_status`), with
+    /// its parameters parsed as JSON (`Null` when they do not parse).
+    Extension { method: String, params: serde_json::Value },
 }
 
 type Job = Box<dyn FnOnce(Rc<acp::ClientSideConnection>) -> LocalBoxFuture<'static, ()> + Send>;
@@ -244,6 +247,12 @@ impl acp::Client for AppClient {
 
     async fn session_notification(&self, notification: acp::SessionNotification) -> acp::Result<()> {
         let _ = self.events.send(EngineEvent::Update(notification));
+        Ok(())
+    }
+
+    async fn ext_notification(&self, notification: acp::ExtNotification) -> acp::Result<()> {
+        let params = serde_json::from_str(notification.params.get()).unwrap_or(serde_json::Value::Null);
+        let _ = self.events.send(EngineEvent::Extension { method: notification.method.to_string(), params });
         Ok(())
     }
 }

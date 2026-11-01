@@ -20,6 +20,7 @@ import type { SettingsTab } from './state';
 import { ErrorNotice, IconButton, Modal, Spinner } from './ui';
 import { PermissionRules } from './PermissionRules';
 import { NotificationSettings } from './ActivitySettings';
+import { VaultSettings } from './Vault';
 import './settings.css';
 
 interface FormState {
@@ -458,10 +459,7 @@ export function Settings({
                     </div>
                   </div>
                 </section>
-                <p className="settings-note">
-                  이 보관함은 연결한 모델 제공자의 API 키 상태만 표시합니다. 별도의 비밀번호
-                  보관함이나 클라우드 동기화는 제공하지 않습니다.
-                </p>
+                <VaultSettings data={data} />
               </>
             )}
             {tab === 'usage' && (

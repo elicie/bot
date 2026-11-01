@@ -2,15 +2,18 @@
 
 import { Bell, BellOff, CircleDot, MailOpen, Trash2, X } from 'lucide-react';
 import type { AppState, Bot } from '../shared/types';
-import { activeRun } from './state';
+import { activeRun, mainBotId } from './state';
 import { ErrorNotice, IconButton, Modal } from './ui';
+import { MainBotMenuItem } from './MainBot';
 import './chat-features.css';
 
-export function BotMenuExtras({ bot, busy, onUnread, onNotify, onDelete, close }: {
+export function BotMenuExtras({ bot, busy, onUnread, onNotify, onDelete, onChooseMain, close }: {
   bot: Bot; busy: boolean;
   onUnread: (bot: Bot, unread: boolean) => void;
   onNotify: (bot: Bot, enabled: boolean) => void;
   onDelete: (bot: Bot) => void;
+  /** Open "메인 Bot 선택" with this bot preselected. */
+  onChooseMain?: (bot: Bot) => void;
   close: () => void;
 }) {
   return <>
@@ -21,6 +24,7 @@ export function BotMenuExtras({ bot, busy, onUnread, onNotify, onDelete, close }
       onClick={() => { onNotify(bot, !bot.notifyOnUpdates); close(); }}>
       {bot.notifyOnUpdates ? <BellOff size={14} /> : <Bell size={14} />}{bot.notifyOnUpdates ? '알림 끄기' : '알림 받기'}
     </button>
+    {onChooseMain && <MainBotMenuItem busy={busy} close={close} onChoose={() => onChooseMain(bot)} />}
     <button role="menuitem" className="danger-menuitem" disabled={busy} onClick={() => { onDelete(bot); close(); }}>
       <Trash2 size={14} />Bot 삭제
     </button>
@@ -36,6 +40,8 @@ export function BotDeleteDialog({ bot, data, busy, error, onCancel, onConfirm }:
   const running = conversations.some((conversation) => activeRun(conversation.run.status));
   const last = data.bots.length <= 1;
   const blocked = last ? '마지막 Bot은 삭제할 수 없어요. 다른 Bot을 먼저 추가하세요.' : running ? '이 Bot의 작업이 끝난 뒤 삭제할 수 있어요.' : null;
+  // Deleting the main bot makes the first remaining bot the main bot (`grok_bot_store::main_bot`).
+  const successor = !last && mainBotId(data) === bot.id ? data.bots.find((item) => item.id !== bot.id) : undefined;
   const close = () => { if (!busy) onCancel(); };
   return <Modal title={`${bot.name} 삭제`} onClose={close} className="compact-modal bot-delete-dialog">
     <header className="modal-header">
@@ -49,6 +55,7 @@ export function BotDeleteDialog({ bot, data, busy, error, onCancel, onConfirm }:
         <li>루틴 {routines}개와 실행 기록</li>
         <li>이 Bot의 비공개 스킬과 다른 Bot과 주고받은 메시지</li>
       </ul>
+      {successor && <p className="bot-delete-main">이 Bot은 메인 Bot이에요. 삭제하면 “{successor.name}”이(가) 메인 Bot이 돼요.</p>}
       {blocked && <p className="bot-delete-blocked" role="status">{blocked}</p>}
       {error && <ErrorNotice>{error}</ErrorNotice>}
     </div>

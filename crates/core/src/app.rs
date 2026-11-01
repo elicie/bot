@@ -47,6 +47,8 @@ impl Backend {
             cancel_deadline: Duration::from_millis(800),
         });
         let runtime = Runtime::new(store.clone(), queue.clone(), runtime_options);
+        let computer = crate::computer::ApplicationComputer::new(store.clone(), crate::computer::ComputerOptions::from_environment())?;
+        runtime.set_computer(Arc::new(computer));
         runtime.initialize().await;
         let scheduler_options = options.scheduler.unwrap_or(SchedulerOptions { now, ..SchedulerOptions::default() });
         let scheduler = RoutineScheduler::new(store.clone(), runtime.clone(), queue.clone(), scheduler_options);
@@ -81,6 +83,9 @@ impl Backend {
             scheduler.close().await;
             queue.run(async {}).await;
             runtime.shutdown().await;
+            if let Some(computer) = runtime.computer() {
+                let _ = computer.stop(None).await;
+            }
             let _ = store.flush().await;
             context.stopping.send_replace(true);
             let _ = stop_tx.send(());

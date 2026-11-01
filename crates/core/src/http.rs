@@ -240,14 +240,14 @@ pub fn router(ctx: Ctx) -> Router {
         .route("/conversations/{id}/permissions/{permission_id}", post(resolve_permission))
         .route("/files", get(list_files))
         .route("/file", get(read_file).put(save_file))
-        .route("/computer", get(computer_status).post(computer_disabled).delete(computer_status))
-        .route("/computer/preview", get(computer_disabled))
-        .route("/computer/actions", post(computer_disabled))
         .merge(crate::http_bots::router())
         .merge(crate::permission_rules::routes())
         .merge(crate::webhooks::api_routes())
         .merge(crate::chat_features::routes())
         .merge(crate::groups_http::routes())
+        .merge(crate::computer_http::routes())
+        .merge(crate::vault_http::routes())
+        .merge(crate::main_bot::routes())
         .fallback(|| async { (StatusCode::NOT_FOUND, Json(json!({ "error": "API endpoint does not exist." }))) });
     let mut app = Router::new()
         .nest("/api", api)
@@ -572,23 +572,6 @@ async fn save_file(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, JsonBody
 
 fn internal() -> ApiError {
     ApiError(HttpError::new(500, "The operation failed. Check that the workspace and data directory are accessible."))
-}
-
-/// Managed computer control is not ported yet: report a stopped browser (the panel renders its
-/// normal idle state) and refuse to start one. Loopback-only, like the Node routes.
-async fn computer_status(ConnectInfo(remote): Remote) -> ApiResult {
-    if !is_local(&remote) {
-        return Err(ApiError(HttpError::forbidden("Managed browser control requires a local loopback connection. This network server has no user authentication.")));
-    }
-    Ok(Json(json!({
-        "state": "stopped", "epoch": uuid::Uuid::new_v4().to_string(), "frameId": null,
-        "viewport": { "width": 960, "height": 600 }, "origins": [], "url": null, "busy": false, "sandboxed": false,
-    }))
-    .into_response())
-}
-
-async fn computer_disabled() -> ApiError {
-    ApiError(HttpError::unavailable("Managed browser computing is not available in this build yet."))
 }
 
 async fn mcp(State(ctx): State<Ctx>, Path(run_id): Path<String>, headers: HeaderMap, body: Bytes) -> Response {

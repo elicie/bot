@@ -10,7 +10,7 @@ use grok_bot_store::webhooks::{INVALID_WEBHOOK_KEY, MAX_WEBHOOK_PAYLOAD_BYTES, w
 use serde_json::json;
 
 fn rule(category: PermissionCategory, action: PermissionAction, bot_id: Option<&str>) -> PermissionRuleInput {
-    PermissionRuleInput { category, action, bot_id: bot_id.map(str::to_owned) }
+    PermissionRuleInput { category, action, bot_id: bot_id.map(str::to_owned), server: None }
 }
 
 #[tokio::test]
@@ -88,7 +88,8 @@ async fn rule_count_is_bounded_and_bot_rules_can_be_removed() {
         bots.push(f.store.mutate(move |s| s.add_bot(BotInput { name: format!("Bot {index}"), color: None, instructions: None, shape: None, pinned: None })).await.unwrap().id);
     }
     for bot in &bots {
-        for category in PermissionCategory::ALL {
+        // Five categories per bot fill the 100-rule limit exactly.
+        for category in PermissionCategory::ALL.into_iter().take(5) {
             let input = rule(category, PermissionAction::Ask, Some(bot));
             f.store.mutate(move |s| s.add_permission_rule(input, false)).await.unwrap();
         }

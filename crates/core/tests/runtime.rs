@@ -28,6 +28,9 @@ use serde_json::{Value, json};
 #[path = "runtime_bot_data/mod.rs"]
 mod bot_data;
 use bot_data::bot_memory_and_knowledge;
+#[path = "runtime_custom_mcp/mod.rs"]
+mod custom_mcp;
+use custom_mcp::custom_mcp_servers;
 
 // ---------------------------------------------------------------------------------------------
 // Mock OpenAI-compatible provider (port of tests/mock-provider.ts and scriptedFileReply)
@@ -681,8 +684,8 @@ async fn file_approvals_and_sessions(f: &Fixture) {
     );
     let outcomes = tool_outcomes(&after).join("\n");
     assert!(
-        outcomes.contains("Tool not found: workspace__computer_observe"),
-        "computer tools are not offered: {outcomes}"
+        outcomes.contains("Managed browser is unavailable."),
+        "computer tools need a managed browser: {outcomes}"
     );
     assert!(outcomes.to_lowercase().contains("traversal"), "{outcomes}");
     assert!(outcomes.contains("Symbolic links"), "{outcomes}");
@@ -1808,7 +1811,7 @@ async fn permission_rules(f: &Fixture) {
         });
     }
     let add = |category, action, bot_id: Option<String>| {
-        let input = PermissionRuleInput { category, action, bot_id };
+        let input = PermissionRuleInput { category, action, bot_id, server: None };
         async move { f.store.mutate(move |s| s.add_permission_rule(input, true)).await.unwrap() }
     };
     let allow_writes = add(PermissionCategory::FileWrite, PermissionAction::Allow, None).await;
@@ -1976,6 +1979,7 @@ fn runtime_on_the_in_process_engine() {
         scenario!("bot-creation", Options::default(), bot_creation);
         scenario!("bot-data", Options::default(), bot_memory_and_knowledge);
         scenario!("permission-rules", Options::default(), permission_rules);
+        scenario!("custom-mcp", Options::default(), custom_mcp_servers);
         scenario!("chat-routines", Options::default(), chat_routines);
         scenario!("restart", Options::default(), restart_continuation);
         startup_errors(&base, &engine_root).await;

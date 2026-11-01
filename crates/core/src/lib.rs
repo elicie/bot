@@ -9,13 +9,17 @@
 
 pub mod app;
 pub mod chat_features;
+pub mod computer;
+mod computer_http;
 mod groups_http;
 pub mod http;
 mod http_bots;
+mod main_bot;
 pub mod permission_rules;
 pub mod provider;
 pub mod public_state;
 pub mod queue;
 pub mod runtime;
 pub mod scheduler;
+mod vault_http;
 pub mod webhooks;

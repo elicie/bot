@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } 
 import { FileText, Paperclip, X } from 'lucide-react';
 import type { Attachment, AttachmentUpload } from '../shared/types';
 import { IconButton } from './ui';
+import { PreviewableImage } from './Previews';
 import './chat-features.css';
 
 export const MAX_ATTACHMENTS = 8;
@@ -152,15 +153,13 @@ export function DropOverlay({ show }: { show: boolean }): ReactNode {
   return show ? <div className="attachment-drop" aria-hidden="true"><Paperclip size={18} />놓아서 첨부</div> : null;
 }
 
-/** "사용자 첨부 파일" in a sent user message. */
+/** "사용자 첨부 파일" in a sent user message. Images open "미디어 미리보기". */
 export function MessageAttachments({ conversationId, attachments }: { conversationId: string; attachments: Attachment[] }) {
   const url = (attachment: Attachment) => `/api/conversations/${encodeURIComponent(conversationId)}/attachments/${encodeURIComponent(attachment.id)}`;
   return <ul className="message-attachments" aria-label="사용자 첨부 파일">
     {attachments.map((attachment) => <li key={attachment.id}>
       {attachment.kind === 'image'
-        ? <a className="message-attachment-image" href={url(attachment)} target="_blank" rel="noopener noreferrer" title={attachment.name}>
-            <img src={url(attachment)} alt={attachment.name} loading="lazy" />
-          </a>
+        ? <PreviewableImage className="message-attachment-image" src={url(attachment)} alt={attachment.name} download={attachment.name} loading="lazy" />
         : <a className="attachment-chip is-text" href={url(attachment)} target="_blank" rel="noopener noreferrer" title={attachment.name}>
             <span className="attachment-thumb"><FileText size={15} /></span>
             <span className="attachment-name">{attachment.name}<small>{sizeLabel(attachment.size)}</small></span>

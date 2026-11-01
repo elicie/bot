@@ -1,0 +1,31 @@
+.vault-help { display: block; color: var(--muted); font-size: 11px; line-height: 17px; margin: -4px 0 8px; }
+.vault-help code, .vault-settings code, .vault-row code { font-size: 11px; }
+.vault-status { color: var(--secondary); font-size: 12px; margin: 6px 0 0; }
+.vault-list { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 2px; }
+.vault-row { display: flex; align-items: center; gap: 8px; padding: 6px 4px; border-radius: 5px; font-size: 12px; line-height: 18px; }
+.vault-row:hover { background: #ffffff08; }
+.vault-row > svg { flex-shrink: 0; color: var(--muted); }
+.vault-row-copy { flex: 1; min-width: 0; display: grid; overflow-wrap: anywhere; }
+.vault-row-copy small { color: var(--muted); font-size: 10px; }
+.vault-masked { color: var(--muted); letter-spacing: 1px; flex-shrink: 0; }
+.vault-row .text-button { flex-shrink: 0; }
+.vault-row .icon-button { flex-shrink: 0; }
+.vault-switch { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; font-size: 11px; color: var(--secondary); cursor: pointer; }
+.vault-switch input { accent-color: #1084fe; }
+.vault-switch:has(input:disabled) { opacity: 0.55; cursor: not-allowed; }
+.vault-settings .settings-card .vault-list { margin: 0; padding: 6px 8px; }
+.vault-toolbar { display: flex; gap: 8px; align-items: center; margin: 10px 0; }
+.vault-search { flex: 1; display: flex; align-items: center; gap: 6px; padding: 0 8px; border: 1px solid var(--line, #ffffff1a); border-radius: 8px; color: var(--muted); }
+.vault-search input { flex: 1; border: 0; background: transparent; padding: 6px 0; font-size: 12px; }
+.vault-lan-note { display: flex; gap: 6px; align-items: flex-start; color: var(--settings-success, #95c7ad); }
+.vault-lan-note svg { flex-shrink: 0; margin-top: 3px; }
+.vault-modal { width: 560px; }
+.vault-modal-body { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.vault-modal-body textarea { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 18px; }
+.vault-modal-body .small-button { align-self: flex-start; }
+.vault-field { display: grid; gap: 6px; font-size: 12px; color: var(--secondary); }
+.vault-field input, .vault-field select { font-size: 12px; padding: 6px 8px; }
+.vault-invalid { color: #ff8a80; font-size: 11px; }
+.vault-warning { display: flex; gap: 8px; align-items: flex-start; margin: 0; padding: 10px 12px; border-radius: 8px; background: #ffb02e14; border: 1px solid #ffb02e40; color: #ffd38a; font-size: 12px; line-height: 18px; }
+.vault-warning svg { flex-shrink: 0; margin-top: 2px; }
+.vault-warning strong { font-weight: 600; }
