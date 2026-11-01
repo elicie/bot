@@ -4080,6 +4080,7 @@ dependencies = [
  "axum",
  "chrono",
  "futures",
+ "getrandom 0.3.4",
  "grok-bot-engine",
  "grok-bot-files",
  "grok-bot-model",
