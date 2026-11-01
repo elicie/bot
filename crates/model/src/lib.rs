@@ -110,6 +110,10 @@ pub struct ToolActivity {
     pub paths: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_only: Option<bool>,
+    /// ID of the user's permission rule that approved this action without a card
+    /// ("내 규칙으로 자동 승인됨").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_by_rule: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -361,6 +365,20 @@ pub struct Routine {
     pub next_run_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Webhook trigger. Only a SHA-256 hash of the key is stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook: Option<RoutineWebhook>,
+}
+
+/// Webhook trigger of a routine. `key_hash` (hex SHA-256 of the key) is persisted but removed from
+/// the public snapshot; `key_hint` is the last characters of the key for recognition.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutineWebhook {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key_hash: String,
+    pub key_hint: String,
+    pub created_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -398,6 +416,7 @@ pub struct RoutineResult {
 pub enum RoutineTrigger {
     Manual,
     Scheduled,
+    Webhook,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -437,6 +456,8 @@ pub struct DiskState {
     pub bot_exchanges: Vec<BotExchange>,
     #[serde(default)]
     pub bot_deliveries: Vec<BotDelivery>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permission_rules: Vec<PermissionRule>,
 }
 
 /// Public snapshot sent to browsers over HTTP and SSE.
@@ -450,6 +471,8 @@ pub struct AppState {
     pub routine_runs: Vec<RoutineRun>,
     pub bot_exchanges: Vec<BotExchange>,
     pub bot_deliveries: Vec<BotDelivery>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permission_rules: Vec<PermissionRule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routine_scheduling_error: Option<String>,
     pub settings: PublicSettings,
@@ -560,6 +583,64 @@ pub struct BotMessageInput {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+}
+
+/// Kind of model-initiated action a permission rule governs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionCategory {
+    /// `workspace__write_file`
+    FileWrite,
+    /// `workspace__send_message`
+    BotMessage,
+    /// `workspace__create_bot`
+    BotCreate,
+    /// `workspace__create_skill`
+    SkillSave,
+    /// Bot memory saves.
+    MemorySave,
+}
+
+impl PermissionCategory {
+    pub const ALL: [Self; 5] = [Self::FileWrite, Self::BotMessage, Self::BotCreate, Self::SkillSave, Self::MemorySave];
+}
+
+/// "항상 묻기" (`ask`, the default without rules) or "묻지 않고 허용" (`allow`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionAction {
+    Ask,
+    Allow,
+}
+
+/// A user rule: when a bot (all bots when `bot_id` is absent) attempts `category`, do `action`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PermissionRule {
+    pub id: String,
+    pub category: PermissionCategory,
+    pub action: PermissionAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// `POST /api/permission-rules` body.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PermissionRuleInput {
+    pub category: PermissionCategory,
+    pub action: PermissionAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_id: Option<String>,
+}
+
+/// `PATCH /api/permission-rules/:id` body ("규칙의 동작 편집").
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PermissionRulePatch {
+    pub action: PermissionAction,
 }
 
 #[cfg(test)]

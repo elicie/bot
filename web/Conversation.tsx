@@ -48,6 +48,7 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
       <summary>
         <StatusIcon size={14} className={tool.status === 'in_progress' ? 'spin' : ''} />
         <span>{tool.title || tool.kind || '도구 작업'}</span>
+        {tool.approvedByRule && <span className="tool-rule-badge">내 규칙으로 자동 승인됨</span>}
         <small>{toolLabels[tool.status]}</small>
         <ChevronDown size={13} />
       </summary>

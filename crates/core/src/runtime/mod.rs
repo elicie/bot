@@ -12,6 +12,7 @@
 
 mod broker;
 mod engine;
+mod permissions;
 pub mod text;
 
 use std::collections::{HashMap, VecDeque};
@@ -985,6 +986,7 @@ impl Runtime {
                             output: None,
                             paths: None,
                             local_only: None,
+                            approved_by_rule: None,
                         });
                         message.tools.len() - 1
                     }

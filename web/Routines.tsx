@@ -3,6 +3,7 @@ import { Clock3, Pause, Pencil, Play, Plus, Repeat2, Trash2 } from 'lucide-react
 import type { AppState, Routine, RoutineInput, RoutineRun, RoutineSchedule } from '../shared/types';
 import { activeRun, runLabels, type Selection } from './state';
 import { Avatar, ErrorNotice } from './ui';
+import { RoutineWebhook } from './RoutineWebhook';
 import './routines.css';
 
 type DraftSchedule =
@@ -149,7 +150,7 @@ function RunHistory({
                     </span>
                   </div>
                   <span>
-                    {bot?.name ?? '삭제된 봇'} · {run.trigger === 'manual' ? '수동 실행' : '예약 실행'}
+                    {bot?.name ?? '삭제된 봇'} · {run.trigger === 'manual' ? '수동 실행' : run.trigger === 'webhook' ? '웹훅 실행' : '예약 실행'}
                     {deleted ? ' · 삭제된 루틴' : ''}
                   </span>
                   <time dateTime={run.createdAt}>{formatTime(run.createdAt)}</time>
@@ -275,7 +276,7 @@ export function Routines({
         </button>
       </header>
       <p className="routines-safety">
-        예약 실행에는 로컬 서버가 켜져 있어야 합니다. 파일 쓰기는 대화에서 별도 승인이 필요합니다.
+        예약 실행에는 로컬 서버가 켜져 있어야 합니다. 파일 쓰기는 권한 규칙에 따라 대화에서 승인합니다.
       </p>
       {!canRun && (
         <div className="routine-setup" role="status">
@@ -486,6 +487,7 @@ export function Routines({
                 </p>
               )}
               {formError && <div ref={formErrorRef}><ErrorNotice>{formError}</ErrorNotice></div>}
+              {routine && <RoutineWebhook routine={routine} disabled={disabled || saving} />}
               <footer className="routine-form-actions">
                 {dirty && <span>저장하지 않은 변경 사항</span>}
                 <button
@@ -598,6 +600,7 @@ export function Routines({
                   </button>
                 </div>
               )}
+              <RoutineWebhook routine={routine} disabled={disabled} />
               <RunHistory data={data} runs={runs} onConversation={onConversation} />
             </section>
           ) : view.kind === 'detail' ? (

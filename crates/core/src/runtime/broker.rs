@@ -7,8 +7,8 @@ use std::sync::Arc;
 use grok_bot_files::WorkspaceFiles;
 use grok_bot_model::{
     BotInput,
-    BotDelivery, BotMessageInput, HttpError, HttpResult, PendingPermission, PermissionOption,
-    SkillInput, ToolActivity, ToolStatus, new_id,
+    BotDelivery, BotMessageInput, HttpError, HttpResult, PendingPermission, PermissionCategory,
+    PermissionOption, SkillInput, ToolActivity, ToolStatus, new_id,
 };
 use grok_bot_store::bot_messages::{
     MAX_BOT_HOPS, MAX_BOT_MESSAGE_BYTES, bot_delivery_receipt, validate_bot_message_input,
@@ -470,6 +470,7 @@ impl Runtime {
             output: None,
             paths: Some(vec![public_path.clone()]),
             local_only: None,
+            approved_by_rule: None,
         };
         let tool_id = tool.id.clone();
         let (allow, _, options) = approval_options("Allow once", "Deny");
@@ -487,7 +488,7 @@ impl Runtime {
             paths: vec![public_path],
             local_only: None,
         };
-        let decision = self.approve(run, permission, Some(tool)).await?;
+        let decision = self.approve_category(run, PermissionCategory::FileWrite, permission, tool).await?;
         if run.inactive() || decision.as_deref() != Some(allow.as_str()) {
             let message = "The user denied this write or cancelled the run.";
             self.settle_tool(run, &tool_id, ToolStatus::Failed, Some(message.into()))
@@ -582,6 +583,7 @@ impl Runtime {
             output: None,
             paths: None,
             local_only: None,
+            approved_by_rule: None,
         };
         let tool_id = tool.id.clone();
         let (allow, _, options) = approval_options("Send once", "Deny");
@@ -597,7 +599,7 @@ impl Runtime {
             paths: Vec::new(),
             local_only: None,
         };
-        let decision = self.approve(run, permission, Some(tool)).await?;
+        let decision = self.approve_category(run, PermissionCategory::BotMessage, permission, tool).await?;
         if run.inactive() || decision.as_deref() != Some(allow.as_str()) {
             let message = "The user denied this message or cancelled the run.";
             self.settle_tool(run, &tool_id, ToolStatus::Failed, Some(message.into()))
@@ -680,6 +682,7 @@ impl Runtime {
             output: None,
             paths: None,
             local_only: None,
+            approved_by_rule: None,
         };
         let tool_id = tool.id.clone();
         let (allow, _, options) = approval_options("Save skill once", "Deny");
@@ -692,7 +695,7 @@ impl Runtime {
             paths: Vec::new(),
             local_only: None,
         };
-        let choice = self.approve(run, permission, Some(tool)).await?;
+        let choice = self.approve_category(run, PermissionCategory::SkillSave, permission, tool).await?;
         if choice.as_deref() != Some(allow.as_str()) || run.inactive() {
             let message = "Skill save was denied or cancelled.";
             self.settle_tool(run, &tool_id, ToolStatus::Failed, Some(message.into()))
@@ -781,6 +784,7 @@ impl Runtime {
             output: None,
             paths: None,
             local_only: None,
+            approved_by_rule: None,
         };
         let tool_id = tool.id.clone();
         let (allow, _, options) = approval_options("Create bot once", "Deny");
@@ -793,7 +797,7 @@ impl Runtime {
             paths: Vec::new(),
             local_only: None,
         };
-        let choice = self.approve(run, permission, Some(tool)).await?;
+        let choice = self.approve_category(run, PermissionCategory::BotCreate, permission, tool).await?;
         if choice.as_deref() != Some(allow.as_str()) || run.inactive() {
             let message = "Bot creation was denied or cancelled.";
             self.settle_tool(run, &tool_id, ToolStatus::Failed, Some(message.into())).await;
