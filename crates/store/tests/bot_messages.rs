@@ -52,6 +52,7 @@ async fn sending(f: &Fixture) -> Exchange {
                 bot_exchange_ids: None,
                 source_bot_id: None,
                 attachments: None,
+                speaker_bot_id: None,
             });
             conversation.run = RunState { id: run.clone(), status: RunStatus::Running, started_at: Some(now), ..RunState::idle() };
             Ok(())
@@ -86,6 +87,7 @@ async fn answer(f: &Fixture, delivery: &BotDelivery, text: &str, status: RunStat
                     bot_exchange_ids: None,
                     source_bot_id: Some(from),
                     attachments: None,
+                    speaker_bot_id: None,
                 },
                 Message {
                     id: new_id(),
@@ -96,6 +98,7 @@ async fn answer(f: &Fixture, delivery: &BotDelivery, text: &str, status: RunStat
                     bot_exchange_ids: None,
                     source_bot_id: None,
                     attachments: None,
+                    speaker_bot_id: None,
                 },
             ];
             conversation.run = RunState { id: new_id(), status: RunStatus::Running, started_at: Some(now.clone()), ..RunState::idle() };
@@ -228,7 +231,7 @@ async fn bot_message_chains_are_limited_to_four_hops() {
             .mutate(|s| {
                 let conversation = s.conversation_mut(&recipient)?;
                 conversation.messages = vec![
-                    Message { id: new_id(), role: Role::User, text, created_at: now.clone(), tools: vec![], bot_exchange_ids: None, source_bot_id: Some(from), attachments: None },
+                    Message { id: new_id(), role: Role::User, text, created_at: now.clone(), tools: vec![], bot_exchange_ids: None, source_bot_id: Some(from), attachments: None, speaker_bot_id: None },
                     Message {
                         id: message.clone(),
                         role: Role::Assistant,
@@ -238,6 +241,7 @@ async fn bot_message_chains_are_limited_to_four_hops() {
                         bot_exchange_ids: None,
                         source_bot_id: None,
                         attachments: None,
+                        speaker_bot_id: None,
                     },
                 ];
                 conversation.run = RunState { id: run.clone(), status: RunStatus::Running, started_at: Some(now), ..RunState::idle() };
@@ -389,6 +393,7 @@ async fn recipient_failures_and_queued_cancellation_are_durable_terminal_results
                 bot_exchange_ids: None,
                 source_bot_id: None,
                 attachments: None,
+                speaker_bot_id: None,
             });
             conversation.run = RunState { id: run.clone(), status: RunStatus::Running, started_at: Some(now), ..RunState::idle() };
             Ok(())

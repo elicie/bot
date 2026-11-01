@@ -9,6 +9,7 @@
 
 pub mod app;
 pub mod chat_features;
+mod groups_http;
 pub mod http;
 mod http_bots;
 pub mod permission_rules;

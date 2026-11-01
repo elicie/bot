@@ -276,6 +276,7 @@ async fn snapshot_redaction_keeps_identifiers_enums_and_link_arrays() {
                 bot_exchange_ids: None,
                 source_bot_id: None,
                 attachments: None,
+                speaker_bot_id: None,
             });
             c.run = RunState {
                 id: "run-a".into(),

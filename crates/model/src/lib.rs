@@ -138,6 +138,9 @@ pub struct Message {
     pub bot_exchange_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_bot_id: Option<String>,
+    /// Group conversations: the member bot that wrote this assistant message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_bot_id: Option<String>,
     /// Files the user attached to this message (metadata; contents live in private blobs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<Attachment>>,
@@ -285,6 +288,89 @@ pub struct Conversation {
     pub session_fingerprint: Option<String>,
     pub run: RunState,
     pub updated_at: String,
+    /// Group conversations: the group ID (`bot_id` holds the same ID).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    /// Thread conversations: the message the thread replies to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<ThreadLink>,
+    /// Group conversations: members still to answer the latest user message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_round: Option<GroupRound>,
+    /// Group conversations: one engine session per member bot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_sessions: Option<Vec<MemberSession>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadLink {
+    pub parent_conversation_id: String,
+    pub parent_message_id: String,
+}
+
+/// The ordered member turns that answer one user message in a group conversation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GroupRound {
+    pub id: String,
+    pub user_message_id: String,
+    /// Members that have not started yet, in speaking order.
+    pub pending_bot_ids: Vec<String>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MemberSession {
+    pub bot_id: String,
+    pub session_id: String,
+    pub session_fingerprint: String,
+}
+
+/// A group chat: several bots answering in one conversation. Listed in the sidebar like a bot.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Group {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<AvatarShape>,
+    /// Speaking order.
+    pub member_bot_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// `POST /api/groups` body.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GroupInput {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<AvatarShape>,
+    pub member_bot_ids: Vec<String>,
+}
+
+/// `PATCH /api/groups/:id` body.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GroupPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<AvatarShape>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_bot_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -502,6 +588,8 @@ pub struct DiskState {
     pub bot_deliveries: Vec<BotDelivery>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permission_rules: Vec<PermissionRule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<Group>,
 }
 
 /// Public snapshot sent to browsers over HTTP and SSE.
@@ -517,6 +605,9 @@ pub struct AppState {
     pub bot_deliveries: Vec<BotDelivery>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permission_rules: Vec<PermissionRule>,
+    /// Omitted when empty, like `state.json`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<Group>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routine_scheduling_error: Option<String>,
     pub settings: PublicSettings,

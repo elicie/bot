@@ -20,6 +20,8 @@ export interface Message {
   tools: ToolActivity[];
   botExchangeIds?: string[];
   sourceBotId?: string;
+  /** Group conversations: the member bot that wrote this assistant message. */
+  speakerBotId?: string;
   attachments?: Attachment[];
 }
 /** A user attachment; its bytes are served by `GET /api/conversations/:id/attachments/:attachmentId`. */
@@ -90,7 +92,28 @@ export interface Conversation {
   sessionFingerprint?: string;
   run: RunState;
   updatedAt: string;
+  /** Group conversations: the group ID (`botId` holds the same ID). */
+  groupId?: string;
+  /** Thread conversations: the message the thread replies to. */
+  thread?: ThreadLink;
+  /** Group conversations: members still to answer the latest user message. */
+  groupRound?: GroupRound;
+  memberSessions?: { botId: string; sessionId: string; sessionFingerprint: string }[];
 }
+export interface ThreadLink { parentConversationId: string; parentMessageId: string }
+export interface GroupRound { id: string; userMessageId: string; pendingBotIds: string[]; createdAt: string }
+export interface Group {
+  id: string;
+  name: string;
+  color: string;
+  shape?: AvatarShape;
+  /** Speaking order. */
+  memberBotIds: string[];
+  pinned?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface GroupInput { name: string; color?: string; shape?: AvatarShape; memberBotIds: string[] }
 export type AvatarShape = 'blob' | 'cloud' | 'square' | 'spark' | 'clover' | 'heart' | 'flower' | 'droplet' | 'pill' | 'wedge' | 'house' | 'star' | 'hexagon' | 'pumpkin';
 export interface Skill {
   id: string;
@@ -201,6 +224,7 @@ export interface AppState {
   botExchanges?: BotExchange[];
   botDeliveries?: BotDelivery[];
   permissionRules?: PermissionRule[];
+  groups?: Group[];
   routineSchedulingError?: string;
   settings: PublicSettings;
   runtime: RuntimeInfo;

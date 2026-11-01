@@ -1,4 +1,5 @@
-import { useEffect, useLayoutEffect, useRef, type FormEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, type FormEvent, type ReactNode } from 'react';
+import Markdown from 'react-markdown';
 import {
   ArrowDown,
   ArrowUp,
@@ -98,7 +99,7 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
     </details>
   );
 }
-function MessageView({ message, bot, conversationId }: { message: Message; bot: Bot; conversationId?: string }) {
+function MessageView({ message, bot, conversationId, named }: { message: Message; bot: Bot; conversationId?: string; named?: boolean }) {
   return (
     <article
       className={`message-row ${message.role}`}
@@ -106,6 +107,7 @@ function MessageView({ message, bot, conversationId }: { message: Message; bot: 
     >
       {message.role === 'assistant' && <Avatar color={bot.color} seed={bot.id} shape={bot.shape} size={25} />}
       <div className="message-content">
+        {named && message.role === 'assistant' && <strong className="message-speaker" style={{ color: bot.color === '#ffffff' ? undefined : bot.color }}>{bot.name}</strong>}
         {conversationId && !!message.attachments?.length && (
           <MessageAttachments conversationId={conversationId} attachments={message.attachments} />
         )}
@@ -214,6 +216,8 @@ export function Transcript({
   data,
   onBotChat,
   onRoutines,
+  speakerFor,
+  messageExtras,
 }: {
   bot: Bot;
   conversation?: Conversation;
@@ -228,6 +232,10 @@ export function Transcript({
   data?: AppState;
   onBotChat?: (id: string) => void;
   onRoutines?: () => void;
+  /** Group conversations: the member bot that wrote an assistant message. */
+  speakerFor?: (message: Message) => Bot | undefined;
+  /** Extra controls under a message (thread links). */
+  messageExtras?: (message: Message) => ReactNode;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const nearBottom = useRef(true);
@@ -309,9 +317,10 @@ export function Transcript({
               {dateKey(message.createdAt) !== dateKey(messages[index - 1]?.createdAt ?? '') && (
                 <div className="date-label">{dateKey(message.createdAt)}</div>
               )}
-              <MessageView message={message} bot={bot} conversationId={conversation?.id} />
+              <MessageView message={message} bot={speakerFor?.(message) ?? bot} conversationId={conversation?.id} named={!!speakerFor} />
               {data && onBotChat && <BotMessageLinks message={message} data={data} onOpen={onBotChat} />}
               {onRoutines && <RoutineLinks message={message} onOpen={onRoutines} />}
+              {messageExtras?.(message)}
             </div>
           ))}
           {queuedRoutine && (
@@ -398,12 +407,15 @@ export function Composer({
   busy,
   model,
   attachments,
+  placeholder,
+  label = '메시지',
 }: {
   botName: string;
   value: string;
   onChange: (value: string) => void;
   onSend: () => void;
-  onFiles: () => void;
+  /** Omitted where no workspace panel exists (group chats, threads). */
+  onFiles?: () => void;
   onCancel: () => void;
   running: boolean;
   disabled: boolean;
@@ -411,6 +423,8 @@ export function Composer({
   model: string;
   /** Pending files of this draft; omitted where attachments are not offered. */
   attachments?: ComposerAttachments;
+  placeholder?: string;
+  label?: string;
 }) {
   const textarea = useRef<HTMLTextAreaElement>(null);
   const attachable = !!attachments && !disabled && !busy && !running;
@@ -432,15 +446,17 @@ export function Composer({
         <AttachmentTray items={attachments.items} errors={attachments.errors} disabled={busy} onRemove={attachments.remove} onDismiss={attachments.dismiss} />
       )}
       <form className="composer" onSubmit={submit}>
-        <IconButton label="작업 폴더 열기" className="attach-button" onClick={onFiles}>
-          <Plus size={20} />
-        </IconButton>
+        {onFiles && (
+          <IconButton label="작업 폴더 열기" className="attach-button" onClick={onFiles}>
+            <Plus size={20} />
+          </IconButton>
+        )}
         {attachments && <AttachButton disabled={!attachable} onFiles={attachments.add} />}
         <textarea
           ref={textarea}
           rows={1}
-          aria-label="메시지"
-          placeholder={`${botName}에게 메시지 보내기`}
+          aria-label={label}
+          placeholder={placeholder ?? `${botName}에게 메시지 보내기`}
           value={value}
           onChange={(event) => onChange(event.target.value)}
           onPaste={(event) => {

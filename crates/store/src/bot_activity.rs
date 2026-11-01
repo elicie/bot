@@ -117,6 +117,8 @@ impl State {
         // be loaded again.
         crate::disk::references_valid(&candidate).map_err(|_| HttpError::conflict("This bot is still linked to other history and cannot be deleted."))?;
         *self.disk_mut() = candidate;
+        // Groups keep their conversations; the deleted bot leaves their members and pending rounds.
+        self.remove_bot_from_groups(id);
         let mut removed: Vec<String> = conversations.into_iter().collect();
         removed.sort();
         Ok(removed)

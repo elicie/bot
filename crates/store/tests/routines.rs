@@ -60,6 +60,7 @@ async fn version_one_migration_retains_bots_settings_secrets_messages_and_sessio
                 bot_exchange_ids: None,
                 source_bot_id: None,
                 attachments: None,
+                speaker_bot_id: None,
             });
             c.run = RunState { id: "saved-run".into(), status: RunStatus::Completed, ..RunState::idle() };
             Ok(())
@@ -577,11 +578,16 @@ async fn routine_count_is_bounded_and_oversize_mutations_leave_existing_state_un
             bot_exchange_ids: None,
             source_bot_id: None,
             attachments: None,
+            speaker_bot_id: None,
         }],
         session_id: None,
         session_fingerprint: None,
         run: RunState { status: RunStatus::Completed, ..RunState::idle() },
         updated_at: f.iso_now(),
+        group_id: None,
+        thread: None,
+        group_round: None,
+        member_sessions: None,
     };
     let edit = RoutineInput { name: "Would exceed capacity".into(), ..f.input(interval(1)) };
     let error = f

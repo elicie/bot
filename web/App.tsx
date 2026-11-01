@@ -17,6 +17,7 @@ import type {
   AppState,
   Bot,
   Conversation,
+  Group,
   Routine,
   RoutineInput,
   RoutineRunResult,
@@ -32,6 +33,8 @@ import { Computer } from './Computer';
 import { Routines, type RoutineDraftStatus } from './Routines';
 import { Settings } from './Settings';
 import { Skills, confirmSkillsNavigation } from './Skills';
+import { GroupDialog, GroupList, GroupView, shownGroupConversation } from './Groups';
+import { ThreadLinks, ThreadPanel } from './Threads';
 import {
   activeRun,
   conversationPreview,
@@ -64,6 +67,7 @@ function historyPosition(): number {
 export function App() {
   const [state, dispatch] = useReducer(reducer, undefined, initialState);
   const [detailsTab, setDetailsTab] = useState<DetailsTab>('computer');
+  const [groupDialog, setGroupDialog] = useState<{ group?: Group } | null>(null);
   const [connectionAttempt, reconnect] = useReducer((attempt: number) => attempt + 1, 0);
   const current = useRef(state);
   current.current = state;
@@ -555,10 +559,27 @@ export function App() {
   };
   const botConversations = conversationsFor(data, bot?.id ?? null);
   useBotActivity({ data, selection: state.selection, chat: state.surface.kind === 'chat', onRead: markRead, onOpen: select });
+  // Group chats and threads (Groups.tsx, Threads.tsx).
+  const snapshot = (next: AppState) => dispatch({ type: 'snapshot', data: next });
+  const surface = state.surface;
+  const threadId = surface.kind === 'chat' || surface.kind === 'group' ? surface.thread : undefined;
+  const openThread = (thread?: string) => {
+    const now = current.current.surface;
+    if (now.kind === 'chat') navigate({ selection: current.current.selection, surface: thread ? { kind: 'chat', thread } : { kind: 'chat' } });
+    else if (now.kind === 'group') navigate({ selection: current.current.selection, surface: { kind: 'group', groupId: now.groupId, conversationId: now.conversationId, ...(thread ? { thread } : {}) } });
+  };
+  const openConversation = (item: Conversation) => {
+    const parent = item.thread ? data?.conversations.find(entry => entry.id === item.thread!.parentConversationId) ?? item : item;
+    const thread = item.thread ? { thread: item.id } : {};
+    if (parent.groupId) navigate({ selection: current.current.selection, surface: { kind: 'group', groupId: parent.groupId, conversationId: parent.id, ...thread } });
+    else navigate({ selection: { botId: parent.botId, conversationId: parent.id }, surface: { kind: 'chat', ...thread } });
+  };
+  const shownIds = [surface.kind === 'chat' ? conversation?.id : surface.kind === 'group' ? shownGroupConversation(data, surface)?.id : undefined, threadId];
+  const openGroupDialog = (group?: Group) => { dispatch({ type: 'error', error: null }); dispatch({ type: 'sidebar', open: false }); setGroupDialog({ group }); };
 
 
   return (
-    <div className={`app-shell ${state.computerOpen && state.surface.kind !== 'bot-chat' ? 'computer-is-open' : ''}`}>
+    <div className={`app-shell ${state.computerOpen && state.surface.kind !== 'bot-chat' && state.surface.kind !== 'group' ? 'computer-is-open' : ''} ${threadId ? 'thread-is-open' : ''}`}>
       {state.sidebarOpen && (
         <button
           type="button"
@@ -578,13 +599,16 @@ export function App() {
           onUnread={(target, unread) => void botState(target.id, 'unread', { unread })}
           onNotify={(target, enabled) => void setNotify(target, enabled)}
           onDelete={(target) => { dispatch({ type: 'error', error: null }); setDeleting(target); }} />}
+        extra={<GroupList data={data} search={state.search} selectedId={surface.kind === 'group' ? surface.groupId : null} busy={busy}
+          onOpen={group => navigate({ selection: current.current.selection, surface: { kind: 'group', groupId: group.id, conversationId: surface.kind === 'group' && surface.groupId === group.id ? surface.conversationId : null } })}
+          onCreate={() => openGroupDialog()} onEdit={group => openGroupDialog(group)} />}
       />
       <main
         className="chat-stage reference-chat"
         aria-label={state.surface.kind === 'routines' ? '루틴' : '대화'}
         inert={state.viewport === 'mobile' && state.sidebarOpen}
       >
-        <header className="chat-header" hidden={state.surface.kind === 'bot-chat'}>
+        <header className="chat-header" hidden={state.surface.kind === 'bot-chat' || state.surface.kind === 'group'}>
           <div className="chat-identity-wrap">
             <IconButton
               label="봇 목록 열기"
@@ -665,12 +689,12 @@ export function App() {
             </ErrorNotice>
           </div>
         )}
-        {globalRun && (state.surface.kind === 'routines' || globalRun.id !== conversation?.id) && (
+        {globalRun && !shownIds.includes(globalRun.id) && (
           <div className="other-run">
             <span>다른 대화에서 작업이 실행 중입니다.</span>
             <button
               type="button"
-              onClick={() => select({ botId: globalRun.botId, conversationId: globalRun.id })}
+              onClick={() => openConversation(globalRun)}
             >
               실행 중인 대화 보기
             </button>
@@ -695,12 +719,18 @@ export function App() {
           />
         ) : data && state.surface.kind === 'bot-chat' ? (
           <BotChat data={data} exchangeId={state.surface.exchangeId} onClose={() => navigate({ selection: current.current.selection, surface: { kind: 'chat' } })} onExecution={(botId, conversationId) => select({ botId, conversationId })} />
+        ) : data && state.surface.kind === 'group' ? (
+          <GroupView data={data} surface={state.surface} busy={busy} online={state.connection === 'online'} run={command} onSnapshot={snapshot}
+            onRoute={next => navigate({ selection: current.current.selection, surface: next })} onSidebar={() => dispatch({ type: 'sidebar', open: true })}
+            onEdit={group => openGroupDialog(group)} onThread={(parent, thread) => navigate({ selection: current.current.selection, surface: { kind: 'group', groupId: parent.groupId ?? parent.botId, conversationId: parent.id, thread } })}
+            draft={key => state.drafts[key] ?? ''} onDraft={(key, text) => dispatch({ type: 'draft', key, text })} onSettings={() => settings('models')} />
         ) : data && bot ? (
           <>
             <Transcript
               bot={bot}
               conversation={conversation}
               data={data}
+              messageExtras={message => conversation && <ThreadLinks data={data} conversation={conversation} message={message} busy={busy} run={command} onSnapshot={snapshot} onOpen={thread => openThread(thread)} />}
               onBotChat={exchangeId => navigate({ selection: current.current.selection, surface: { kind: 'bot-chat', exchangeId } })}
               onRoutines={() => navigate({ selection: current.current.selection, surface: { kind: 'routines' } })}
               queuedRoutine={queuedRun}
@@ -764,7 +794,11 @@ export function App() {
           </div>
         )}
       </main>
-      {state.computerOpen && data && bot && state.surface.kind !== 'bot-chat' && (
+      {data && threadId && (
+        <ThreadPanel key={threadId} data={data} threadId={threadId} busy={busy} online={state.connection === 'online'} run={command} onSnapshot={snapshot}
+          onClose={() => openThread()} onSettings={() => settings('models')} />
+      )}
+      {state.computerOpen && data && bot && state.surface.kind !== 'bot-chat' && state.surface.kind !== 'group' && (
         <Details bot={bot} conversation={conversation} data={data} files={state.files} dispatch={dispatch}
           tab={detailsTab} onTab={setDetailsTab} onClose={() => toggleComputer(false)}
           computer={<Computer ownerId={bot.id} canControl={!globalRun} />}
@@ -830,6 +864,11 @@ export function App() {
             select({ botId: bot.id, conversationId: id });
           }}
         />
+      )}
+      {groupDialog && data && (
+        <GroupDialog data={data} group={groupDialog.group} busy={busy} error={state.error} run={command} onSnapshot={snapshot} onClose={() => setGroupDialog(null)}
+          onCreated={group => navigate({ selection: current.current.selection, surface: { kind: 'group', groupId: group.id, conversationId: null } })}
+          onDeleted={group => { const now = current.current.surface; if (now.kind === 'group' && now.groupId === group.id) navigate({ selection: current.current.selection, surface: { kind: 'chat' } }); }} />
       )}
       {state.overlay?.kind === 'capabilities' && bot && (
         <Skills key={bot.id} bot={bot} busy={busy || !!globalRun} onClose={closeOverlay}

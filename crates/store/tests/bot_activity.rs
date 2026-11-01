@@ -37,6 +37,7 @@ fn message(role: Role, text: &str, now: &str) -> Message {
         bot_exchange_ids: None,
         source_bot_id: None,
         attachments: None,
+        speaker_bot_id: None,
     }
 }
 
@@ -402,4 +403,17 @@ async fn deleting_a_bot_removes_its_scoped_permission_rules_only() {
     assert_eq!(rules.len(), 2, "{rules:?}");
     assert!(rules.iter().all(|rule| rule.bot_id.as_deref() != Some(gone.as_str())));
     assert!(rules.iter().any(|rule| rule.bot_id.as_deref() == Some(keep.as_str())));
+}
+
+#[tokio::test]
+async fn deleting_a_bot_removes_it_from_groups() {
+    let f = Fixture::new().await;
+    let a = add_bot(&f, "A").await;
+    let b = add_bot(&f, "B").await;
+    let members = vec![f.bot_id(), a.clone(), b.clone()];
+    let group = f.store.mutate(move |s| s.add_group(GroupInput { name: "Team".into(), color: None, shape: None, member_bot_ids: members })).await.unwrap();
+    let target = a.clone();
+    f.store.mutate(move |s| s.delete_bot(&target)).await.unwrap();
+    let saved = f.store.read(|s| s.disk().groups.iter().find(|g| g.id == group.id).cloned().unwrap());
+    assert_eq!(saved.member_bot_ids, vec![f.bot_id(), b]);
 }

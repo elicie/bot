@@ -5,7 +5,7 @@ import { activeRun, conversationPreview, conversationsFor, type Selection } from
 import { Avatar, IconButton, Spinner } from './ui';
 import './workspace.css';
 
-export function Sidebar({ data, selection, lastConversation, chat, search, open, mobile, busy, onSearch, onSelect, onClose, onNew, onSettings, onRoutines, onCapabilities, onPatch, menuExtras }: {
+export function Sidebar({ data, selection, lastConversation, chat, search, open, mobile, busy, onSearch, onSelect, onClose, onNew, onSettings, onRoutines, onCapabilities, onPatch, menuExtras, extra }: {
   data: AppState | null; selection: Selection; lastConversation: Record<string, string | null>; chat: boolean;
   search: string; open: boolean; mobile: boolean; busy: boolean;
   onSearch: (value: string) => void; onSelect: (selection: Selection) => void; onClose: () => void;
@@ -13,6 +13,8 @@ export function Sidebar({ data, selection, lastConversation, chat, search, open,
   onPatch: (id: string, patch: Partial<Pick<Bot, 'pinned' | 'hidden'>>) => void;
   /** Extra context-menu items (read state, notifications, delete). */
   menuExtras?: (bot: Bot, close: () => void) => ReactNode;
+  /** Extra sidebar entries (group chats), rendered after the bots. */
+  extra?: ReactNode;
 }) {
   const [compact, setCompact] = useState(() => localStorage.getItem('grok-bot-sidebar-compact') === 'true');
   const [hidden, showHidden] = useState(false);
@@ -74,6 +76,7 @@ export function Sidebar({ data, selection, lastConversation, chat, search, open,
         {hidden && <div className="sidebar-section-heading">숨긴 Bot<button onClick={() => showHidden(false)}>돌아가기</button></div>}
         {!!pinned.length && <section className="pinned-bots" aria-label="고정된 봇">{pinned.map(bot => row(bot, true))}</section>}
         <div className="ordinary-bots">{normal.map(bot => row(bot, false))}</div>
+        {!hidden && extra}
         {!bots.length && <p className="sidebar-empty">{search ? '검색 결과가 없습니다.' : hidden ? '숨긴 Bot이 없습니다.' : '봇을 추가해 대화를 시작하세요.'}</p>}
       </>}
     </div>

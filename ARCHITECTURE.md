@@ -40,6 +40,20 @@ Rules map an action category (`file_write`, `bot_message`, `bot_create`, `skill_
 
 The recipient runs under its own identity with file and computer tools denied. Its one terminal final answer is projected once into the exchange. Dedicated recipient conversations reject user-prompt hijacking. The routine dispatcher admits both routine claims and bot deliveries in FIFO order under the same global execution slot. Queued deliveries survive startup; started deliveries become interrupted without resend. Pair transcripts use query routing and preserve the originating chat draft.
 
+## Group chats and threads
+
+A `Group` lists 2–12 member bots in speaking order, plus a name, color, and avatar shape. It appears in the sidebar beside the bots. A group conversation stores the group ID in both `botId` and `groupId`, so routines, deliveries, and 1:1 runs cannot resolve it as a bot.
+
+Each user message opens a round. If the message mentions members by whole name (`@Name`, case-insensitive, not inside a word), only those members answer. Otherwise every member answers. In both cases members answer in member order, once each. Their replies never start further member turns, so bots cannot loop.
+
+The first member takes the user's turn. The remaining members are stored durably in `Conversation.groupRound.pendingBotIds`. The dispatcher starts each one as FIFO work under the single global execution slot. The runtime wakes the dispatcher whenever a run settles.
+
+Every answer records its speaker in `Message.speakerBotId` and runs under that member's identity, instructions, and skills. Each member has its own engine session (`Conversation.memberSessions`, `grok/<conversation>/<bot>/<fingerprint>`). A member whose session is loaded receives the transcript since its last reply. A member starting a fresh session receives the bounded transcript so far. Either way the transcript arrives as quoted JSON conversation data.
+
+Stopping or failing a member turn also clears the members still queued. Cancelling between turns does the same. Member edits and group deletion wait for an idle app and a finished round. Deleting a group removes its conversations and threads and keeps its bots. Loading `state.json` drops members whose bot no longer exists, and `State::remove_bot_from_groups` does the same at runtime. Hidden bots stay members.
+
+A thread is a conversation linked to one message (`Conversation.thread`). It inherits the parent's `botId` and `groupId`, so a thread of a group conversation is answered by the group. A message has at most one thread, and threads cannot be nested. A fresh thread session receives the parent message and up to eight preceding messages as quoted data, bounded to 12 KiB each. Threads open beside the main chat (full screen below 760 px) through the `thread` query parameter. Group routes use `?group=&conversation=&thread=`.
+
 ## Managed computer
 
 `shared/computer.ts` defines a typed 960 × 600 browser surface. `ManagedComputer` owns a fresh private Chrome, an ephemeral profile, a mandatory verified sandbox, an authenticated loopback proxy, and a public-origin allowlist. Request UUIDs are one-use; epoch and frame UUIDs prevent stale actions. Public-address validation covers all DNS answers, and the proxy pins the selected validated address. HTTP methods, credentials, sensitive controls, downloads/uploads, workers, WebSockets, WebRTC, and native OS actions are restricted. Browser sandbox verification fails closed.
@@ -97,6 +111,11 @@ All JSON mutations send `Content-Type: application/json` and `X-Grok-Bot: 1`. Th
 | GET | `/api/conversations/:id/attachments/:attachmentId` | | stored bytes (`text/plain` or image) |
 | POST | `/api/conversations/:id/cancel` | `{}` | `AppState` |
 | POST | `/api/conversations/:id/permissions/:permissionId` | `{ optionId }` | `AppState` |
+| POST | `/api/groups` | `{ name, color?, shape?, memberBotIds }` | `{ group, state }`, status 201 |
+| PATCH | `/api/groups/:id` | `{ name?, color?, shape?, memberBotIds?, pinned? }` | `AppState` |
+| DELETE | `/api/groups/:id` | `{}` | `AppState` |
+| POST | `/api/groups/:id/conversations` | `{}` | `{ conversation, state }`, status 201 |
+| POST | `/api/conversations/:id/threads` | `{ messageId }` | `{ conversation, state }`, status 201 (200 when the thread exists) |
 | GET | `/api/files?path=` | workspace-relative directory | `FileListing` |
 | GET | `/api/file?path=` | workspace-relative file | `FileDocument` |
 | PUT | `/api/file` | `{ path, content, hash }` | `FileDocument` |

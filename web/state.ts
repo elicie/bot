@@ -18,7 +18,11 @@ export interface Selection {
   botId: string | null;
   conversationId: string | null;
 }
-export type Surface = { kind: 'chat' } | { kind: 'routines' } | { kind: 'bot-chat'; exchangeId: string };
+export type Surface =
+  | { kind: 'chat'; thread?: string }
+  | { kind: 'routines' }
+  | { kind: 'bot-chat'; exchangeId: string }
+  | { kind: 'group'; groupId: string; conversationId: string | null; thread?: string };
 export interface AppRoute {
   selection: Selection;
   surface: Surface;
@@ -70,7 +74,7 @@ export const queuedRoutineRun = (data: AppState | null, conversation: Conversati
     : undefined;
 export const conversationsFor = (data: AppState | null, botId: string | null) =>
   (data?.conversations ?? [])
-    .filter((conversation) => conversation.botId === botId)
+    .filter((conversation) => conversation.botId === botId && !conversation.thread)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 export const selectedBot = (state: UIState) =>
   state.data?.bots.find((bot) => bot.id === state.selection.botId);
@@ -94,17 +98,31 @@ export const emptyFiles = (): FilesState => ({
 
 export function readRoute(search = window.location.search): AppRoute {
   const params = new URLSearchParams(search);
+  const thread = params.get('thread') ? { thread: params.get('thread')! } : {};
+  const group = params.get('group');
+  if (group)
+    return {
+      selection: { botId: params.get('bot'), conversationId: null },
+      surface: { kind: 'group', groupId: group, conversationId: params.get('conversation'), ...thread },
+    };
   return {
     selection: { botId: params.get('bot'), conversationId: params.get('conversation') },
-    surface: params.get('view') === 'routines' ? { kind: 'routines' } : params.get('view') === 'bot-chat' && params.get('exchange') ? { kind: 'bot-chat', exchangeId: params.get('exchange')! } : { kind: 'chat' },
+    surface: params.get('view') === 'routines' ? { kind: 'routines' } : params.get('view') === 'bot-chat' && params.get('exchange') ? { kind: 'bot-chat', exchangeId: params.get('exchange')! } : { kind: 'chat', ...thread },
   };
 }
 export function routeSearch(route: AppRoute): string {
   const params = new URLSearchParams();
+  if (route.surface.kind === 'group') {
+    params.set('group', route.surface.groupId);
+    if (route.surface.conversationId) params.set('conversation', route.surface.conversationId);
+    if (route.surface.thread) params.set('thread', route.surface.thread);
+    return `?${params}`;
+  }
   if (route.selection.botId) params.set('bot', route.selection.botId);
   if (route.selection.conversationId) params.set('conversation', route.selection.conversationId);
   if (route.surface.kind === 'routines') params.set('view', 'routines');
   if (route.surface.kind === 'bot-chat') { params.set('view', 'bot-chat'); params.set('exchange', route.surface.exchangeId); }
+  if (route.surface.kind === 'chat' && route.surface.thread) params.set('thread', route.surface.thread);
   return params.size ? `?${params}` : '';
 }
 export function initialState(): UIState {
