@@ -95,6 +95,9 @@ pub(crate) fn references_valid(disk: &DiskState) -> Result<(), String> {
         validate_skill_set(bot.skills.as_deref().unwrap_or_default()).map_err(|error| error.message)?;
     }
     let bot_ids: HashSet<&str> = disk.bots.iter().map(|bot| bot.id.as_str()).collect();
+    if disk.main_bot_id.as_deref().is_some_and(|id| !bot_ids.contains(id)) {
+        return Err("The main bot must be an existing bot.".into());
+    }
     let conversation_ids: HashSet<&str> = disk.conversations.iter().map(|conversation| conversation.id.as_str()).collect();
     let entity_ids: Vec<&str> = bot_ids
         .iter()

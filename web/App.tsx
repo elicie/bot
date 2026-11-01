@@ -56,6 +56,7 @@ import {
 } from './state';
 import { Avatar, ErrorNotice, IconButton, Spinner } from './ui';
 import { BotDeleteDialog, BotMenuExtras } from './BotMenu';
+import { MainBotDialog } from './MainBot';
 import { notificationDeniedText, notificationUnavailableText, requestNotificationPermission, useBotActivity } from './activity';
 import { admitFiles, uploads, type PendingAttachment } from './Attachments';
 
@@ -105,6 +106,7 @@ export function App() {
   const pendingRef = useRef(pendingFiles);
   pendingRef.current = pendingFiles;
   const [deleting, setDeleting] = useState<Bot | null>(null);
+  const [choosingMain, setChoosingMain] = useState<{ botId?: string } | null>(null);
   const reading = useRef(new Set<string>());
 
   useEffect(() => {
@@ -598,7 +600,8 @@ export function App() {
         menuExtras={(item, close) => <BotMenuExtras bot={item} busy={busy || !!globalRun} close={close}
           onUnread={(target, unread) => void botState(target.id, 'unread', { unread })}
           onNotify={(target, enabled) => void setNotify(target, enabled)}
-          onDelete={(target) => { dispatch({ type: 'error', error: null }); setDeleting(target); }} />}
+          onDelete={(target) => { dispatch({ type: 'error', error: null }); setDeleting(target); }}
+          onChooseMain={(target) => { dispatch({ type: 'error', error: null }); dispatch({ type: 'sidebar', open: false }); setChoosingMain({ botId: target.id }); }} />}
         extra={<GroupList data={data} search={state.search} selectedId={surface.kind === 'group' ? surface.groupId : null} busy={busy}
           onOpen={group => navigate({ selection: current.current.selection, surface: { kind: 'group', groupId: group.id, conversationId: surface.kind === 'group' && surface.groupId === group.id ? surface.conversationId : null } })}
           onCreate={() => openGroupDialog()} onEdit={group => openGroupDialog(group)} />}
@@ -851,6 +854,10 @@ export function App() {
           busy={state.command === 'bot-delete'} error={state.error}
           onCancel={() => { setDeleting(null); dispatch({ type: 'error', error: null }); }}
           onConfirm={() => void deleteBot(deleting)} />
+      )}
+      {choosingMain && data && (
+        <MainBotDialog data={data} initial={choosingMain.botId} busy={state.command === 'main-bot'} running={!!globalRun} error={state.error} run={command}
+          onSnapshot={(snapshot) => dispatch({ type: 'snapshot', data: snapshot })} onClose={() => { setChoosingMain(null); dispatch({ type: 'error', error: null }); }} />
       )}
       {state.overlay?.kind === 'history' && bot && (
         <History

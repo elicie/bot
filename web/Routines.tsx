@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState } from 'react';
 import { Clock3, Pause, Pencil, Play, Plus, Repeat2, Trash2 } from 'lucide-react';
 import type { AppState, Routine, RoutineInput, RoutineRun, RoutineSchedule } from '../shared/types';
-import { activeRun, runLabels, type Selection } from './state';
+import { activeRun, mainBotId, runLabels, type Selection } from './state';
 import { Avatar, ErrorNotice } from './ui';
 import { RoutineWebhook } from './RoutineWebhook';
 import './routines.css';
@@ -242,7 +242,7 @@ export function Routines({
     setView(next);
   };
   const edit = (item?: Routine) => {
-    const draft = routineDraft(selectedBotId ?? data.bots[0]?.id ?? '', item);
+    const draft = routineDraft(selectedBotId ?? mainBotId(data) ?? '', item);
     changeView({ kind: 'editor', id: item?.id ?? null, initial: draft, draft });
   };
   const updateDraft = (change: Partial<RoutineDraft>) => {

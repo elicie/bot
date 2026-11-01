@@ -1,13 +1,20 @@
-// Assistant Markdown with KaTeX math (`$…$`, `$$…$$`) and Mermaid diagrams (```mermaid fences).
+// Assistant Markdown with KaTeX math (`$…$`, `$$…$$`), Mermaid diagrams (```mermaid fences), and
+// sandboxed visualization previews (```html, ```svg, ```visualization fences; `Visualization.tsx`).
+// A rendered diagram opens "다이어그램 미리보기"; an image opens "미디어 미리보기" (`Previews.tsx`).
 //
 // Safety: raw HTML in messages stays skipped. KaTeX runs with `trust: false` and its output enters
 // the tree as parsed elements, never as an HTML string. Mermaid renders with `securityLevel:
 // 'strict'` and the resulting SVG is shown through an <img> (a blob URL), where SVG cannot run
 // scripts or reach the page. Both libraries load only when a message needs them, and anything
-// that fails to render falls back to its source as code.
+// that fails to render falls back to its source as code. Markdown images are shown only when they
+// cannot reach the network: `data:` images and this app's own attachment URLs. Any other image
+// stays a text placeholder.
 
 import { useEffect, useState, type ReactNode } from 'react';
-import Markdown, { type Components, type Options } from 'react-markdown';
+import Markdown, { defaultUrlTransform, type Components, type Options, type UrlTransform } from 'react-markdown';
+import { DiagramPreview, PreviewTrigger, PreviewableImage } from './Previews';
+import { VisualizationCard } from './Visualization';
+import { visualizationLanguages } from './visualization-document';
 import './chat-features.css';
 
 interface MathPlugins {
@@ -76,6 +83,7 @@ function CodeFallback({ source, note }: { source: string; note?: string }) {
 }
 
 function MermaidDiagram({ source }: { source: string }) {
+  const [preview, setPreview] = useState(false);
   const [state, setState] = useState<{ status: 'loading' } | { status: 'ready'; url: string; label: string; width?: number; height?: number } | { status: 'error' }>({ status: 'loading' });
   useEffect(() => {
     if (source.length > maxDiagramSource) { setState({ status: 'error' }); return; }
@@ -100,25 +108,50 @@ function MermaidDiagram({ source }: { source: string }) {
   if (state.status === 'error') return <CodeFallback source={source} note="다이어그램을 표시할 수 없어 코드로 보여드려요." />;
   if (state.status === 'loading') return <div className="diagram-loading" role="status">다이어그램 그리는 중…</div>;
   return <figure className="mermaid-diagram" data-diagram={state.label}>
-    <img src={state.url} alt={`Mermaid 다이어그램 (${state.label})`} width={state.width} height={state.height} />
+    <PreviewTrigger label="다이어그램 전체 화면으로 열기" onOpen={() => setPreview(true)}>
+      <img src={state.url} alt={`Mermaid 다이어그램 (${state.label})`} width={state.width} height={state.height} />
+    </PreviewTrigger>
+    {preview && <DiagramPreview src={state.url} label={state.label} width={state.width} height={state.height} onClose={() => setPreview(false)} />}
   </figure>;
 }
 
 type HastNode = { type: string; value?: string; tagName?: string; properties?: { className?: unknown }; children?: HastNode[] };
 const textOf = (node: HastNode): string => node.type === 'text' ? node.value ?? '' : (node.children ?? []).map(textOf).join('');
 
+/** `data:` images (base64, raster or SVG) and this app's attachment URLs; nothing that leaves it. */
+const MAX_DATA_IMAGE = 8 * 1024 * 1024;
+const dataImage = /^data:image\/(?:png|jpeg|gif|webp|avif|bmp|svg\+xml);base64,[A-Za-z0-9+/=\s]+$/;
+const attachmentImage = /^\/api\/conversations\/[A-Za-z0-9-]{1,64}\/attachments\/[A-Za-z0-9-]{1,64}$/;
+export function previewableImageSource(src: string | undefined): string | null {
+  if (!src) return null;
+  if (attachmentImage.test(src)) return src;
+  if (src.length <= MAX_DATA_IMAGE && dataImage.test(src)) return src;
+  return null;
+}
+
+// Keep `data:` image sources for the check above (the default transform drops them); everything
+// else goes through react-markdown's safe default.
+const urlTransform: UrlTransform = (url, key, node) =>
+  key === 'src' && node.tagName === 'img' && previewableImageSource(url) ? url : defaultUrlTransform(url);
+
 const components: Components = {
   a: ({ children, href }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
-  img: ({ alt }) => <span className="markdown-image">[이미지{alt ? ` · ${alt}` : ''}]</span>,
+  img: ({ alt, src }) => {
+    const safe = previewableImageSource(typeof src === 'string' ? src : undefined);
+    return safe ? <PreviewableImage src={safe} alt={alt ?? ''} className="markdown-image-preview" loading="lazy" /> : <span className="markdown-image">[이미지{alt ? ` · ${alt}` : ''}]</span>;
+  },
   pre: ({ node, children }) => {
     const code = (node as HastNode | undefined)?.children?.find((child) => child.type === 'element' && child.tagName === 'code');
     const classes = code?.properties?.className;
-    if (code && Array.isArray(classes) && classes.includes('language-mermaid')) return <MermaidDiagram source={textOf(code).replace(/\n$/, '')} />;
+    const language = Array.isArray(classes) ? classes.find((name): name is string => typeof name === 'string' && name.startsWith('language-'))?.slice('language-'.length) : undefined;
+    if (code && language === 'mermaid') return <MermaidDiagram source={textOf(code).replace(/\n$/, '')} />;
+    const visualization = language && Object.hasOwn(visualizationLanguages, language.toLowerCase()) ? visualizationLanguages[language.toLowerCase()] : undefined;
+    if (code && visualization) return <VisualizationCard source={textOf(code).replace(/\n$/, '')} kind={visualization} />;
     return <pre>{children}</pre>;
   },
 };
 
 export function RichMarkdown({ text }: { text: string }): ReactNode {
   const math = useMathPlugins(text);
-  return <Markdown skipHtml remarkPlugins={math?.remark} rehypePlugins={math?.rehype} components={components}>{text}</Markdown>;
+  return <Markdown skipHtml remarkPlugins={math?.remark} rehypePlugins={math?.rehype} components={components} urlTransform={urlTransform}>{text}</Markdown>;
 }

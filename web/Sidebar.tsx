@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Blocks, Eye, EyeOff, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pin, Plus, Repeat2, Search, Settings2, X } from 'lucide-react';
 import type { AppState, Bot } from '../shared/types';
-import { activeRun, conversationPreview, conversationsFor, type Selection } from './state';
+import { activeRun, conversationPreview, conversationsFor, mainBotId, type Selection } from './state';
 import { Avatar, IconButton, Spinner } from './ui';
 import './workspace.css';
 
@@ -33,7 +33,10 @@ export function Sidebar({ data, selection, lastConversation, chat, search, open,
     return () => { document.removeEventListener('click', close); document.removeEventListener('keydown', escape); };
   }, [menu]);
   const bots = (data?.bots ?? []).filter(bot => (hidden ? bot.hidden : !bot.hidden) && bot.name.toLocaleLowerCase().includes(search.toLocaleLowerCase()));
-  const pinned = bots.filter(bot => bot.pinned ?? bot.id === data?.bots[0]?.id);
+  const mainId = mainBotId(data);
+  // The main bot is pinned unless unpinned explicitly, and comes first among the pinned bots.
+  const isPinned = (bot: Bot) => bot.pinned ?? bot.id === mainId;
+  const pinned = bots.filter(isPinned).sort((a, b) => Number(b.id === mainId) - Number(a.id === mainId));
   const normal = bots.filter(bot => !pinned.includes(bot));
   const closeSearch = () => { onSearch(''); setSearchOpen(false); aside.current?.querySelector<HTMLButtonElement>('button[aria-label="검색"]')?.focus(); };
   const selectBot = (bot: Bot) => onSelect({ botId: bot.id, conversationId: selection.botId === bot.id ? selection.conversationId : Object.hasOwn(lastConversation, bot.id) ? lastConversation[bot.id] : conversationsFor(data, bot.id)[0]?.id ?? null });
@@ -41,18 +44,21 @@ export function Sidebar({ data, selection, lastConversation, chat, search, open,
     const latest = conversationsFor(data, bot.id)[0];
     const running = data?.conversations.some(conversation => conversation.botId === bot.id && activeRun(conversation.run.status));
     const unread = !!bot.unread && !(chat && bot.id === selection.botId);
-    return <div className={`bot-item ${tile ? 'pinned-item' : ''}`} key={bot.id}>
+    const main = bot.id === mainId;
+    const described = [main && `main-bot-${bot.id}`, unread && `unread-${bot.id}`].filter(Boolean).join(' ');
+    return <div className={`bot-item ${tile ? 'pinned-item' : ''} ${main ? 'is-main-bot' : ''}`} key={bot.id}>
+      {main && <span id={`main-bot-${bot.id}`} hidden>메인 Bot</span>}
       {unread && <span id={`unread-${bot.id}`} hidden>읽지 않은 활동</span>}
       <button type="button" className={`bot-row ${tile ? 'bot-tile' : ''} ${chat && bot.id === selection.botId ? 'selected' : ''} ${unread ? 'is-unread' : ''}`} aria-current={chat && bot.id === selection.botId ? 'true' : undefined} title={bot.name}
-        aria-describedby={unread ? `unread-${bot.id}` : undefined} data-unread={unread ? 'true' : undefined}
+        aria-describedby={described || undefined} data-unread={unread ? 'true' : undefined} data-main-bot={main ? 'true' : undefined}
         onClick={() => selectBot(bot)} onContextMenu={event => { event.preventDefault(); setMenu(bot.id); }}>
         <span className="bot-avatar"><Avatar color={bot.color} seed={bot.id} shape={bot.shape} size={tile ? 64 : 36} />{running && <span className="running-dot" />}{unread && !running && <span className="unread-dot" aria-hidden="true" />}</span>
-        <span className="bot-copy"><span>{bot.name}</span>{!tile && <small>{conversationPreview(latest)}</small>}</span>
+        <span className="bot-copy"><span>{bot.name}{main && <em className="main-bot-badge" aria-hidden="true">메인 Bot</em>}</span>{!tile && <small>{conversationPreview(latest)}</small>}</span>
       </button>
       <div className="bot-actions">
         <IconButton label={`추가 작업: ${bot.name}`} onClick={() => setMenu(menu === bot.id ? null : bot.id)}><MoreHorizontal size={15} /></IconButton>
         {menu === bot.id && <div className="bot-context" role="menu" aria-label={`${bot.name} 작업`}>
-          <button role="menuitem" disabled={busy} onClick={() => { onPatch(bot.id, { pinned: !(bot.pinned ?? bot.id === data?.bots[0]?.id) }); setMenu(null); }}><Pin size={14} />{(bot.pinned ?? bot.id === data?.bots[0]?.id) ? '고정 해제' : '고정'}</button>
+          <button role="menuitem" disabled={busy} onClick={() => { onPatch(bot.id, { pinned: !isPinned(bot) }); setMenu(null); }}><Pin size={14} />{isPinned(bot) ? '고정 해제' : '고정'}</button>
           <button role="menuitem" disabled={busy} onClick={() => { onPatch(bot.id, { hidden: !bot.hidden }); setMenu(null); }}>{bot.hidden ? <Eye size={14} /> : <EyeOff size={14} />}{bot.hidden ? '사이드바에 표시' : '사이드바에서 숨기기'}</button>
           <button role="menuitem" onClick={() => { void navigator.clipboard?.writeText(bot.id); setMenu(null); }}>Bot ID 복사</button>
           {menuExtras?.(bot, () => setMenu(null))}

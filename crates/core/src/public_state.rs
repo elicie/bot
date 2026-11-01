@@ -201,6 +201,7 @@ mod tests {
             runtime: RuntimeInfo { available: true, version: None, error: None },
             secrets: Vec::new(),
             mcp_servers: Vec::new(),
+            main_bot_id: None,
         }
     }
 

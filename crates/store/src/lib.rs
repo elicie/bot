@@ -25,6 +25,7 @@ pub mod bot_messages;
 mod cron;
 mod disk;
 pub mod knowledge;
+pub mod main_bot;
 pub mod memory;
 pub mod permissions;
 pub mod groups;
@@ -108,7 +109,7 @@ enum Job {
 fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_error: Option<String>) -> AppState {
     let keys = vault::redaction_keys(&disk);
     let (secrets, mcp_servers) = vault::public_vault(&disk);
-    let DiskState { revision, settings, bots, conversations, mut routines, routine_runs, bot_exchanges, bot_deliveries, permission_rules, groups, .. } = disk;
+    let DiskState { revision, settings, bots, conversations, mut routines, routine_runs, bot_exchanges, bot_deliveries, permission_rules, groups, main_bot_id, .. } = disk;
     webhooks::strip_webhook_secrets(&mut routines);
     let mut state = AppState {
         revision,
@@ -130,6 +131,7 @@ fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_err
         runtime,
         secrets,
         mcp_servers,
+        main_bot_id,
     };
     redact::redact_state(&mut state, &keys);
     state
@@ -231,6 +233,7 @@ fn default_state(now: DateTime<Utc>) -> DiskState {
         groups: Vec::new(),
         secrets: Vec::new(),
         mcp_servers: Vec::new(),
+        main_bot_id: None,
     }
 }
 
