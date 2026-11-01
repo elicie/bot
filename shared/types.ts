@@ -75,12 +75,23 @@ export interface Conversation {
   updatedAt: string;
 }
 export type AvatarShape = 'blob' | 'cloud' | 'square' | 'spark' | 'clover' | 'heart' | 'flower' | 'droplet' | 'pill' | 'wedge' | 'house' | 'star' | 'hexagon' | 'pumpkin';
+export interface Skill {
+  id: string;
+  name: string;
+  description: string;
+  instructions: string;
+  enabled: boolean;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
 export interface Bot {
   id: string;
   name: string;
   color: string;
   instructions: string;
   shape?: AvatarShape;
+  skills?: Skill[];
   pinned?: boolean;
   hidden?: boolean;
   createdAt: string;

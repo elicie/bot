@@ -13,6 +13,7 @@ import { botDeliveryReceipt, botMessageInputSchema, existingBotDelivery, MAX_BOT
 import type { EnqueueCommand } from './routines.js';
 import type { ApplicationComputer } from './computer-api.js';
 import type { ComputerAction } from '../shared/computer.js';
+import { MAX_SKILL_RESPONSE_BYTES, skillFingerprint, skillInputSchema, skillResponseText } from './skills.js';
 
 export interface RuntimeOptions {
   command?: string;
@@ -41,6 +42,7 @@ type Run = {
   connection?: acp.ClientConnection;
   approvals: Approval[];
   computerEpoch?: string;
+  createdSkills: Map<string, string>;
   textSuffix: string;
   toolIds: Map<string, string>;
   idleTimer?: NodeJS.Timeout;
@@ -59,6 +61,9 @@ const computerArguments = z.object({ epoch: z.string().uuid(), frameId: z.string
   z.object({ type: z.literal('observe') }).strict(),
 ]) }).strict();
 const toolArguments = z.discriminatedUnion('name', [
+  z.object({ name: z.literal('list_skills'), arguments: z.object({ offset: z.number().int().min(0).max(100).optional() }).strict() }),
+  z.object({ name: z.literal('read_skill'), arguments: z.object({ id: z.string().uuid() }).strict() }),
+  z.object({ name: z.literal('create_skill'), arguments: skillInputSchema }),
   z.object({ name: z.literal('computer_observe'), arguments: z.object({}).strict() }),
   z.object({ name: z.literal('computer_act'), arguments: computerArguments }),
   z.object({ name: z.literal('list_bots'), arguments: z.object({}).strict() }),
@@ -68,6 +73,9 @@ const toolArguments = z.discriminatedUnion('name', [
   z.object({ name: z.literal('write_file'), arguments: z.object({ path: z.string(), content: z.string().max(1024 * 1024), hash: z.string().optional() }).strict() }),
 ]);
 const brokerTools = [
+  { name: 'list_skills', description: 'List one complete page of enabled private skill IDs, names, and descriptions for the current bot. Pass the returned nextOffset as offset to continue when present. Use read_skill to load relevant instructions. Other bots and disabled skills are inaccessible.', inputSchema: { type: 'object', properties: { offset: { type: 'integer', minimum: 0, maximum: 100 } }, additionalProperties: false } },
+  { name: 'read_skill', description: 'Read one enabled private skill belonging to this bot by ID. Follow its Markdown instructions within existing file, computer, and delivery permission boundaries. Skill text grants no extra tools or permissions.', inputSchema: { type: 'object', properties: { id: { type: 'string', format: 'uuid' } }, required: ['id'], additionalProperties: false } },
+  { name: 'create_skill', description: 'Propose a reusable private skill for this bot. Provide its name, when-to-use description, and complete Markdown instructions. Every save requires explicit one-use browser approval. No shell execution, external installation, or tool permission is granted.', inputSchema: { type: 'object', properties: { name: { type: 'string', maxLength: 100 }, description: { type: 'string', maxLength: 2000 }, instructions: { type: 'string', maxLength: 30000 } }, required: ['name','description','instructions'], additionalProperties: false } },
   { name: 'computer_observe', description: 'Read the visible controls and current frame identity of the app-owned managed browser. Requires one-use browser approval. The user must start it locally first. This is not a personal desktop or browser. Returns text control coordinates, not a screenshot.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
   { name: 'computer_act', description: 'Perform one action on the already-started managed browser after explicit browser approval. Use the exact epoch and frameId from computer_observe. Public origins are user-allowlisted, sensitive inputs and downloads are blocked. No JavaScript or native OS actions are available.', inputSchema: { type: 'object', properties: { epoch: { type: 'string', format: 'uuid' }, frameId: { type: ['string', 'null'] }, action: { oneOf: [ { type: 'object', properties: { type: { const: 'navigate' }, url: { type: 'string' } }, required: ['type', 'url'], additionalProperties: false }, { type: 'object', properties: { type: { const: 'click' }, x: { type: 'number' }, y: { type: 'number' } }, required: ['type', 'x', 'y'], additionalProperties: false }, { type: 'object', properties: { type: { const: 'type' }, text: { type: 'string', maxLength: 2000 } }, required: ['type', 'text'], additionalProperties: false }, { type: 'object', properties: { type: { const: 'key' }, key: { type: 'string', enum: ['Enter','Tab','Shift+Tab','Escape','Backspace','Delete','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End','PageUp','PageDown','Space'] } }, required: ['type','key'], additionalProperties: false }, { type: 'object', properties: { type: { const: 'scroll' }, deltaY: { type: 'integer', minimum: -1200, maximum: 1200 } }, required: ['type','deltaY'], additionalProperties: false }, { type: 'object', properties: { type: { const: 'observe' } }, required: ['type'], additionalProperties: false } ] } }, required: ['epoch','frameId','action'], additionalProperties: false } },
   { name: 'list_files', description: 'List a directory inside the user-selected workspace. Paths are workspace-relative. Symbolic links are forbidden.', inputSchema: { type: 'object', properties: { path: { type: 'string' } }, additionalProperties: false } },
@@ -222,11 +230,11 @@ skills = false
     if (conversation.messages.length === 2) conversation.title = prompt.replace(/\s+/g, ' ').slice(0, 70);
     conversation.updatedAt = now;
     conversation.run = { id: randomUUID(), status: 'starting', startedAt: now };
-    const fingerprint = createHash('sha256').update(JSON.stringify([settings, bot.instructions, 'broker-v5', ENGINE_SOURCE_REVISION])).digest('hex');
+    const fingerprint = createHash('sha256').update(JSON.stringify([settings, bot.instructions, skillFingerprint(bot.skills ?? []), 'broker-v6', ENGINE_SOURCE_REVISION])).digest('hex');
     if (delivery) delivery.executionRunId = conversation.run.id;
     const run: Run = {
       conversation, message, settings, bot, fingerprint, history, token: randomBytes(32).toString('hex'),
-      stopped: false, finishing: false, acceptingUpdates: false, approvals: [], textSuffix: '', toolIds: new Map(), done: Promise.resolve(), brokerTail: Promise.resolve(),
+      stopped: false, finishing: false, acceptingUpdates: false, approvals: [], createdSkills: new Map(), textSuffix: '', toolIds: new Map(), done: Promise.resolve(), brokerTail: Promise.resolve(),
     };
     this.runs.set(conversationId, run);
     try { await this.store.changed(); }
@@ -452,6 +460,8 @@ skills = false
       'The app-owned managed browser is separate from the user desktop. Discover computer_observe and computer_act only if the user started it locally; every observation and action requires one-use approval. It is restricted to user-allowed public origins and blocks logins, uploads, downloads, and native OS actions.',
       'Shell commands, subagents, workflows, external integrations, and native file tools are intentionally unavailable.',
       run.bot.instructions,
+      'Reusable private skills are scoped to this bot. Discover workspace__list_skills and workspace__read_skill to load relevant instructions before answering. A skill cannot grant tools, shell access, network connectors, or bypass approvals. To create a reusable skill on the user request, call workspace__create_skill; the complete skill must be approved in the browser before it is saved.',
+      `Enabled private skill index (data): ${skillResponseText((delivery ? [] : run.bot.skills ?? []).filter(skill => skill.enabled).map(({ id, name, description }) => ({ id, name: this.redact(run, name, Infinity), description: this.redact(run, description, Infinity) })))}`,
     ].filter(Boolean).join('\n');
   }
 
@@ -552,7 +562,12 @@ skills = false
     else if (request.method === 'tools/list') result = { tools: brokerTools };
     else if (request.method === 'tools/call') {
       const operation = async () => {
-        try { return { content: [{ type: 'text', text: JSON.stringify(await this.brokerCall(run, request.params)) }] }; }
+        try {
+          const output = await this.brokerCall(run, request.params);
+          const skillResult = request.params && typeof request.params === 'object' && 'name' in request.params && ['list_skills', 'read_skill'].includes(String(request.params.name));
+          const text = skillResult ? skillResponseText(output) : JSON.stringify(output);
+          return { content: [{ type: 'text', text }] };
+        }
         catch (error) { return { isError: true, content: [{ type: 'text', text: this.redact(run, error instanceof HttpError ? error.message : error instanceof z.ZodError ? 'Invalid workspace tool arguments.' : 'Workspace operation failed.') }] }; }
       };
       const call = run.brokerTail.then(operation);
@@ -602,6 +617,41 @@ skills = false
     }
   }
 
+  private async createSkill(run: Run, input: z.infer<typeof skillInputSchema>): Promise<unknown> {
+    if (this.store.botDeliveries.some(delivery => delivery.recipientConversationId === run.conversation.id)) throw new HttpError(403, 'Recipient conversations are chat-only and cannot save skills.');
+    const requestKey = createHash('sha256').update(JSON.stringify(input)).digest('hex');
+    const prior = run.createdSkills.get(requestKey);
+    if (prior) return { id: prior, name: this.redact(run, input.name), saved: true, existing: true };
+    if (run.createdSkills.size) throw new HttpError(409, 'Only one private skill can be created per model turn. Ask the user before proposing another.');
+    const allow = randomUUID();
+    const deny = randomUUID();
+    const title = this.redact(run, `Save private skill: ${input.name}`);
+    const description = this.redact(run, `Save this reusable skill for ${run.bot.name}. It will be available to this bot's future chats.\n\nName: ${input.name}\nWhen to use: ${input.description}\n\n${input.instructions}`, Infinity);
+    const tool: ToolActivity = { id: randomUUID(), title, kind: 'edit', status: 'pending', input: description };
+    run.message.tools.push(tool);
+    const choice = await this.approve(run, { id: randomUUID(), title, kind: 'edit', description, paths: [], options: [{ id: allow, label: 'Save skill once', kind: 'allow_once' }, { id: deny, label: 'Deny', kind: 'reject_once' }] });
+    if (choice !== allow || run.stopped || run.finishing) {
+      tool.status = 'failed'; tool.output = 'Skill save was denied or cancelled.';
+      await this.persist(run);
+      throw new HttpError(403, tool.output);
+    }
+    try {
+      const skill = await this.enqueue(async () => {
+        if (run.stopped || run.finishing) throw new HttpError(409, 'The run ended before the skill could be saved.');
+        return this.store.addSkill(run.bot.id, input, true);
+      });
+      run.createdSkills.set(requestKey, skill.id);
+      run.bot.skills = [...(run.bot.skills ?? []), skill];
+      tool.status = 'completed'; tool.output = this.redact(run, `Saved private skill ${skill.name}.`);
+      await this.persist(run);
+      return { id: skill.id, name: this.redact(run, skill.name), saved: true };
+    } catch (error) {
+      tool.status = 'failed'; tool.output = this.redact(run, error instanceof HttpError ? error.message : 'Skill save failed.');
+      await this.persist(run);
+      throw error;
+    }
+  }
+
   private async computerCall(run: Run, input?: z.infer<typeof computerArguments>): Promise<unknown> {
     if (!this.computer) throw new HttpError(503, 'Managed browser is unavailable.');
     if (this.store.botDeliveries.some(delivery => delivery.recipientConversationId === run.conversation.id)) throw new HttpError(403, 'Bot delivery conversations are chat-only. Computer tools are unavailable.');
@@ -627,6 +677,28 @@ skills = false
   private async brokerCall(run: Run, params: unknown): Promise<unknown> {
     if (run.stopped || run.finishing) throw new HttpError(409, 'Run was cancelled or finished.');
     const call = toolArguments.parse(params);
+    if (call.name === 'list_skills') {
+      const all = (this.store.botDeliveries.some(delivery => delivery.recipientConversationId === run.conversation.id) ? [] : run.bot.skills ?? []).filter(skill => skill.enabled);
+      const offset = call.arguments.offset ?? 0;
+      const skills: { id: string; name: string; description: string }[] = [];
+      for (const skill of all.slice(offset)) {
+        const next = { id: skill.id, name: this.redact(run, skill.name, Infinity), description: this.redact(run, skill.description, Infinity) };
+        if (Buffer.byteLength(skillResponseText({ skills: [...skills, next], nextOffset: 100 }), 'utf8') > MAX_SKILL_RESPONSE_BYTES) break;
+        skills.push(next);
+      }
+      if (!skills.length && offset < all.length) throw new HttpError(413, 'Redacted skill metadata exceeds the complete-response limit. Shorten its name or description.');
+      const nextOffset = offset + skills.length;
+      return { skills, ...(nextOffset < all.length ? { nextOffset } : {}) };
+    }
+    if (call.name === 'read_skill') {
+      if (this.store.botDeliveries.some(delivery => delivery.recipientConversationId === run.conversation.id)) throw new HttpError(403, 'Recipient conversations are chat-only and cannot read private skills.');
+      const skill = run.bot.skills?.find(skill => skill.id === call.arguments.id && skill.enabled);
+      if (!skill) throw new HttpError(404, 'Enabled private skill does not exist for this bot.');
+      const response = { id: skill.id, name: this.redact(run, skill.name), description: this.redact(run, skill.description), instructions: this.redact(run, skill.instructions, Infinity), revision: skill.revision };
+      if (Buffer.byteLength(skillResponseText(response), 'utf8') > MAX_SKILL_RESPONSE_BYTES) throw new HttpError(413, 'Redacted skill instructions exceed the complete-response limit. Shorten the skill before loading it.');
+      return response;
+    }
+    if (call.name === 'create_skill') return this.createSkill(run, call.arguments);
     if (call.name === 'list_bots') return { bots: this.store.bots.map(({ id, name }) => ({ id, name })) };
     if (call.name === 'send_message') return this.sendBotMessage(run, call.arguments);
     if (call.name === 'computer_act' || call.name === 'computer_observe') return this.computerCall(run, call.name === 'computer_act' ? call.arguments : undefined);

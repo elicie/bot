@@ -3,8 +3,9 @@ import { open } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { z } from 'zod';
-import type { AppState, Bot, BotDelivery, BotExchange, Conversation, PublicSettings, Routine, RoutineInput, RoutineRun, RuntimeInfo, SettingsInput } from '../shared/types.js';
+import type { AppState, Bot, BotDelivery, BotExchange, Conversation, PublicSettings, Routine, RoutineInput, RoutineRun, RuntimeInfo, SettingsInput, Skill } from '../shared/types.js';
 import { atomicPrivateFile, canonicalDirectory, HttpError, isMissing, privateDirectory } from './files.js';
+import { MAX_SKILLS_PER_BOT, newSkill, nextSkill, skillSchema, skillPatchSchema, validateSkillSet, type SkillInput } from './skills.js';
 import { latestRoutineTime, nextRoutineTime, routineInputSchema, routineRunSchema, routineSchema } from './routines.js';
 import { botDeliverySchema, botExchangeSchema, botMessageInputSchema, existingBotDelivery, MAX_BOT_DELIVERIES, MAX_BOT_HOPS, MAX_BOT_MESSAGE_BYTES, MAX_BOT_REPLY_CHARACTERS, reconcileBotDeliveries, validBotMessageReferences, type BotMessageInput } from './bot-messages.js';
 
@@ -18,7 +19,7 @@ const permissionSchema = z.object({
   localOnly: z.boolean().optional(),
 }).strict();
 export const avatarShapeSchema = z.enum(['blob', 'cloud', 'square', 'spark', 'clover', 'heart', 'flower', 'droplet', 'pill', 'wedge', 'house', 'star', 'hexagon', 'pumpkin']);
-const botSchema = z.object({ id: z.string().uuid(), name: z.string(), color: z.string(), instructions: z.string(), shape: avatarShapeSchema.optional(), pinned: z.boolean().optional(), hidden: z.boolean().optional(), createdAt: z.string() }).strict();
+const botSchema = z.object({ id: z.string().uuid(), name: z.string(), color: z.string(), instructions: z.string(), shape: avatarShapeSchema.optional(), skills: z.array(skillSchema).max(MAX_SKILLS_PER_BOT).optional(), pinned: z.boolean().optional(), hidden: z.boolean().optional(), createdAt: z.string() }).strict();
 const conversationSchema = z.object({
   id: z.string().uuid(), botId: z.string().uuid(), title: z.string(), updatedAt: z.string(),
   sessionId: z.string().optional(), sessionFingerprint: z.string().optional(),
@@ -85,6 +86,7 @@ export class Store {
         disk = diskSchema.parse(JSON.parse(await file.readFile('utf8')));
       } finally { await file.close(); }
       if (disk.settings.baseUrl) baseUrl(disk.settings.baseUrl);
+      for (const bot of disk.bots) validateSkillSet(bot.skills ?? []);
       const botIds = new Set(disk.bots.map(bot => bot.id));
       const conversationIds = new Set(disk.conversations.map(conversation => conversation.id));
       const entityIds = [...botIds, ...conversationIds, ...disk.routines.map(routine => routine.id), ...disk.routineRuns.map(run => run.id), ...disk.botExchanges.map(exchange => exchange.id), ...disk.botDeliveries.map(delivery => delivery.id)];
@@ -262,6 +264,47 @@ export class Store {
     await this.changed();
   }
 
+  skill(botId: string, id: string): Skill {
+    const skill = this.bot(botId).skills?.find(item => item.id === id);
+    if (!skill) throw new HttpError(404, 'Private skill does not exist for this bot.');
+    return skill;
+  }
+
+  async addSkill(botId: string, input: SkillInput, withinRun = false): Promise<Skill> {
+    if (withinRun) this.assertWritable(); else this.assertIdle();
+    const bot = this.bot(botId);
+    const skill = newSkill(input, this.now().toISOString());
+    const skills = [...(bot.skills ?? []), skill];
+    validateSkillSet(skills);
+    this.assertSkillSize(botId, skills);
+    bot.skills = skills;
+    await this.changed();
+    return skill;
+  }
+
+  async updateSkill(botId: string, id: string, input: z.infer<typeof skillPatchSchema>): Promise<void> {
+    this.assertIdle();
+    const bot = this.bot(botId);
+    const next = nextSkill(this.skill(botId, id), input, this.now().toISOString());
+    const skills = bot.skills!.map(skill => skill.id === id ? next : skill);
+    validateSkillSet(skills);
+    this.assertSkillSize(botId, skills);
+    bot.skills = skills;
+    await this.changed();
+  }
+
+  async deleteSkill(botId: string, id: string, revision: number): Promise<void> {
+    this.assertIdle();
+    if (this.skill(botId, id).revision !== revision) throw new HttpError(409, 'The skill changed since it was opened. Reload before deleting.');
+    this.bot(botId).skills = this.bot(botId).skills!.filter(skill => skill.id !== id);
+    await this.changed();
+  }
+
+  private assertSkillSize(botId: string, skills: readonly Skill[]): void {
+    const bots = this.bots.map(bot => bot.id === botId ? { ...bot, skills: [...skills] } : bot);
+    this.checkCapacity(this.routines, this.routineRuns, this.conversations, this.botExchanges, this.botDeliveries, bots);
+  }
+
   routine(id: string): Routine {
     const routine = this.routines.find(item => item.id === id);
     if (!routine) throw new HttpError(404, 'Routine does not exist.');
@@ -286,7 +329,7 @@ export class Store {
 
   private checkCapacity(
     routines = this.routines, routineRuns = this.routineRuns, conversations = this.conversations,
-    botExchanges = this.botExchanges, botDeliveries = this.botDeliveries,
+    botExchanges = this.botExchanges, botDeliveries = this.botDeliveries, bots = this.bots,
   ): void {
     if (routines.length > MAX_ROUTINES) throw new HttpError(409, 'The application supports at most 1000 routines.');
     if (routineRuns.length > MAX_ROUTINE_RUNS) throw new HttpError(409, 'Routine history is full. Existing history and conversations are retained.');
@@ -302,7 +345,7 @@ export class Store {
           + MAX_BOT_REPLY_CHARACTERS * 12 + 8192
         : 0
     ), 0);
-    if (Buffer.byteLength(JSON.stringify({ ...this.disk, routines, routineRuns, conversations, botExchanges, botDeliveries, revision: this.disk.revision + 1 }), 'utf8') + dispatchBytes > MAX_STATE_BYTES) {
+    if (Buffer.byteLength(JSON.stringify({ ...this.disk, bots, routines, routineRuns, conversations, botExchanges, botDeliveries, revision: this.disk.revision + 1 }), 'utf8') + dispatchBytes > MAX_STATE_BYTES) {
       throw new HttpError(413, 'Application state and reserved queued work would exceed the 64 MiB limit. Existing history and conversations are retained.');
     }
   }

@@ -1,15 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import { Eye, EyeOff, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pin, Plus, Repeat2, Search, Settings2, X } from 'lucide-react';
+import { Blocks, Eye, EyeOff, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pin, Plus, Repeat2, Search, Settings2, X } from 'lucide-react';
 import type { AppState, Bot } from '../shared/types';
 import { activeRun, conversationPreview, conversationsFor, type Selection } from './state';
 import { Avatar, IconButton, Spinner } from './ui';
 import './workspace.css';
 
-export function Sidebar({ data, selection, lastConversation, chat, search, open, mobile, busy, onSearch, onSelect, onClose, onNew, onSettings, onRoutines, onPatch }: {
+export function Sidebar({ data, selection, lastConversation, chat, search, open, mobile, busy, onSearch, onSelect, onClose, onNew, onSettings, onRoutines, onCapabilities, onPatch }: {
   data: AppState | null; selection: Selection; lastConversation: Record<string, string | null>; chat: boolean;
   search: string; open: boolean; mobile: boolean; busy: boolean;
   onSearch: (value: string) => void; onSelect: (selection: Selection) => void; onClose: () => void;
-  onNew: () => void; onSettings: () => void; onRoutines: () => void;
+  onNew: () => void; onSettings: () => void; onRoutines: () => void; onCapabilities: () => void;
   onPatch: (id: string, patch: Partial<Pick<Bot, 'pinned' | 'hidden'>>) => void;
 }) {
   const [compact, setCompact] = useState(() => localStorage.getItem('grok-bot-sidebar-compact') === 'true');
@@ -72,6 +72,7 @@ export function Sidebar({ data, selection, lastConversation, chat, search, open,
       </>}
     </div>
     <footer className="sidebar-footer">
+      <button className="footer-button" onClick={onCapabilities} disabled={!data} title="앱 연결" aria-label="앱 연결"><Blocks size={17} /><span>앱 연결</span></button>
       <button className="footer-button" onClick={onRoutines} title="루틴" aria-label="루틴"><Repeat2 size={17} /><span>루틴</span></button>
       <button className="footer-button" onClick={() => showHidden(!hidden)} title="숨긴 봇" aria-label="숨긴 봇"><EyeOff size={17} /><span>숨긴 Bot</span></button>
       <button className="footer-button" onClick={onSettings} disabled={!data} title="설정" aria-label="설정"><Settings2 size={17} /><span>설정</span></button>

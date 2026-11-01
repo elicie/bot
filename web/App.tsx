@@ -30,6 +30,7 @@ import { Details, type DetailsTab } from './Details';
 import { Computer } from './Computer';
 import { Routines, type RoutineDraftStatus } from './Routines';
 import { Settings } from './Settings';
+import { Skills, confirmSkillsNavigation } from './Skills';
 import {
   activeRun,
   conversationPreview,
@@ -177,7 +178,7 @@ export function App() {
     );
   }, []);
   const confirmNavigation = useCallback(
-    () => confirmRoutineChange() && confirmFileChange(),
+    () => confirmSkillsNavigation() && confirmRoutineChange() && confirmFileChange(),
     [confirmFileChange, confirmRoutineChange],
   );
   useEffect(() => {
@@ -296,6 +297,7 @@ export function App() {
     }
   };
   const openOverlay = (overlay: Overlay) => {
+    if (!confirmSkillsNavigation()) return;
     dispatch({ type: 'sidebar', open: false });
     dispatch({ type: 'error', error: null });
     dispatch({ type: 'overlay', overlay });
@@ -304,6 +306,7 @@ export function App() {
   const navigate = (route: AppRoute) => {
     if (returningToPosition.current !== null) return false;
     if (routeSearch(route) === routeSearch(current.current)) {
+      if (!confirmSkillsNavigation()) return false;
       dispatch({ type: 'sidebar', open: false });
       dispatch({ type: 'overlay', overlay: null });
       return true;
@@ -483,6 +486,15 @@ export function App() {
     }
   };
   const closeOverlay = () => dispatch({ type: 'overlay', overlay: null });
+  const prepareSkillRequest = () => {
+    const before = current.current;
+    const key = draftKey(before.selection);
+    const text = '이 봇을 위한 재사용 가능한 비공개 스킬을 만들어줘. 이름, 사용 조건과 전체 지침을 먼저 정리한 뒤 저장 승인을 요청해줘.';
+    const existing = before.drafts[key] ?? '';
+    if (!navigate({ selection: before.selection, surface: { kind: 'chat' } })) return;
+    dispatch({ type: 'draft', key, text: existing.trim() ? `${existing}\n\n${text}` : text });
+    requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus());
+  };
   const botConversations = conversationsFor(data, bot?.id ?? null);
 
 
@@ -500,7 +512,7 @@ export function App() {
         chat={state.surface.kind === 'chat'} search={state.search} open={state.sidebarOpen} mobile={state.viewport === 'mobile'} busy={busy || !!globalRun}
         onSearch={value => dispatch({ type: 'search', value })} onSelect={select}
         onClose={() => dispatch({ type: 'sidebar', open: false })} onNew={() => openOverlay({ kind: 'bot' })}
-        onSettings={() => settings()}
+        onSettings={() => settings()} onCapabilities={() => openOverlay({ kind: 'capabilities' })}
         onRoutines={() => { if (state.surface.kind === 'routines') dispatch({ type: 'sidebar', open: false }); else navigate({ selection: current.current.selection, surface: { kind: 'routines' } }); }}
         onPatch={(id, patch) => { void command('bot-layout', async () => { const snapshot = await request<AppState>(`/api/bots/${encodeURIComponent(id)}`, { method: 'PATCH', body: patch }); dispatch({ type: 'snapshot', data: snapshot }); }); }}
       />
@@ -741,7 +753,11 @@ export function App() {
           }}
         />
       )}
-
+      {state.overlay?.kind === 'capabilities' && bot && (
+        <Skills key={bot.id} bot={bot} busy={busy || !!globalRun} onClose={closeOverlay}
+          onChange={snapshot => dispatch({ type: 'snapshot', data: snapshot })}
+          onCreateWithBot={prepareSkillRequest} />
+      )}
     </div>
   );
 }

@@ -9,6 +9,7 @@ import { GrokRuntime, type RuntimeOptions } from './runtime.js';
 import { ApplicationComputer, installComputerRoutes, isLocalComputerRequest } from './computer-api.js';
 import type { ManagedComputerOptions } from './computer.js';
 import { projectComputerPermissions, projectResponse } from './public-state.js';
+import { importSkillMarkdown, skillInputSchema, skillPatchSchema } from './skills.js';
 import { RoutineScheduler, routineInputSchema, type EnqueueCommand, type RoutineSchedulerOptions } from './routines.js';
 
 const name = z.string().trim().min(1).max(100);
@@ -170,6 +171,27 @@ export async function createBackend(options: BackendOptions): Promise<{
     const run = await routines.run(String(request.params.id));
     const state = store.snapshot();
     response.status(202).json({ run: state.routineRuns.find(item => item.id === run.id)!, state });
+  });
+  app.post('/api/bots/:botId/skills/import', async (request, response) => {
+    const input = z.object({ markdown: z.string().max(20 * 1024) }).strict().parse(request.body);
+    const skill = importSkillMarkdown(input.markdown);
+    await command(() => store.addSkill(String(request.params.botId), skill));
+    response.status(201).json(store.snapshot());
+  });
+  app.post('/api/bots/:botId/skills', async (request, response) => {
+    const input = skillInputSchema.parse(request.body);
+    await command(() => store.addSkill(String(request.params.botId), input));
+    response.status(201).json(store.snapshot());
+  });
+  app.patch('/api/bots/:botId/skills/:id', async (request, response) => {
+    const input = skillPatchSchema.parse(request.body);
+    await command(() => store.updateSkill(String(request.params.botId), String(request.params.id), input));
+    response.json(store.snapshot());
+  });
+  app.delete('/api/bots/:botId/skills/:id', async (request, response) => {
+    const input = z.object({ revision: z.number().int().min(1) }).strict().parse(request.body);
+    await command(() => store.deleteSkill(String(request.params.botId), String(request.params.id), input.revision));
+    response.json(store.snapshot());
   });
   app.post('/api/conversations', async (request, response) => {
     const input = z.object({ botId: z.string().uuid() }).strict().parse(request.body);
