@@ -4077,7 +4077,9 @@ version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
+ "axum",
  "chrono",
+ "getrandom 0.3.4",
  "grok-bot-engine",
  "grok-bot-files",
  "grok-bot-model",

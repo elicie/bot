@@ -9,13 +9,18 @@ publish.workspace = true
 agent-client-protocol = { version = "=0.10.4", features = ["unstable"] }
 anyhow.workspace = true
 chrono.workspace = true
+getrandom = "0.3"
 grok-bot-engine.workspace = true
 grok-bot-files.workspace = true
 grok-bot-model.workspace = true
 grok-bot-store.workspace = true
 hex.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
 sha2.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+axum = "0.8"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time"] }

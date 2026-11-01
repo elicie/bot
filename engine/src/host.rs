@@ -23,6 +23,11 @@ use xai_grok_shell::agent::mvp_agent::MvpAgent;
 
 const DUPLEX_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 
+/// Version of this engine crate, reported as the application engine identity.
+pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Pinned upstream `grok-build` revision compiled into this engine (see `Cargo.toml`).
+pub const ENGINE_SOURCE_REVISION: &str = "2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8";
+
 /// One OpenAI-compatible model the engine may select. `id` is the engine-side alias.
 #[derive(Clone, Debug)]
 pub struct ModelSpec {
