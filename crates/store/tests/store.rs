@@ -271,6 +271,7 @@ async fn snapshot_redaction_keeps_identifiers_enums_and_link_arrays() {
                     output: None,
                     paths: Some(vec!["a.txt".into()]),
                     local_only: None,
+                    approved_by_rule: None,
                 }],
                 bot_exchange_ids: None,
                 source_bot_id: None,

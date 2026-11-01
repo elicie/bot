@@ -10,8 +10,10 @@
 pub mod app;
 pub mod http;
 mod http_bots;
+pub mod permission_rules;
 pub mod provider;
 pub mod public_state;
 pub mod queue;
 pub mod runtime;
 pub mod scheduler;
+pub mod webhooks;

@@ -112,6 +112,17 @@ impl RoutineScheduler {
 
     /// Manual run (`POST /api/routines/:id/run`).
     pub async fn run(&self, id: &str) -> HttpResult<RoutineRun> {
+        self.claim_now(id, |s, now| s.run_routine(id, now)).await
+    }
+
+    /// Webhook run (`POST /hooks/routines/:id`): authenticates `key` and claims the run in one store
+    /// mutation (so a concurrent rotation or revocation cannot race it), then dispatches FIFO.
+    pub async fn run_webhook(&self, id: &str, key: &str, payload: Option<&str>) -> HttpResult<RoutineRun> {
+        self.claim_now(id, |s, now| s.claim_webhook_routine(id, key, payload, now)).await
+    }
+
+    /// Claim an immediate run through `claim`, rejecting a concurrent claim of the same routine.
+    async fn claim_now(&self, id: &str, claim: impl FnOnce(&mut grok_bot_store::State, DateTime<Utc>) -> HttpResult<RoutineRun>) -> HttpResult<RoutineRun> {
         let latest = |store: &Store| store.read(|s| s.disk().routine_runs.iter().rev().find(|r| r.routine_id == id).map(|r| r.id.clone()));
         let observed = latest(&self.store);
         self.queue
@@ -126,7 +137,7 @@ impl RoutineScheduler {
                     return Err(HttpError::conflict("This routine was just claimed by another command."));
                 }
                 let now = (self.options.now)();
-                let run = match self.store.mutate(|s| s.run_routine(id, now)).await {
+                let run = match self.store.mutate(|s| claim(s, now)).await {
                     Ok(run) => run,
                     Err(error) => {
                         if self.store.read(|s| s.assert_writable()).is_err() {

@@ -28,6 +28,12 @@ A routine selects one bot, a prompt, and a one-time, interval, or daily IANA-tim
 
 `RoutineRun.executionRunId` binds history to the original execution; terminal `RoutineRun.result` survives follow-up messages in the same conversation. Startup recovery interrupts started work without replay and resumes durable queued claims. Pausing keeps accepted work, and deletion keeps execution history and conversations. See [docs/routines.md](docs/routines.md) for the scheduling and recovery contract.
 
+Each routine can hold one webhook key. Only a SHA-256 hash is stored (the public snapshot omits even that). `POST /hooks/routines/:id` lives outside `/api` because external senders cannot send `Origin` or `X-Grok-Bot`; it authenticates `Authorization: Bearer <key>` with a constant-time hash comparison, throttles repeated failures per routine, and claims a `webhook`-trigger run through the same admission as a manual run. An optional body (at most 16 KiB of UTF-8) is appended to the prompt inside a `<webhook_payload>` block marked as untrusted data. Host and Origin validation still apply, so LAN senders need `HOST=0.0.0.0` and an allowed host. Webhook runs leave the schedule untouched, and pausing a routine stops only scheduled runs.
+
+## Permission rules
+
+Rules map an action category (`file_write`, `bot_message`, `bot_create`, `skill_save`, `memory_save`) for all bots or one bot to "항상 묻기" (`ask`, the default) or "묻지 않고 허용" (`allow`). Ask rules win conflicts. Every broker mutation calls `Runtime::approve_category`, which records an allowed action's tool activity with `approvedByRule` (shown as "내 규칙으로 자동 승인됨") instead of showing a card. Rules never lift the safety floor: local-only approvals always ask, bot-delivery recipient conversations and webhook-triggered runs always ask, and hash, size, hop, and recipient checks run before approval. The server has no login, so only a loopback client may add or loosen allow rules; LAN clients may view rules and tighten them.
+
 ## Bot messages
 
 `BotExchange` stores a two-bot transcript and `BotDelivery` stores its durable, idempotent execution receipt. The authenticated broker exposes bot discovery and an outbound message proposal. Approval records the full recipient/text before creating the recipient's dedicated conversation and queue entry atomically. A single source run can deliver one distinct message. Each further hop needs fresh approval and chains stop at four deliveries.
@@ -65,6 +71,13 @@ All JSON mutations send `Content-Type: application/json` and `X-Grok-Bot: 1`. Th
 | PATCH | `/api/routines/:id` | `{ enabled }` | `AppState` |
 | DELETE | `/api/routines/:id` | `{}` | `AppState` |
 | POST | `/api/routines/:id/run` | `{}` | `{ run, state }`, status 202 |
+| POST | `/api/routines/:id/webhook` | `{}` | `{ key, keyHint, createdAt, state }`, status 201 (creates or rotates; the key is returned once) |
+| DELETE | `/api/routines/:id/webhook` | `{}` | `AppState` |
+| POST | `/hooks/routines/:id` | `Authorization: Bearer <key>`, optional text/JSON body ≤ 16 KiB; no `X-Grok-Bot` | `{ run }`, status 202; 401, 409, 413, 429 |
+| GET | `/api/permission-rules` | | `{ rules, canAutoAllow }` |
+| POST | `/api/permission-rules` | `{ category, action, botId? }` | `AppState`, status 201; allow rules loopback only |
+| PATCH | `/api/permission-rules/:id` | `{ action }` | `AppState`; switching to allow loopback only |
+| DELETE | `/api/permission-rules/:id` | `{}` | `AppState`; deleting an ask rule loopback only |
 | POST | `/api/conversations` | `{ botId }` | `{ conversation, state }` |
 | POST | `/api/conversations/:id/messages` | `{ text }` | `AppState`, status 202 |
 | POST | `/api/conversations/:id/cancel` | `{}` | `AppState` |

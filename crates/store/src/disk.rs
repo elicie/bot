@@ -24,6 +24,7 @@ fn routine_valid(routine: &mut Routine) -> bool {
         && routine.next_run_at.as_deref().is_none_or(is_timestamp)
         && is_timestamp(&routine.created_at)
         && is_timestamp(&routine.updated_at)
+        && routine.webhook.as_ref().is_none_or(crate::webhooks::webhook_valid)
 }
 
 fn result_valid(result: &RoutineResult) -> bool {
@@ -74,6 +75,7 @@ pub(crate) fn schema_valid(disk: &mut DiskState) -> bool {
         && disk.routine_runs.iter().all(run_valid)
         && disk.bot_exchanges.iter().all(exchange_valid)
         && disk.bot_deliveries.iter_mut().all(delivery_valid)
+        && crate::permissions::rules_valid(&disk.permission_rules)
 }
 
 fn truthy(value: &Option<String>) -> bool {
@@ -98,6 +100,7 @@ pub(crate) fn references_valid(disk: &DiskState) -> Result<(), String> {
         .chain(disk.routine_runs.iter().map(|run| run.id.as_str()))
         .chain(disk.bot_exchanges.iter().map(|exchange| exchange.id.as_str()))
         .chain(disk.bot_deliveries.iter().map(|delivery| delivery.id.as_str()))
+        .chain(disk.permission_rules.iter().map(|rule| rule.id.as_str()))
         .collect();
     let unique_ids: HashSet<&str> = entity_ids.iter().copied().collect();
     let mut linked_conversations: HashSet<&str> = HashSet::new();

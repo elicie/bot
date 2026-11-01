@@ -9,6 +9,8 @@ export interface ToolActivity {
   output?: string;
   paths?: string[];
   localOnly?: boolean;
+  /** ID of the permission rule that approved this action without asking. */
+  approvedByRule?: string;
 }
 export interface Message {
   id: string;
@@ -130,6 +132,18 @@ export interface Routine {
   nextRunAt?: string;
   createdAt: string;
   updatedAt: string;
+  webhook?: RoutineWebhook;
+}
+/** Public view of a routine webhook: the key itself is shown only once, when it is created. */
+export interface RoutineWebhook {
+  keyHint: string;
+  createdAt: string;
+}
+export interface RoutineWebhookKey {
+  key: string;
+  keyHint: string;
+  createdAt: string;
+  state: AppState;
 }
 export interface RoutineInput {
   botId: string;
@@ -151,7 +165,7 @@ export interface RoutineRun {
   botId: string;
   conversationId: string;
   prompt: string;
-  trigger: 'manual' | 'scheduled';
+  trigger: 'manual' | 'scheduled' | 'webhook';
   scheduledFor: string;
   createdAt: string;
   executionRunId?: string;
@@ -169,9 +183,30 @@ export interface AppState {
   routineRuns: RoutineRun[];
   botExchanges?: BotExchange[];
   botDeliveries?: BotDelivery[];
+  permissionRules?: PermissionRule[];
   routineSchedulingError?: string;
   settings: PublicSettings;
   runtime: RuntimeInfo;
+}
+export type PermissionCategory = 'file_write' | 'bot_message' | 'bot_create' | 'skill_save' | 'memory_save';
+export type PermissionAction = 'ask' | 'allow';
+export interface PermissionRule {
+  id: string;
+  category: PermissionCategory;
+  action: PermissionAction;
+  /** Absent: the rule applies to every bot. */
+  botId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface PermissionRuleInput {
+  category: PermissionCategory;
+  action: PermissionAction;
+  botId?: string;
+}
+export interface PermissionRuleList {
+  rules: PermissionRule[];
+  canAutoAllow: boolean;
 }
 export interface FileEntry { name: string; path: string; type: 'directory' | 'file' }
 export interface FileListing { path: string; entries: FileEntry[] }

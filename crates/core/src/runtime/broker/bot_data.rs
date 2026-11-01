@@ -189,9 +189,13 @@ impl Runtime {
     }
 
     /// Queue the approval card for a memory change. `category` is the permission-rule key
-    /// ([`MEMORY_SAVE_CATEGORY`] or [`MEMORY_FORGET_CATEGORY`]) a rule engine can consult here.
+    /// ([`MEMORY_SAVE_CATEGORY`] or [`MEMORY_FORGET_CATEGORY`]).
     async fn approve_memory(&self, run: &Arc<Run>, category: &'static str, permission: PendingPermission, tool: ToolActivity) -> BrokerResult<Option<String>> {
         debug_assert!([MEMORY_SAVE_CATEGORY, MEMORY_FORGET_CATEGORY].contains(&category));
+        // Saves follow the user's `memory_save` permission rule; forgetting always asks.
+        if category == MEMORY_SAVE_CATEGORY {
+            return Ok(self.approve_category(run, grok_bot_model::PermissionCategory::MemorySave, permission, tool).await?);
+        }
         Ok(self.approve(run, permission, Some(tool)).await?)
     }
 
@@ -207,7 +211,7 @@ impl Runtime {
         }
         let title = run.redact(&format!("Remember: {}", truncate_utf16(&text, 80)));
         let description = run.redact_all(&format!("Save this memory for {}. It will be included in this bot's future chats.\n\n{text}", run.bot.name));
-        let tool = ToolActivity { id: new_id(), title: title.clone(), kind: "edit".into(), status: ToolStatus::Pending, input: Some(run.redact_all(&text)), output: None, paths: None, local_only: None };
+        let tool = ToolActivity { id: new_id(), title: title.clone(), kind: "edit".into(), status: ToolStatus::Pending, input: Some(run.redact_all(&text)), output: None, paths: None, local_only: None, approved_by_rule: None };
         let tool_id = tool.id.clone();
         let (allow, _, options) = approval_options("Save memory once", "Deny");
         let permission = PendingPermission { id: new_id(), title, kind: "edit".into(), description, options, paths: Vec::new(), local_only: None };
@@ -254,7 +258,7 @@ impl Runtime {
             .ok_or_else(|| HttpError::not_found("Memory does not exist for this bot."))?;
         let title = run.redact(&format!("Forget memory: {}", truncate_utf16(&memory.text, 80)));
         let description = run.redact_all(&format!("Forget this memory of {}. Future chats will no longer include it.\n\n{}", run.bot.name, memory.text));
-        let tool = ToolActivity { id: new_id(), title: title.clone(), kind: "edit".into(), status: ToolStatus::Pending, input: Some(run.redact_all(&memory.text)), output: None, paths: None, local_only: None };
+        let tool = ToolActivity { id: new_id(), title: title.clone(), kind: "edit".into(), status: ToolStatus::Pending, input: Some(run.redact_all(&memory.text)), output: None, paths: None, local_only: None, approved_by_rule: None };
         let tool_id = tool.id.clone();
         let (allow, _, options) = approval_options("Forget once", "Deny");
         let permission = PendingPermission { id: new_id(), title, kind: "edit".into(), description, options, paths: Vec::new(), local_only: None };

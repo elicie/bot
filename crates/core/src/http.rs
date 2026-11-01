@@ -244,10 +244,13 @@ pub fn router(ctx: Ctx) -> Router {
         .route("/computer/preview", get(computer_disabled))
         .route("/computer/actions", post(computer_disabled))
         .merge(crate::http_bots::router())
+        .merge(crate::permission_rules::routes())
+        .merge(crate::webhooks::api_routes())
         .fallback(|| async { (StatusCode::NOT_FOUND, Json(json!({ "error": "API endpoint does not exist." }))) });
     let mut app = Router::new()
         .nest("/api", api)
-        .route("/internal/mcp/{run_id}", post(mcp).get(|| async { StatusCode::METHOD_NOT_ALLOWED }));
+        .route("/internal/mcp/{run_id}", post(mcp).get(|| async { StatusCode::METHOD_NOT_ALLOWED }))
+        .merge(crate::webhooks::hook_routes());
     app = match ctx.web_root.clone() {
         Some(root) => {
             let index = root.join("index.html");

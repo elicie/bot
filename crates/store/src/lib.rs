@@ -24,11 +24,13 @@ mod cron;
 mod disk;
 pub mod knowledge;
 pub mod memory;
+pub mod permissions;
 mod redact;
 pub mod schedule;
 pub mod skills;
 pub mod templates;
 pub mod validate;
+pub mod webhooks;
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -100,7 +102,8 @@ enum Job {
 
 /// `Store.snapshot()`: the public state with the API key removed and redacted.
 fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_error: Option<String>) -> AppState {
-    let DiskState { revision, settings, bots, conversations, routines, routine_runs, bot_exchanges, bot_deliveries, .. } = disk;
+    let DiskState { revision, settings, bots, conversations, mut routines, routine_runs, bot_exchanges, bot_deliveries, permission_rules, .. } = disk;
+    webhooks::strip_webhook_secrets(&mut routines);
     let mut state = AppState {
         revision,
         bots,
@@ -109,6 +112,7 @@ fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_err
         routine_runs,
         bot_exchanges,
         bot_deliveries,
+        permission_rules,
         routine_scheduling_error: routine_scheduling_error.filter(|value| !value.is_empty()),
         settings: PublicSettings {
             base_url: settings.base_url,
@@ -212,6 +216,7 @@ fn default_state(now: DateTime<Utc>) -> DiskState {
         routine_runs: Vec::new(),
         bot_exchanges: Vec::new(),
         bot_deliveries: Vec::new(),
+        permission_rules: Vec::new(),
     }
 }
 
@@ -857,6 +862,7 @@ impl State {
             next_run_at,
             created_at: iso(now),
             updated_at: iso(now),
+            webhook: None,
         };
         let mut prospect = self.prospect();
         prospect.routines.push(&routine);
@@ -882,6 +888,7 @@ impl State {
             next_run_at: if input.enabled { next_run_at } else { None },
             created_at: current.created_at.clone(),
             updated_at: iso(now),
+            webhook: current.webhook.clone(),
         };
         let mut prospect = self.prospect();
         prospect.routines[index] = &updated;
@@ -951,12 +958,22 @@ impl State {
     }
 
     pub fn run_routine(&mut self, id: &str, now: DateTime<Utc>) -> HttpResult<RoutineRun> {
+        self.claim_routine_now(id, now, RoutineTrigger::Manual, None)
+    }
+
+    /// Claim an immediate run (manual or webhook) through the same admission checks. `prompt`
+    /// replaces the routine prompt for this run only.
+    fn claim_routine_now(&mut self, id: &str, now: DateTime<Utc>, trigger: RoutineTrigger, prompt: Option<String>) -> HttpResult<RoutineRun> {
         self.assert_routine_idle(id)?;
         let index = self.routine_index(id)?;
         let routine = &self.disk.routines[index];
-        let (run, conversation) = Self::routine_claim(routine, RoutineTrigger::Manual, iso(now), now);
+        let (mut run, conversation) = Self::routine_claim(routine, trigger, iso(now), now);
+        if let Some(prompt) = prompt {
+            run.prompt = prompt;
+        }
         let mut updated = routine.clone();
-        if matches!(routine.schedule, RoutineSchedule::Once { .. }) {
+        // A manual run consumes a one-time schedule; a webhook run is independent of the schedule.
+        if trigger == RoutineTrigger::Manual && matches!(routine.schedule, RoutineSchedule::Once { .. }) {
             updated.enabled = false;
             updated.next_run_at = None;
             updated.updated_at = iso(now);
