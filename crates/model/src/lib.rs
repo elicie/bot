@@ -575,6 +575,6 @@ mod tests {
         let entry = FileEntry { name: "a".into(), path: "a".into(), entry_type: FileEntryType::File };
         assert_eq!(serde_json::to_string(&entry).unwrap(), r#"{"name":"a","path":"a","type":"file"}"#);
         assert!(serde_json::from_str::<RoutineSchedule>(r#"{"kind":"interval","minutes":5,"extra":1}"#).is_err());
-        assert_eq!(iso(DateTime::from_timestamp_millis(1_793_526_000_123).unwrap()), "2026-10-31T09:40:00.123Z");
+        assert_eq!(iso(DateTime::from_timestamp_millis(1_793_526_000_123).unwrap()), "2026-11-01T09:40:00.123Z");
     }
 }
