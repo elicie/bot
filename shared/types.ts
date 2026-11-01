@@ -95,6 +95,8 @@ export interface Bot {
   pinned?: boolean;
   hidden?: boolean;
   createdAt: string;
+  memories?: import('./bot-data').Memory[];
+  knowledge?: import('./bot-data').KnowledgeFile[];
 }
 export interface PublicSettings {
   baseUrl: string;

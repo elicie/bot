@@ -51,7 +51,7 @@ pub(crate) fn schema_valid(disk: &mut DiskState) -> bool {
         return false;
     }
     for bot in &mut disk.bots {
-        if !is_uuid(&bot.id) {
+        if !is_uuid(&bot.id) || !crate::memory::persisted_bot_data_valid(bot) {
             return false;
         }
         if let Some(skills) = bot.skills.as_mut()

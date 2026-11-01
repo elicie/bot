@@ -28,6 +28,7 @@ use grok_bot_model::{
     PrivateSettings, Role, RunState, RunStatus, RuntimeInfo, Skill, ToolActivity, ToolStatus, iso,
     new_id,
 };
+use grok_bot_store::memory::bot_context_fingerprint;
 use grok_bot_store::skills::{skill_fingerprint, skill_response_text};
 use grok_bot_store::{State, Store};
 use serde_json::{Value, json};
@@ -102,6 +103,8 @@ struct RunFlags {
     created_skills: HashMap<String, String>,
     /// sha256 of a create_bot request -> created bot ID (one per turn, idempotent retries).
     created_bots: HashMap<String, String>,
+    /// Memories saved through `save_memory` this turn.
+    memory_saves: usize,
     /// `run.bot.skills`, extended by skills created during this run.
     skills: Vec<Skill>,
     text_suffix: String,
@@ -489,7 +492,7 @@ impl Runtime {
         let fingerprint = session_fingerprint(
             &settings,
             &bot,
-            &skill_fingerprint(&skills),
+            &bot_context_fingerprint(&skill_fingerprint(&skills), &bot),
             ENGINE_SOURCE_REVISION,
         );
         let run = Arc::new(Run {
@@ -569,6 +572,7 @@ impl Runtime {
             };
             Ok((from, run.settings.workspace.clone()))
         })?;
+        let recipient = delivery_from.is_some();
         let skills = run.flags().skills.clone();
         let index: Vec<Value> = if delivery_from.is_some() { Vec::new() } else { skills }
             .iter()
@@ -598,6 +602,7 @@ impl Runtime {
             "Enabled private skill index (data): {}",
             skill_response_text(&Value::Array(index))
         ));
+        lines.extend(broker::bot_data::rules(run, recipient));
         Ok(lines
             .into_iter()
             .filter(|line| !line.is_empty())

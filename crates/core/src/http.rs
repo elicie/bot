@@ -243,6 +243,7 @@ pub fn router(ctx: Ctx) -> Router {
         .route("/computer", get(computer_status).post(computer_disabled).delete(computer_status))
         .route("/computer/preview", get(computer_disabled))
         .route("/computer/actions", post(computer_disabled))
+        .merge(crate::http_bots::router())
         .fallback(|| async { (StatusCode::NOT_FOUND, Json(json!({ "error": "API endpoint does not exist." }))) });
     let mut app = Router::new()
         .nest("/api", api)

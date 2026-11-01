@@ -170,6 +170,16 @@ impl Redactor<'_> {
                 self.text(&mut skill.updated_at);
             }
             self.text(&mut bot.created_at);
+            for memory in bot.memories.iter_mut().flatten() {
+                self.id(&mut memory.id);
+                self.text(&mut memory.text);
+                self.text(&mut memory.created_at);
+            }
+            for file in bot.knowledge.iter_mut().flatten() {
+                self.id(&mut file.id);
+                self.text(&mut file.name);
+                self.text(&mut file.created_at);
+            }
         }
         state.conversations.iter_mut().for_each(|conversation| self.conversation(conversation));
         state.routines.iter_mut().for_each(|routine| self.routine(routine));

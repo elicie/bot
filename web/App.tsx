@@ -698,6 +698,7 @@ export function App() {
           tab={detailsTab} onTab={setDetailsTab} onClose={() => toggleComputer(false)}
           computer={<Computer ownerId={bot.id} canControl={!globalRun} />}
           onEdit={() => openOverlay({ kind: 'bot', bot })} onSettings={() => settings('files')}
+          onBotCreated={(botId) => { select({ botId, conversationId: null }); }}
           onRoutines={() => { toggleComputer(false); navigate({ selection: current.current.selection, surface: { kind: 'routines' } }); }} />
       )}
       {state.overlay?.kind === 'settings' && data && (

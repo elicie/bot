@@ -5,13 +5,14 @@ import { errorText, readDocument } from './api';
 import { type Action, type FilesState, isDirty } from './state';
 import { Avatar, IconButton } from './ui';
 import { Files } from './Files';
+import { BotDataSections } from './BotData';
 import './workspace.css';
 
 export type DetailsTab = 'details' | 'library' | 'computer';
-export function Details({ bot, conversation, data, files, dispatch, tab, onTab, onClose, onEdit, onSettings, onRoutines, computer }: {
+export function Details({ bot, conversation, data, files, dispatch, tab, onTab, onClose, onEdit, onSettings, onRoutines, onBotCreated, computer }: {
   bot: Bot; conversation?: Conversation; data: AppState; files: FilesState; dispatch: Dispatch<Action>;
   tab: DetailsTab; onTab: (tab: DetailsTab) => void; onClose: () => void; onEdit: () => void;
-  onSettings: () => void; onRoutines: () => void; computer?: ReactNode;
+  onSettings: () => void; onRoutines: () => void; onBotCreated: (botId: string) => void; computer?: ReactNode;
 }) {
   const [width, setWidth] = useState(320);
   const requestPrefix = useId();
@@ -60,6 +61,7 @@ export function Details({ bot, conversation, data, files, dispatch, tab, onTab, 
           {!routines.length ? <p className="detail-empty">루틴은 이 Bot이 일정에 따라 실행하는 반복 작업입니다. 루틴을 추가해 작업을 예약해 보세요.</p> : routines.map(routine => <button className="detail-list-row" key={routine.id} onClick={onRoutines}><Repeat2 size={15} /><span>{routine.name}<small>{routine.enabled ? '예약됨' : '일시정지'}</small></span><ChevronRight size={14} /></button>)}
           <button className="small-button routine-add" onClick={onRoutines}><Repeat2 size={14} />루틴 추가</button>
         </section>
+        <BotDataSections bot={bot} data={data} dispatch={dispatch} onBotCreated={onBotCreated} />
         <section className="details-section"><h3>대화</h3><dl className="details-values"><div><dt>모델</dt><dd>{data.settings.model || '미설정'}</dd></div><div><dt>파일 접근</dt><dd>{data.settings.workspace ? '작업 폴더 연결됨' : '폴더 미연결'}</dd></div></dl></section>
       </>}
       {tab === 'library' && <section className="details-section"><header><h3>대화에서 사용한 파일</h3><button className="text-button" onClick={() => changeTab('computer')}>파일 열기</button></header>

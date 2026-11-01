@@ -22,9 +22,12 @@
 pub mod bot_messages;
 mod cron;
 mod disk;
+pub mod knowledge;
+pub mod memory;
 mod redact;
 pub mod schedule;
 pub mod skills;
+pub mod templates;
 pub mod validate;
 
 use std::collections::{HashMap, HashSet};
@@ -201,6 +204,8 @@ fn default_state(now: DateTime<Utc>) -> DiskState {
             pinned: None,
             hidden: None,
             created_at: iso(now),
+            memories: None,
+            knowledge: None,
         }],
         conversations: Vec::new(),
         routines: Vec::new(),
@@ -291,6 +296,7 @@ impl Store {
             })
             .await
             .map_err(|_| anyhow::anyhow!(SAVE_FAILED_RUNTIME))?;
+        store.prune_knowledge().await;
         Ok(store)
     }
 
@@ -684,6 +690,8 @@ impl State {
             pinned: input.pinned,
             hidden: None,
             created_at: iso(self.now()),
+            memories: None,
+            knowledge: None,
         };
         self.disk_mut().bots.push(bot.clone());
         Ok(bot)

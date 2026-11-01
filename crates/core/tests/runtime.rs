@@ -25,6 +25,10 @@ use grok_bot_model::{
 use grok_bot_store::Store;
 use serde_json::{Value, json};
 
+#[path = "runtime_bot_data/mod.rs"]
+mod bot_data;
+use bot_data::bot_memory_and_knowledge;
+
 // ---------------------------------------------------------------------------------------------
 // Mock OpenAI-compatible provider (port of tests/mock-provider.ts and scriptedFileReply)
 
@@ -1738,6 +1742,7 @@ fn runtime_on_the_in_process_engine() {
         scenario!("skills", Options::default(), skills);
         scenario!("bot-messages", Options::default(), bot_messages);
         scenario!("bot-creation", Options::default(), bot_creation);
+        scenario!("bot-data", Options::default(), bot_memory_and_knowledge);
         scenario!("restart", Options::default(), restart_continuation);
         startup_errors(&base, &engine_root).await;
     });
