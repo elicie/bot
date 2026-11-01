@@ -1379,6 +1379,49 @@ async fn skills(f: &Fixture) {
 
 /// bot-messages.test.ts runtime parts: approval, idempotent receipt, one distinct message,
 /// authenticated broker, recipient chat-only runs, and denial.
+async fn bot_creation(f: &Fixture) {
+    f.configure("", true).await;
+    let owner = f.bot_id();
+    let id = f.conversation(&owner).await;
+    let input = json!({"name": "팀장", "instructions": "Lead the team.", "color": "#22c55e", "shape": "star"});
+    f.provider.clear();
+    f.provider.plan(vec![
+        discover("workspace create_bot"),
+        use_tool("create_bot", input.clone()),
+        use_tool("create_bot", input.clone()),
+        use_tool("create_bot", json!({"name": "Second"})),
+        text("The bot was created."),
+    ]);
+    f.runtime.start(&id, "팀장 봇 만들어줘").await.unwrap();
+    let pending = f.pending(&id).await;
+    let permission = pending.run.permission.clone().unwrap();
+    assert!(permission.title.contains("팀장") && permission.description.contains("Lead the team."), "{permission:?}");
+    assert_eq!(f.store.read(|s| s.disk().bots.len()), 1, "no bot before approval");
+    f.decide(&id, "allow_once").await;
+    let completed = f.completed(&id).await;
+    let bots = f.store.read(|s| s.disk().bots.clone());
+    assert_eq!(bots.len(), 2, "exactly one bot created despite the retry: {bots:?}");
+    let created = bots.iter().find(|b| b.name == "팀장").expect("created bot");
+    assert_eq!(created.instructions, "Lead the team.");
+    assert_eq!(created.color, "#22c55e");
+    assert_eq!(created.shape, Some(grok_bot_model::AvatarShape::Star));
+    let outcomes = tool_outcomes(&f.provider.inference());
+    assert!(outcomes.iter().any(|o| o.contains("\"existing\":true")), "{outcomes:?}");
+    assert!(outcomes.iter().any(|o| o.contains("Only one bot can be created per model turn")), "{outcomes:?}");
+    assert_eq!(last_text(&completed), "The bot was created.");
+
+    f.provider.clear();
+    f.provider.plan(vec![
+        discover("workspace create_bot"),
+        use_tool("create_bot", json!({"name": "Denied"})),
+        text("Not created."),
+    ]);
+    f.runtime.start(&id, "Create another bot").await.unwrap();
+    f.decide(&id, "reject_once").await;
+    f.completed(&id).await;
+    assert!(!f.store.read(|s| s.disk().bots.iter().any(|b| b.name == "Denied")), "denied bot must not exist");
+}
+
 async fn bot_messages(f: &Fixture) {
     f.configure("", true).await;
     let sender = f.bot_id();
@@ -1694,6 +1737,7 @@ fn runtime_on_the_in_process_engine() {
         scenario!("limits", Options::default(), write_limits_and_model_only);
         scenario!("skills", Options::default(), skills);
         scenario!("bot-messages", Options::default(), bot_messages);
+        scenario!("bot-creation", Options::default(), bot_creation);
         scenario!("restart", Options::default(), restart_continuation);
         startup_errors(&base, &engine_root).await;
     });

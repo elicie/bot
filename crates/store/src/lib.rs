@@ -656,11 +656,24 @@ impl State {
         Ok(())
     }
 
-    pub fn add_bot(&mut self, mut input: BotInput) -> HttpResult<Bot> {
+    pub fn add_bot(&mut self, input: BotInput) -> HttpResult<Bot> {
+        self.insert_bot(input, false)
+    }
+
+    /// Add a bot proposed by the model during an active run, after the user approved it.
+    pub fn add_bot_from_run(&mut self, input: BotInput) -> HttpResult<Bot> {
+        self.insert_bot(input, true)
+    }
+
+    fn insert_bot(&mut self, mut input: BotInput, within_run: bool) -> HttpResult<Bot> {
         let mut issues = Issues::new();
         bot_field_issues(&mut issues, Some(&mut input.name), input.color.as_deref(), input.instructions.as_deref());
         issues.finish()?;
-        self.assert_idle()?;
+        if within_run {
+            self.assert_writable()?;
+        } else {
+            self.assert_idle()?;
+        }
         let bot = Bot {
             id: new_id(),
             name: input.name,
