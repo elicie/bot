@@ -23,3 +23,6 @@ axum = "0.8"
 futures = "0.3"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs"] }
+
+[dev-dependencies]
+axum = "0.8"
