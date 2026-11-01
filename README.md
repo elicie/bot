@@ -94,6 +94,19 @@ Google Chrome과 동작하는 호스트 샌드박스가 필요합니다. 샌드�
 
 이 앱은 개인용 로컬 실행을 대상으로 합니다. 공개 포트나 리버스 프록시를 통한 인터넷 공개에는 별도의 인증과 배포 보안 설계가 필요합니다.
 
+## Rust 서버 (전환 중)
+
+백엔드를 Rust로 옮기는 중입니다. 설계와 진행 상황은 [docs/rust-migration.md](docs/rust-migration.md)에 있습니다. Rust 서버는 같은 화면과 데이터 폴더를 사용하며, 관리형 Chrome은 아직 포함하지 않습니다.
+
+```sh
+npm install
+npm run build          # 프론트엔드 dist/
+npm run build:server   # Rust 서버 (엔진 포함)
+HOST=0.0.0.0 PORT=7777 ./target/debug/grok-bot
+```
+
+`npm run test:rust`는 Rust workspace 테스트를, `npm run test:e2e:rust`는 Rust 서버를 대상으로 브라우저 테스트를 실행합니다. 처음 빌드할 때는 Rust 의존성을 컴파일하므로 시간이 걸립니다.
+
 ## 검증 명령
 
 ```sh
