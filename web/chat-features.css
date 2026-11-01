@@ -1,0 +1,58 @@
+/* Unread state, bot deletion, attachments, math, and diagrams. */
+
+/* Sidebar unread state: a dot on the avatar (like the running dot) and a stronger name. */
+.unread-dot { position: absolute; top: 0; right: -2px; width: 10px; height: 10px; border: 2px solid var(--chrome); border-radius: 50%; background: var(--accent); }
+.bot-tile .unread-dot { top: 2px; right: 0; }
+.bot-row.is-unread .bot-copy > span { font-weight: 650; color: var(--text, #fff); }
+.bot-row.is-unread .bot-copy small { color: var(--secondary); }
+.bot-context .danger-menuitem { color: var(--danger); }
+.bot-context button[aria-checked='true'] { color: #90c3ff; }
+.bot-context button:disabled { opacity: .45; cursor: not-allowed; }
+
+.danger-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 31px; padding: 7px 13px; border-radius: 6px; border: 1px solid #ff7b8660; background: #b4232f; color: #fff; font-size: 12px; white-space: nowrap; }
+.danger-button:disabled { opacity: .5; cursor: not-allowed; }
+.bot-delete-dialog .bot-delete-body { padding: 18px 20px 6px; display: grid; gap: 10px; font-size: 13px; line-height: 20px; }
+.bot-delete-dialog .bot-delete-body ul { margin: 0; padding-left: 19px; color: var(--secondary); }
+.bot-delete-dialog .bot-delete-blocked { color: #ffc46b; }
+.bot-delete-dialog h2 { overflow-wrap: anywhere; }
+.bot-delete-dialog .modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 20px 18px; }
+
+/* Composer attachments. */
+.composer-dock { position: relative; }
+.composer .attach-file-button { flex-shrink: 0; }
+.attachment-tray { display: grid; gap: 6px; margin-bottom: 7px; }
+.attachment-chips, .message-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.attachment-chip { display: inline-flex; align-items: center; gap: 7px; max-width: min(260px, 100%); min-height: 38px; padding: 4px 6px 4px 4px; border: 1px solid #ffffff1c; border-radius: 10px; background: #1c1c1c; color: inherit; text-decoration: none; }
+a.attachment-chip:hover { border-color: #ffffff38; }
+.attachment-thumb { display: grid; place-items: center; flex-shrink: 0; width: 30px; height: 30px; border-radius: 7px; background: #2c2c2c; overflow: hidden; color: var(--secondary); }
+.attachment-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.attachment-name { display: grid; min-width: 0; font-size: 12px; line-height: 15px; }
+.attachment-name, .attachment-name small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-name small { color: var(--muted); font-size: 10px; }
+.attachment-chip .icon-button { width: 22px; height: 22px; flex-shrink: 0; }
+.attachment-error { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 7px 9px; border-radius: 9px; background: #3a1c20; color: #ffc5cb; font-size: 12px; line-height: 17px; }
+.attachment-error p + p { margin-top: 3px; }
+.attachment-error .icon-button { width: 20px; height: 20px; flex-shrink: 0; }
+.attachment-drop { position: absolute; inset: 4px max(14px, calc((100% - 728px) / 2)); z-index: 5; display: flex; align-items: center; justify-content: center; gap: 8px; border: 2px dashed #64b0ff; border-radius: 24px; background: #0d1a2acc; color: #cfe6ff; font-size: 13px; pointer-events: none; }
+
+/* Sent attachments. */
+.message-attachments { justify-content: flex-end; margin-bottom: 5px; }
+.message-attachment-image { display: block; border-radius: 12px; overflow: hidden; border: 1px solid #ffffff1c; background: #1c1c1c; }
+.message-attachment-image img { display: block; max-width: min(240px, 60vw); max-height: 240px; object-fit: contain; }
+
+/* Math and diagrams. */
+.message-bubble .katex { font-size: 1.08em; }
+.message-bubble .katex-display { margin: 9px 0; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+.message-bubble .katex-error { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: #0003; padding: 2px 4px; border-radius: 3px; white-space: pre-wrap; }
+.mermaid-diagram { margin: 9px 0; padding: 10px; border-radius: 8px; background: #161616; border: 1px solid #ffffff12; overflow-x: auto; }
+.mermaid-diagram img { display: block; max-width: 100%; height: auto; margin: 0 auto; }
+:root[data-theme='light'] .mermaid-diagram { background: #fff; }
+.diagram-loading { margin: 9px 0; color: var(--muted); font-size: 12px; }
+.diagram-fallback small { display: block; margin-top: 9px; color: var(--muted); font-size: 11px; }
+.diagram-fallback pre { margin-top: 4px; }
+
+@media (max-width: 760px) {
+  .attachment-chip { max-width: 100%; }
+  .attachment-drop { inset: 4px 10px; }
+  .message-attachment-image img { max-width: 70vw; }
+}

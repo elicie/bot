@@ -28,17 +28,47 @@ A routine selects one bot, a prompt, and a one-time, interval, or daily IANA-tim
 
 `RoutineRun.executionRunId` binds history to the original execution; terminal `RoutineRun.result` survives follow-up messages in the same conversation. Startup recovery interrupts started work without replay and resumes durable queued claims. Pausing keeps accepted work, and deletion keeps execution history and conversations. See [docs/routines.md](docs/routines.md) for the scheduling and recovery contract.
 
+Each routine can hold one webhook key. Only a SHA-256 hash is stored (the public snapshot omits even that). `POST /hooks/routines/:id` lives outside `/api` because external senders cannot send `Origin` or `X-Grok-Bot`; it authenticates `Authorization: Bearer <key>` with a constant-time hash comparison, throttles repeated failures per routine, and claims a `webhook`-trigger run through the same admission as a manual run. An optional body (at most 16 KiB of UTF-8) is appended to the prompt inside a `<webhook_payload>` block marked as untrusted data. Host and Origin validation still apply, so LAN senders need `HOST=0.0.0.0` and an allowed host. Webhook runs leave the schedule untouched, and pausing a routine stops only scheduled runs.
+
+## Permission rules
+
+Rules map an action category (`file_write`, `bot_message`, `bot_create`, `skill_save`, `memory_save`) for all bots or one bot to "항상 묻기" (`ask`, the default) or "묻지 않고 허용" (`allow`). Ask rules win conflicts. Every broker mutation calls `Runtime::approve_category`, which records an allowed action's tool activity with `approvedByRule` (shown as "내 규칙으로 자동 승인됨") instead of showing a card. Rules never lift the safety floor: local-only approvals always ask, bot-delivery recipient conversations and webhook-triggered runs always ask, and hash, size, hop, and recipient checks run before approval. The server has no login, so only a loopback client may add or loosen allow rules; LAN clients may view rules and tighten them.
+
 ## Bot messages
 
 `BotExchange` stores a two-bot transcript and `BotDelivery` stores its durable, idempotent execution receipt. The authenticated broker exposes bot discovery and an outbound message proposal. Approval records the full recipient/text before creating the recipient's dedicated conversation and queue entry atomically. A single source run can deliver one distinct message. Each further hop needs fresh approval and chains stop at four deliveries.
 
 The recipient runs under its own identity with file and computer tools denied. Its one terminal final answer is projected once into the exchange. Dedicated recipient conversations reject user-prompt hijacking. The routine dispatcher admits both routine claims and bot deliveries in FIFO order under the same global execution slot. Queued deliveries survive startup; started deliveries become interrupted without resend. Pair transcripts use query routing and preserve the originating chat draft.
 
+## Group chats and threads
+
+A `Group` lists 2–12 member bots in speaking order, plus a name, color, and avatar shape. It appears in the sidebar beside the bots. A group conversation stores the group ID in both `botId` and `groupId`, so routines, deliveries, and 1:1 runs cannot resolve it as a bot.
+
+Each user message opens a round. If the message mentions members by whole name (`@Name`, case-insensitive, not inside a word), only those members answer. Otherwise every member answers. In both cases members answer in member order, once each. Their replies never start further member turns, so bots cannot loop.
+
+The first member takes the user's turn. The remaining members are stored durably in `Conversation.groupRound.pendingBotIds`. The dispatcher starts each one as FIFO work under the single global execution slot. The runtime wakes the dispatcher whenever a run settles.
+
+Every answer records its speaker in `Message.speakerBotId` and runs under that member's identity, instructions, and skills. Each member has its own engine session (`Conversation.memberSessions`, `grok/<conversation>/<bot>/<fingerprint>`). A member whose session is loaded receives the transcript since its last reply. A member starting a fresh session receives the bounded transcript so far. Either way the transcript arrives as quoted JSON conversation data.
+
+Stopping or failing a member turn also clears the members still queued. Cancelling between turns does the same. Member edits and group deletion wait for an idle app and a finished round. Deleting a group removes its conversations and threads and keeps its bots. Loading `state.json` drops members whose bot no longer exists, and `State::remove_bot_from_groups` does the same at runtime. Hidden bots stay members.
+
+A thread is a conversation linked to one message (`Conversation.thread`). It inherits the parent's `botId` and `groupId`, so a thread of a group conversation is answered by the group. A message has at most one thread, and threads cannot be nested. A fresh thread session receives the parent message and up to eight preceding messages as quoted data, bounded to 12 KiB each. Threads open beside the main chat (full screen below 760 px) through the `thread` query parameter. Group routes use `?group=&conversation=&thread=`.
+
 ## Managed computer
 
 `shared/computer.ts` defines a typed 960 × 600 browser surface. `ManagedComputer` owns a fresh private Chrome, an ephemeral profile, a mandatory verified sandbox, an authenticated loopback proxy, and a public-origin allowlist. Request UUIDs are one-use; epoch and frame UUIDs prevent stale actions. Public-address validation covers all DNS answers, and the proxy pins the selected validated address. HTTP methods, credentials, sensitive controls, downloads/uploads, workers, WebSockets, WebRTC, and native OS actions are restricted. Browser sandbox verification fails closed.
 
 `ApplicationComputer` associates the single browser with a bot, caches local PNG frames, and adds cancellation generations so Stop invalidates pending work across both command queues. HTTP starts/actions share model-run admission. Stop bypasses that queue to interrupt slow navigation. Computer HTTP routes and model permission decisions require a loopback socket; forwarded-address headers grant no trust. LAN snapshots and SSE replace local-only approval/tool details with a content-free stub. Cached PNGs bind to the exact epoch/frame, and coordinate clicks stay disabled until that image loads. Cancellation stops only the browser epoch used by the run. A reverse proxy requires separate authentication and remains outside the deployment contract. Model computer tools operate only on a user-started browser and request one-use local approval for every observation/action. The provider receives redacted URL/title/control text and coordinates; the browser preview uses PNGs locally.
+
+## Read state, deletion, attachments, and rich text
+
+Read state is server-side: `Bot.unread` in `state.json`, shared by every browser and kept across reloads and restarts. A run that finishes as `completed` or `error` marks its bot unread in the same commit; cancellation does not. The browser showing that bot (chat view, visible tab) marks it read again when the answer arrives or when the bot is opened. A manual "읽지 않음으로 표시" stays until the bot is opened again. `Bot.notifyOnUpdates` is per bot on the server; each browser shows a `Notification` only when it holds permission in a secure context (HTTPS or localhost; LAN HTTP falls back silently with a notice). The message sound is a per-browser preference (`localStorage`), synthesized with Web Audio. Read-state and notification changes are allowed during runs.
+
+Deleting a bot requires an idle application (no active run), no queued routine run of the bot or its routines, no queued or running bot message in its delivery graph, and at least one other bot. One commit removes the bot with its skills, its conversations, its routines and their routine history, every delivery and exchange it sent or received plus the deliveries chained from those, the read-only recipient conversations those deliveries created for other bots, and links from surviving messages to removed exchanges. The candidate state must pass the same reference validation as `state.json` loading before it is committed. Afterwards the server removes the deleted conversations' attachment blobs and private engine session directories (`<data>/attachments/<id>`, `<data>/grok/<id>`). Engine-internal session records under the shared `GROK_HOME` are not pruned.
+
+Attachments are sent with `POST /api/conversations/:id/attachment-messages` (base64 JSON, body limit raised for this route only). Limits: 8 files, text 256 KB each and 512 KB together, images (PNG, JPEG, GIF, WebP by signature) 5 MB each, 10 MB per message. `state.json` keeps only metadata on the user message; bytes are owner-only blobs under `<data>/attachments/<conversation>/<attachment>`, served back as `text/plain` or the image type under a sandboxing CSP. Text files reach the engine inside the text prompt as a `<user_attachments>` section of JSON lines whose string values escape `@`, `[`, `:`, and `<`, and the combined text still passes `literal_engine_prompt`, so attachment contents cannot trigger upstream `@path` expansion, `data:` image extraction, or slash commands. Images become ACP image blocks; the pinned Grok Build accepts them although it does not advertise `promptCapabilities.image`, normalizes them, and sends them as Chat Completions `image_url` data URLs (pinned by `crates/core/tests/attachments.rs`). Replacement sessions replay only attachment names.
+
+Assistant Markdown renders KaTeX math (`$…$`, `$$…$$`, `trust: false`) and Mermaid fences (`securityLevel: 'strict'`, shown as an `<img>` of the generated SVG). Both libraries load on first use; formulas that fail show their source, and diagrams that fail show their code. Raw HTML stays skipped.
 
 ## File access
 
@@ -56,6 +86,9 @@ All JSON mutations send `Content-Type: application/json` and `X-Grok-Bot: 1`. Th
 | POST | `/api/provider/test` | `{ baseUrl?, apiKey? }` | `ProviderCheck` |
 | POST | `/api/bots` | `{ name, color?, instructions?, shape?, pinned? }` | `AppState` |
 | PATCH | `/api/bots/:id` | `{ name?, color?, instructions?, shape?, pinned?, hidden? }` | `AppState` |
+| DELETE | `/api/bots/:id` | `{}` | `AppState` |
+| POST | `/api/bots/:id/unread` | `{ unread }` | `AppState` |
+| POST | `/api/bots/:id/notify` | `{ enabled }` | `AppState` |
 | POST | `/api/bots/:botId/skills` | `{ name, description, instructions }` | `AppState`, status 201 |
 | POST | `/api/bots/:botId/skills/import` | `{ markdown }` | `AppState`, status 201 |
 | PATCH | `/api/bots/:botId/skills/:id` | `{ revision, name?, description?, instructions?, enabled? }` | `AppState` |
@@ -65,10 +98,24 @@ All JSON mutations send `Content-Type: application/json` and `X-Grok-Bot: 1`. Th
 | PATCH | `/api/routines/:id` | `{ enabled }` | `AppState` |
 | DELETE | `/api/routines/:id` | `{}` | `AppState` |
 | POST | `/api/routines/:id/run` | `{}` | `{ run, state }`, status 202 |
+| POST | `/api/routines/:id/webhook` | `{}` | `{ key, keyHint, createdAt, state }`, status 201 (creates or rotates; the key is returned once) |
+| DELETE | `/api/routines/:id/webhook` | `{}` | `AppState` |
+| POST | `/hooks/routines/:id` | `Authorization: Bearer <key>`, optional text/JSON body ≤ 16 KiB; no `X-Grok-Bot` | `{ run }`, status 202; 401, 409, 413, 429 |
+| GET | `/api/permission-rules` | | `{ rules, canAutoAllow }` |
+| POST | `/api/permission-rules` | `{ category, action, botId? }` | `AppState`, status 201; allow rules loopback only |
+| PATCH | `/api/permission-rules/:id` | `{ action }` | `AppState`; switching to allow loopback only |
+| DELETE | `/api/permission-rules/:id` | `{}` | `AppState`; deleting an ask rule loopback only |
 | POST | `/api/conversations` | `{ botId }` | `{ conversation, state }` |
 | POST | `/api/conversations/:id/messages` | `{ text }` | `AppState`, status 202 |
+| POST | `/api/conversations/:id/attachment-messages` | `{ text, attachments: [{ name, mimeType, data }] }` (body up to about 15 MiB) | `AppState`, status 202 |
+| GET | `/api/conversations/:id/attachments/:attachmentId` | | stored bytes (`text/plain` or image) |
 | POST | `/api/conversations/:id/cancel` | `{}` | `AppState` |
 | POST | `/api/conversations/:id/permissions/:permissionId` | `{ optionId }` | `AppState` |
+| POST | `/api/groups` | `{ name, color?, shape?, memberBotIds }` | `{ group, state }`, status 201 |
+| PATCH | `/api/groups/:id` | `{ name?, color?, shape?, memberBotIds?, pinned? }` | `AppState` |
+| DELETE | `/api/groups/:id` | `{}` | `AppState` |
+| POST | `/api/groups/:id/conversations` | `{}` | `{ conversation, state }`, status 201 |
+| POST | `/api/conversations/:id/threads` | `{ messageId }` | `{ conversation, state }`, status 201 (200 when the thread exists) |
 | GET | `/api/files?path=` | workspace-relative directory | `FileListing` |
 | GET | `/api/file?path=` | workspace-relative file | `FileDocument` |
 | PUT | `/api/file` | `{ path, content, hash }` | `FileDocument` |

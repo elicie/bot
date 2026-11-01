@@ -19,13 +19,21 @@
 //! Domain methods take the inputs the HTTP layer deserializes and perform the zod validation the
 //! Node routes did (`field: message` errors, status 400) before any other check.
 
+pub mod attachments;
+mod bot_activity;
 pub mod bot_messages;
 mod cron;
 mod disk;
+pub mod knowledge;
+pub mod memory;
+pub mod permissions;
+pub mod groups;
 mod redact;
 pub mod schedule;
 pub mod skills;
+pub mod templates;
 pub mod validate;
+pub mod webhooks;
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -97,7 +105,8 @@ enum Job {
 
 /// `Store.snapshot()`: the public state with the API key removed and redacted.
 fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_error: Option<String>) -> AppState {
-    let DiskState { revision, settings, bots, conversations, routines, routine_runs, bot_exchanges, bot_deliveries, .. } = disk;
+    let DiskState { revision, settings, bots, conversations, mut routines, routine_runs, bot_exchanges, bot_deliveries, permission_rules, groups, .. } = disk;
+    webhooks::strip_webhook_secrets(&mut routines);
     let mut state = AppState {
         revision,
         bots,
@@ -106,6 +115,8 @@ fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_err
         routine_runs,
         bot_exchanges,
         bot_deliveries,
+        permission_rules,
+        groups,
         routine_scheduling_error: routine_scheduling_error.filter(|value| !value.is_empty()),
         settings: PublicSettings {
             base_url: settings.base_url,
@@ -200,13 +211,19 @@ fn default_state(now: DateTime<Utc>) -> DiskState {
             skills: None,
             pinned: None,
             hidden: None,
+            unread: None,
+            notify_on_updates: None,
             created_at: iso(now),
+            memories: None,
+            knowledge: None,
         }],
         conversations: Vec::new(),
         routines: Vec::new(),
         routine_runs: Vec::new(),
         bot_exchanges: Vec::new(),
         bot_deliveries: Vec::new(),
+        permission_rules: Vec::new(),
+        groups: Vec::new(),
     }
 }
 
@@ -291,6 +308,7 @@ impl Store {
             })
             .await
             .map_err(|_| anyhow::anyhow!(SAVE_FAILED_RUNTIME))?;
+        store.prune_knowledge().await;
         Ok(store)
     }
 
@@ -683,7 +701,11 @@ impl State {
             skills: None,
             pinned: input.pinned,
             hidden: None,
+            unread: None,
+            notify_on_updates: None,
             created_at: iso(self.now()),
+            memories: None,
+            knowledge: None,
         };
         self.disk_mut().bots.push(bot.clone());
         Ok(bot)
@@ -740,6 +762,10 @@ impl State {
             session_fingerprint: None,
             run: RunState::idle(),
             updated_at: iso(self.now()),
+            group_id: None,
+            thread: None,
+            group_round: None,
+            member_sessions: None,
         };
         self.disk_mut().conversations.push(conversation.clone());
         Ok(conversation)
@@ -849,6 +875,7 @@ impl State {
             next_run_at,
             created_at: iso(now),
             updated_at: iso(now),
+            webhook: None,
         };
         let mut prospect = self.prospect();
         prospect.routines.push(&routine);
@@ -874,6 +901,7 @@ impl State {
             next_run_at: if input.enabled { next_run_at } else { None },
             created_at: current.created_at.clone(),
             updated_at: iso(now),
+            webhook: current.webhook.clone(),
         };
         let mut prospect = self.prospect();
         prospect.routines[index] = &updated;
@@ -925,6 +953,10 @@ impl State {
             session_fingerprint: None,
             run: RunState::idle(),
             updated_at: created_at.clone(),
+            group_id: None,
+            thread: None,
+            group_round: None,
+            member_sessions: None,
         };
         let run = RoutineRun {
             id: new_id(),
@@ -943,12 +975,22 @@ impl State {
     }
 
     pub fn run_routine(&mut self, id: &str, now: DateTime<Utc>) -> HttpResult<RoutineRun> {
+        self.claim_routine_now(id, now, RoutineTrigger::Manual, None)
+    }
+
+    /// Claim an immediate run (manual or webhook) through the same admission checks. `prompt`
+    /// replaces the routine prompt for this run only.
+    fn claim_routine_now(&mut self, id: &str, now: DateTime<Utc>, trigger: RoutineTrigger, prompt: Option<String>) -> HttpResult<RoutineRun> {
         self.assert_routine_idle(id)?;
         let index = self.routine_index(id)?;
         let routine = &self.disk.routines[index];
-        let (run, conversation) = Self::routine_claim(routine, RoutineTrigger::Manual, iso(now), now);
+        let (mut run, conversation) = Self::routine_claim(routine, trigger, iso(now), now);
+        if let Some(prompt) = prompt {
+            run.prompt = prompt;
+        }
         let mut updated = routine.clone();
-        if matches!(routine.schedule, RoutineSchedule::Once { .. }) {
+        // A manual run consumes a one-time schedule; a webhook run is independent of the schedule.
+        if trigger == RoutineTrigger::Manual && matches!(routine.schedule, RoutineSchedule::Once { .. }) {
             updated.enabled = false;
             updated.next_run_at = None;
             updated.updated_at = iso(now);
@@ -1045,6 +1087,9 @@ impl State {
     /// Returns `true` when queued routine or delivery work was cancelled.
     pub fn cancel_queued_work(&mut self, conversation_id: &str) -> HttpResult<bool> {
         self.assert_writable()?;
+        if self.cancel_group_round(conversation_id)? {
+            return Ok(true);
+        }
         let conversation = self.conversation(conversation_id)?;
         let queued = self.disk.routine_runs.iter().any(|run| run.result.is_none() && !truthy(&run.execution_run_id) && run.conversation_id == conversation_id)
             || self
@@ -1093,6 +1138,9 @@ impl State {
             return Err(HttpError::too_large("Bot messages must be at most 160 KiB of UTF-8 text so the complete message can be reviewed."));
         }
         let source = self.conversation(conversation_id)?;
+        if source.group_id.is_some() {
+            return Err(HttpError::conflict("Bot messages are unavailable in group conversations."));
+        }
         let message = source.messages.iter().rposition(|message| message.role == Role::Assistant);
         if source.run.id != execution_run_id
             || !source.run.status.is_active()
@@ -1124,6 +1172,10 @@ impl State {
             session_fingerprint: None,
             run: RunState::idle(),
             updated_at: timestamp.clone(),
+            group_id: None,
+            thread: None,
+            group_round: None,
+            member_sessions: None,
         };
         let exchange = BotExchange {
             id: new_id(),

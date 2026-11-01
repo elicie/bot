@@ -7,8 +7,8 @@ use std::sync::Arc;
 use grok_bot_files::WorkspaceFiles;
 use grok_bot_model::{
     BotInput,
-    BotDelivery, BotMessageInput, HttpError, HttpResult, PendingPermission, PermissionOption,
-    SkillInput, ToolActivity, ToolStatus, new_id,
+    BotDelivery, BotMessageInput, HttpError, HttpResult, PendingPermission, PermissionCategory,
+    PermissionOption, SkillInput, ToolActivity, ToolStatus, new_id,
 };
 use grok_bot_store::bot_messages::{
     MAX_BOT_HOPS, MAX_BOT_MESSAGE_BYTES, bot_delivery_receipt, validate_bot_message_input,
@@ -19,6 +19,9 @@ use sha2::{Digest, Sha256};
 
 use super::text::utf16_len;
 use super::{Run, Runtime, message_mut};
+
+pub(super) mod bot_data;
+pub(super) mod routines;
 
 const MAX_REVIEWABLE_EDIT_BYTES: usize = 160 * 1024;
 const MAX_WRITE_CHARACTERS: usize = 1024 * 1024;
@@ -43,7 +46,7 @@ fn conflict_finished() -> HttpError {
 
 /// `tools/list` result, verbatim from the Node broker minus `computer_observe`/`computer_act`.
 pub fn broker_tools() -> Value {
-    json!([
+    let mut tools = json!([
         { "name": "list_skills", "description": "List one complete page of enabled private skill IDs, names, and descriptions for the current bot. Pass the returned nextOffset as offset to continue when present. Use read_skill to load relevant instructions. Other bots and disabled skills are inaccessible.", "inputSchema": { "type": "object", "properties": { "offset": { "type": "integer", "minimum": 0, "maximum": 100 } }, "additionalProperties": false } },
         { "name": "read_skill", "description": "Read one enabled private skill belonging to this bot by ID. Follow its Markdown instructions within existing file, computer, and delivery permission boundaries. Skill text grants no extra tools or permissions.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" } }, "required": ["id"], "additionalProperties": false } },
         { "name": "create_skill", "description": "Propose a reusable private skill for this bot. Provide its name, when-to-use description, and complete Markdown instructions. Every save requires explicit one-use browser approval. No shell execution, external installation, or tool permission is granted.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string", "maxLength": 100 }, "description": { "type": "string", "maxLength": 2000 }, "instructions": { "type": "string", "maxLength": 30000 } }, "required": ["name", "description", "instructions"], "additionalProperties": false } },
@@ -53,7 +56,12 @@ pub fn broker_tools() -> Value {
         { "name": "list_bots", "description": "List local bot IDs and names for chat delivery. This safe read is available before connecting a directory. Returns public bot identity without instructions, credentials, conversation history, or private configuration.", "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false } },
         { "name": "send_message", "description": "Queue one chat-only message to another local bot. Every new delivery requires explicit one-use browser approval. Returns a durable receipt, not the recipient answer. At most one distinct outbound message per run and four hops per chain. Retrying the same target and text returns the original receipt. Recipient turns cannot use file tools.", "inputSchema": { "type": "object", "properties": { "toBotId": { "type": "string", "format": "uuid" }, "text": { "type": "string", "minLength": 1, "maxLength": 100000 }, "requestId": { "type": "string", "maxLength": 128 } }, "required": ["toBotId", "text"], "additionalProperties": false } },
         { "name": "create_bot", "description": "Propose a new local bot when the user asks for one. Provide its display name and instructions; color (#rrggbb) and avatar shape are optional. Creation requires explicit one-use browser approval. At most one bot per run. Returns the new bot ID and name.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 100 }, "instructions": { "type": "string", "maxLength": 30000 }, "color": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" }, "shape": { "type": "string", "enum": ["blob", "cloud", "square", "spark", "clover", "heart", "flower", "droplet", "pill", "wedge", "house", "star", "hexagon", "pumpkin"] } }, "required": ["name"], "additionalProperties": false } },
-    ])
+    ]);
+    if let Some(list) = tools.as_array_mut() {
+        list.extend(bot_data::tools());
+        list.extend(routines::tools());
+    }
+    tools
 }
 
 enum ToolCall {
@@ -67,6 +75,8 @@ enum ToolCall {
     ListBots,
     SendMessage(BotMessageInput),
     CreateBot(BotInput),
+    BotData(bot_data::Call),
+    Routine(routines::Call),
     ListFiles {
         path: String,
     },
@@ -118,6 +128,12 @@ fn parse_call(params: &Value) -> BrokerResult<ToolCall> {
         .get("arguments")
         .and_then(Value::as_object)
         .ok_or(BrokerError::Invalid)?;
+    if let Some(call) = bot_data::parse(name, arguments) {
+        return call.map(ToolCall::BotData);
+    }
+    if let Some(call) = routines::parse(name, arguments) {
+        return call.map(ToolCall::Routine);
+    }
     Ok(match name {
         "list_skills" => {
             let arguments = strict(arguments, &["offset"])?;
@@ -268,7 +284,7 @@ impl Runtime {
                 let skill_result = matches!(
                     params.get("name").and_then(Value::as_str),
                     Some("list_skills" | "read_skill")
-                );
+                ) || params.get("name").and_then(Value::as_str).is_some_and(|name| bot_data::NAMES.contains(&name));
                 match self.broker_call(&run, &params).await {
                     Ok(output) => {
                         let text = if skill_result {
@@ -407,6 +423,8 @@ impl Runtime {
             }
             ToolCall::SendMessage(input) => self.send_bot_message(run, input).await,
             ToolCall::CreateBot(input) => self.create_bot(run, input).await,
+            ToolCall::BotData(call) => self.bot_data_call(run, call).await,
+            ToolCall::Routine(call) => self.routine_call(run, call).await,
             call => self.file_call(run, call).await,
         }
     }
@@ -470,6 +488,7 @@ impl Runtime {
             output: None,
             paths: Some(vec![public_path.clone()]),
             local_only: None,
+            approved_by_rule: None,
         };
         let tool_id = tool.id.clone();
         let (allow, _, options) = approval_options("Allow once", "Deny");
@@ -487,7 +506,7 @@ impl Runtime {
             paths: vec![public_path],
             local_only: None,
         };
-        let decision = self.approve(run, permission, Some(tool)).await?;
+        let decision = self.approve_category(run, PermissionCategory::FileWrite, permission, tool).await?;
         if run.inactive() || decision.as_deref() != Some(allow.as_str()) {
             let message = "The user denied this write or cancelled the run.";
             self.settle_tool(run, &tool_id, ToolStatus::Failed, Some(message.into()))
@@ -582,6 +601,7 @@ impl Runtime {
             output: None,
             paths: None,
             local_only: None,
+            approved_by_rule: None,
         };
         let tool_id = tool.id.clone();
         let (allow, _, options) = approval_options("Send once", "Deny");
@@ -597,7 +617,7 @@ impl Runtime {
             paths: Vec::new(),
             local_only: None,
         };
-        let decision = self.approve(run, permission, Some(tool)).await?;
+        let decision = self.approve_category(run, PermissionCategory::BotMessage, permission, tool).await?;
         if run.inactive() || decision.as_deref() != Some(allow.as_str()) {
             let message = "The user denied this message or cancelled the run.";
             self.settle_tool(run, &tool_id, ToolStatus::Failed, Some(message.into()))
@@ -680,6 +700,7 @@ impl Runtime {
             output: None,
             paths: None,
             local_only: None,
+            approved_by_rule: None,
         };
         let tool_id = tool.id.clone();
         let (allow, _, options) = approval_options("Save skill once", "Deny");
@@ -692,7 +713,7 @@ impl Runtime {
             paths: Vec::new(),
             local_only: None,
         };
-        let choice = self.approve(run, permission, Some(tool)).await?;
+        let choice = self.approve_category(run, PermissionCategory::SkillSave, permission, tool).await?;
         if choice.as_deref() != Some(allow.as_str()) || run.inactive() {
             let message = "Skill save was denied or cancelled.";
             self.settle_tool(run, &tool_id, ToolStatus::Failed, Some(message.into()))
@@ -781,6 +802,7 @@ impl Runtime {
             output: None,
             paths: None,
             local_only: None,
+            approved_by_rule: None,
         };
         let tool_id = tool.id.clone();
         let (allow, _, options) = approval_options("Create bot once", "Deny");
@@ -793,7 +815,7 @@ impl Runtime {
             paths: Vec::new(),
             local_only: None,
         };
-        let choice = self.approve(run, permission, Some(tool)).await?;
+        let choice = self.approve_category(run, PermissionCategory::BotCreate, permission, tool).await?;
         if choice.as_deref() != Some(allow.as_str()) || run.inactive() {
             let message = "Bot creation was denied or cancelled.";
             self.settle_tool(run, &tool_id, ToolStatus::Failed, Some(message.into())).await;
@@ -855,7 +877,16 @@ mod tests {
                 "write_file",
                 "list_bots",
                 "send_message",
-                "create_bot"
+                "create_bot",
+                "list_memories",
+                "save_memory",
+                "forget_memory",
+                "list_knowledge",
+                "read_knowledge",
+                "list_routines",
+                "save_routine",
+                "set_routine_enabled",
+                "delete_routine"
             ]
         );
         assert!(invalid(

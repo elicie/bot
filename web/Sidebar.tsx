@@ -1,16 +1,20 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Blocks, Eye, EyeOff, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pin, Plus, Repeat2, Search, Settings2, X } from 'lucide-react';
 import type { AppState, Bot } from '../shared/types';
 import { activeRun, conversationPreview, conversationsFor, type Selection } from './state';
 import { Avatar, IconButton, Spinner } from './ui';
 import './workspace.css';
 
-export function Sidebar({ data, selection, lastConversation, chat, search, open, mobile, busy, onSearch, onSelect, onClose, onNew, onSettings, onRoutines, onCapabilities, onPatch }: {
+export function Sidebar({ data, selection, lastConversation, chat, search, open, mobile, busy, onSearch, onSelect, onClose, onNew, onSettings, onRoutines, onCapabilities, onPatch, menuExtras, extra }: {
   data: AppState | null; selection: Selection; lastConversation: Record<string, string | null>; chat: boolean;
   search: string; open: boolean; mobile: boolean; busy: boolean;
   onSearch: (value: string) => void; onSelect: (selection: Selection) => void; onClose: () => void;
   onNew: () => void; onSettings: () => void; onRoutines: () => void; onCapabilities: () => void;
   onPatch: (id: string, patch: Partial<Pick<Bot, 'pinned' | 'hidden'>>) => void;
+  /** Extra context-menu items (read state, notifications, delete). */
+  menuExtras?: (bot: Bot, close: () => void) => ReactNode;
+  /** Extra sidebar entries (group chats), rendered after the bots. */
+  extra?: ReactNode;
 }) {
   const [compact, setCompact] = useState(() => localStorage.getItem('grok-bot-sidebar-compact') === 'true');
   const [hidden, showHidden] = useState(false);
@@ -36,10 +40,13 @@ export function Sidebar({ data, selection, lastConversation, chat, search, open,
   const row = (bot: Bot, tile: boolean) => {
     const latest = conversationsFor(data, bot.id)[0];
     const running = data?.conversations.some(conversation => conversation.botId === bot.id && activeRun(conversation.run.status));
+    const unread = !!bot.unread && !(chat && bot.id === selection.botId);
     return <div className={`bot-item ${tile ? 'pinned-item' : ''}`} key={bot.id}>
-      <button type="button" className={`bot-row ${tile ? 'bot-tile' : ''} ${chat && bot.id === selection.botId ? 'selected' : ''}`} aria-current={chat && bot.id === selection.botId ? 'true' : undefined} title={bot.name}
+      {unread && <span id={`unread-${bot.id}`} hidden>읽지 않은 활동</span>}
+      <button type="button" className={`bot-row ${tile ? 'bot-tile' : ''} ${chat && bot.id === selection.botId ? 'selected' : ''} ${unread ? 'is-unread' : ''}`} aria-current={chat && bot.id === selection.botId ? 'true' : undefined} title={bot.name}
+        aria-describedby={unread ? `unread-${bot.id}` : undefined} data-unread={unread ? 'true' : undefined}
         onClick={() => selectBot(bot)} onContextMenu={event => { event.preventDefault(); setMenu(bot.id); }}>
-        <span className="bot-avatar"><Avatar color={bot.color} seed={bot.id} shape={bot.shape} size={tile ? 64 : 36} />{running && <span className="running-dot" />}</span>
+        <span className="bot-avatar"><Avatar color={bot.color} seed={bot.id} shape={bot.shape} size={tile ? 64 : 36} />{running && <span className="running-dot" />}{unread && !running && <span className="unread-dot" aria-hidden="true" />}</span>
         <span className="bot-copy"><span>{bot.name}</span>{!tile && <small>{conversationPreview(latest)}</small>}</span>
       </button>
       <div className="bot-actions">
@@ -48,6 +55,7 @@ export function Sidebar({ data, selection, lastConversation, chat, search, open,
           <button role="menuitem" disabled={busy} onClick={() => { onPatch(bot.id, { pinned: !(bot.pinned ?? bot.id === data?.bots[0]?.id) }); setMenu(null); }}><Pin size={14} />{(bot.pinned ?? bot.id === data?.bots[0]?.id) ? '고정 해제' : '고정'}</button>
           <button role="menuitem" disabled={busy} onClick={() => { onPatch(bot.id, { hidden: !bot.hidden }); setMenu(null); }}>{bot.hidden ? <Eye size={14} /> : <EyeOff size={14} />}{bot.hidden ? '사이드바에 표시' : '사이드바에서 숨기기'}</button>
           <button role="menuitem" onClick={() => { void navigator.clipboard?.writeText(bot.id); setMenu(null); }}>Bot ID 복사</button>
+          {menuExtras?.(bot, () => setMenu(null))}
         </div>}
       </div>
     </div>;
@@ -68,6 +76,7 @@ export function Sidebar({ data, selection, lastConversation, chat, search, open,
         {hidden && <div className="sidebar-section-heading">숨긴 Bot<button onClick={() => showHidden(false)}>돌아가기</button></div>}
         {!!pinned.length && <section className="pinned-bots" aria-label="고정된 봇">{pinned.map(bot => row(bot, true))}</section>}
         <div className="ordinary-bots">{normal.map(bot => row(bot, false))}</div>
+        {!hidden && extra}
         {!bots.length && <p className="sidebar-empty">{search ? '검색 결과가 없습니다.' : hidden ? '숨긴 Bot이 없습니다.' : '봇을 추가해 대화를 시작하세요.'}</p>}
       </>}
     </div>

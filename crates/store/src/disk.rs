@@ -24,6 +24,7 @@ fn routine_valid(routine: &mut Routine) -> bool {
         && routine.next_run_at.as_deref().is_none_or(is_timestamp)
         && is_timestamp(&routine.created_at)
         && is_timestamp(&routine.updated_at)
+        && routine.webhook.as_ref().is_none_or(crate::webhooks::webhook_valid)
 }
 
 fn result_valid(result: &RoutineResult) -> bool {
@@ -41,6 +42,7 @@ fn run_valid(run: &RoutineRun) -> bool {
 
 /// `diskSchema.parse` beyond the JSON shape. Applies the schema's transforms in place.
 pub(crate) fn schema_valid(disk: &mut DiskState) -> bool {
+    crate::groups::normalize(disk);
     if disk.version != 1
         || disk.bots.is_empty()
         || disk.routines.len() > MAX_ROUTINES
@@ -51,7 +53,7 @@ pub(crate) fn schema_valid(disk: &mut DiskState) -> bool {
         return false;
     }
     for bot in &mut disk.bots {
-        if !is_uuid(&bot.id) {
+        if !is_uuid(&bot.id) || !crate::memory::persisted_bot_data_valid(bot) {
             return false;
         }
         if let Some(skills) = bot.skills.as_mut()
@@ -67,13 +69,16 @@ pub(crate) fn schema_valid(disk: &mut DiskState) -> bool {
                 is_uuid(&message.id)
                     && message.bot_exchange_ids.as_ref().is_none_or(|ids| ids.len() <= 1 && ids.iter().all(|id| is_uuid(id)))
                     && message.source_bot_id.as_deref().is_none_or(is_uuid)
+                    && message.attachments.as_deref().is_none_or(crate::attachments::attachments_valid)
             })
     });
     conversations
+        && crate::groups::schema_valid(disk)
         && disk.routines.iter_mut().all(routine_valid)
         && disk.routine_runs.iter().all(run_valid)
         && disk.bot_exchanges.iter().all(exchange_valid)
         && disk.bot_deliveries.iter_mut().all(delivery_valid)
+        && crate::permissions::rules_valid(&disk.permission_rules)
 }
 
 fn truthy(value: &Option<String>) -> bool {
@@ -98,6 +103,7 @@ pub(crate) fn references_valid(disk: &DiskState) -> Result<(), String> {
         .chain(disk.routine_runs.iter().map(|run| run.id.as_str()))
         .chain(disk.bot_exchanges.iter().map(|exchange| exchange.id.as_str()))
         .chain(disk.bot_deliveries.iter().map(|delivery| delivery.id.as_str()))
+        .chain(disk.permission_rules.iter().map(|rule| rule.id.as_str()))
         .collect();
     let unique_ids: HashSet<&str> = entity_ids.iter().copied().collect();
     let mut linked_conversations: HashSet<&str> = HashSet::new();
@@ -132,7 +138,8 @@ pub(crate) fn references_valid(disk: &DiskState) -> Result<(), String> {
             .routine_runs
             .iter()
             .any(|run| unique_ids.contains(run.routine_id.as_str()) && !disk.routines.iter().any(|routine| routine.id == run.routine_id))
-        || disk.conversations.iter().any(|conversation| !bot_ids.contains(conversation.bot_id.as_str()))
+        || disk.conversations.iter().any(|conversation| !bot_ids.contains(conversation.bot_id.as_str()) && !crate::groups::is_group_conversation(conversation))
+        || !crate::groups::references_valid(disk)
         || disk.routines.iter().any(|routine| {
             !bot_ids.contains(routine.bot_id.as_str())
                 || (routine.enabled && !truthy(&routine.next_run_at))

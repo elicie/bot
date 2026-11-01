@@ -1,0 +1,10 @@
+/* Routine webhook trigger ("웹훅이 발생할 때") in the routine detail and editor. */
+.routine-webhook { display: grid; gap: 10px; padding: 14px 0; border-top: 1px solid var(--line); min-width: 0; }
+.routine-webhook h3 { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 500; }
+.webhook-fields { display: grid; gap: 12px; min-width: 0; }
+.webhook-field { display: grid; gap: 5px; min-width: 0; font-size: 12px; }
+.webhook-field-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--secondary); }
+.webhook-field-heading .small-button { min-height: 25px; padding: 3px 8px; font-size: 11px; }
+.webhook-field code { display: block; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: #181818; font-size: 11px; line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }
+.webhook-field small { color: var(--secondary); font-size: 11px; line-height: 17px; }
+:root:is([data-theme='light'], [data-theme='system']) .webhook-field code { background: light-dark(#f4f4f4, #181818); }

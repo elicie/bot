@@ -18,6 +18,8 @@ import type { AppState, ProviderCheck, SettingsInput } from '../shared/types';
 import { errorText, request } from './api';
 import type { SettingsTab } from './state';
 import { ErrorNotice, IconButton, Modal, Spinner } from './ui';
+import { PermissionRules } from './PermissionRules';
+import { NotificationSettings } from './ActivitySettings';
 import './settings.css';
 
 interface FormState {
@@ -377,6 +379,7 @@ export function Settings({
                   </p>
                   {preferenceError && <ErrorNotice>{preferenceError}</ErrorNotice>}
                 </section>
+                <NotificationSettings />
                 <section className="settings-section">
                   <h3>실행 환경</h3>
                   <RuntimeDetails runtime={data.runtime} />
@@ -410,51 +413,7 @@ export function Settings({
             )}
             {tab === 'permissions' && (
               <>
-                <section className="settings-section">
-                  <h3>컴퓨터 작업</h3>
-                  <div className="settings-card">
-                    <div className="settings-row">
-                      <div className="settings-copy">
-                        <strong>에이전트의 파일 쓰기</strong>
-                        <span>파일을 만들거나 바꾸기 전에 대화에서 경로와 전체 내용을 확인하고 한 번만 승인합니다.</span>
-                      </div>
-                      <span className="status-pill success">항상 확인</span>
-                    </div>
-                    <div className="settings-row">
-                      <div className="settings-copy">
-                        <strong>봇 간 메시지</strong>
-                        <span>받는 Bot과 전체 메시지를 확인한 뒤 한 번만 승인합니다. 수신 Bot은 대화 전용으로 답합니다.</span>
-                      </div>
-                      <span className="status-pill success">항상 확인</span>
-                    </div>
-                    <div className="settings-row">
-                      <div className="settings-copy">
-                        <strong>관리형 브라우저</strong>
-                        <span>사용자가 시작한 브라우저의 페이지 정보 공유와 조작을 건별 승인합니다. 서버의 localhost 연결에서 승인할 수 있습니다.</span>
-                      </div>
-                      <span className="status-pill success">항상 확인</span>
-                    </div>
-                    <div className="settings-row">
-                      <div className="settings-copy">
-                        <strong>파일 읽기와 폴더 탐색</strong>
-                        <span>연결한 작업 폴더 안에서 실행합니다. 상위 경로와 심볼릭 링크를 통한 접근은 차단됩니다.</span>
-                      </div>
-                    </div>
-                    <div className="settings-row">
-                      <div className="settings-copy">
-                        <strong>직접 편집한 파일</strong>
-                        <span>파일 편집기의 저장 버튼을 눌러야 실제 파일에 반영됩니다. 외부 변경과 충돌하면 덮어쓰지 않습니다.</span>
-                      </div>
-                    </div>
-                  </div>
-                </section>
-                <section className="settings-section">
-                  <h3>묻지 않고 허용하는 쓰기 규칙</h3>
-                  <p className="settings-note settings-empty-note">
-                    등록된 규칙이 없습니다. 이 앱은 영구 승인이나 자동 검토를 제공하지 않으며, 쓰기
-                    요청마다 다시 확인합니다.
-                  </p>
-                </section>
+                <PermissionRules data={data} disabled={busy} />
                 <section className="settings-section">
                   <h3>승인 대기</h3>
                   <div className="settings-card">

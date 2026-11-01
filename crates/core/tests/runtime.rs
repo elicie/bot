@@ -25,6 +25,10 @@ use grok_bot_model::{
 use grok_bot_store::Store;
 use serde_json::{Value, json};
 
+#[path = "runtime_bot_data/mod.rs"]
+mod bot_data;
+use bot_data::bot_memory_and_knowledge;
+
 // ---------------------------------------------------------------------------------------------
 // Mock OpenAI-compatible provider (port of tests/mock-provider.ts and scriptedFileReply)
 
@@ -1422,6 +1426,90 @@ async fn bot_creation(f: &Fixture) {
     assert!(!f.store.read(|s| s.disk().bots.iter().any(|b| b.name == "Denied")), "denied bot must not exist");
 }
 
+async fn chat_routines(f: &Fixture) {
+    f.configure("", true).await;
+    let owner = f.bot_id();
+    let id = f.conversation(&owner).await;
+    let daily = json!({"name": "아침 브리핑", "prompt": "오늘 할 일을 정리해줘", "schedule": {"kind": "daily", "time": "09:30", "timezone": "Asia/Seoul"}});
+    f.provider.clear();
+    f.provider.plan(vec![
+        discover("workspace routines"),
+        use_tool("list_routines", json!({})),
+        use_tool("save_routine", daily.clone()),
+        text("루틴을 만들었어요."),
+    ]);
+    f.runtime.start(&id, "매일 아침 9시 반에 브리핑 루틴 만들어줘").await.unwrap();
+    let pending = f.pending(&id).await;
+    let permission = pending.run.permission.clone().unwrap();
+    assert!(permission.description.contains("루틴을 저장하도록 허용할까요?") && permission.description.contains("매일 09:30 (Asia/Seoul)"), "{permission:?}");
+    assert!(f.store.read(|s| s.disk().routines.is_empty()), "no routine before approval");
+    f.decide(&id, "allow_once").await;
+    let completed = f.completed(&id).await;
+    let routines = f.store.read(|s| s.disk().routines.clone());
+    assert_eq!(routines.len(), 1, "{routines:?}");
+    let routine = routines[0].clone();
+    assert_eq!((routine.bot_id.as_str(), routine.name.as_str(), routine.enabled), (owner.as_str(), "아침 브리핑", true));
+    assert!(routine.next_run_at.is_some());
+    let outcomes = tool_outcomes(&f.provider.inference());
+    assert!(outcomes.iter().any(|o| o.contains("\"now\"")), "list_routines returns the server time: {outcomes:?}");
+    let tool = completed.messages.last().unwrap().tools.iter().find(|t| t.title.starts_with("루틴 생성")).cloned().expect("routine tool card");
+    assert!(tool.output.unwrap_or_default().contains("생성됨 루틴"), "card shows the created label");
+
+    f.provider.clear();
+    f.provider.plan(vec![
+        discover("workspace routines"),
+        use_tool("set_routine_enabled", json!({"id": routine.id, "enabled": false})),
+        text("일시 중지했어요."),
+    ]);
+    f.runtime.start(&id, "그 루틴 잠깐 멈춰줘").await.unwrap();
+    f.decide(&id, "allow_once").await;
+    f.completed(&id).await;
+    let paused = f.store.read(|s| s.disk().routines[0].clone());
+    assert!(!paused.enabled && paused.next_run_at.is_none(), "{paused:?}");
+
+    f.provider.clear();
+    f.provider.plan(vec![
+        discover("workspace routines"),
+        use_tool("delete_routine", json!({"id": routine.id})),
+        text("삭제하지 않았어요."),
+    ]);
+    f.runtime.start(&id, "그 루틴 지워줘").await.unwrap();
+    f.decide(&id, "reject_once").await;
+    f.completed(&id).await;
+    assert_eq!(f.store.read(|s| s.disk().routines.len()), 1, "denied deletion keeps the routine");
+
+    f.provider.clear();
+    f.provider.plan(vec![
+        discover("workspace routines"),
+        use_tool("delete_routine", json!({"id": routine.id})),
+        text("삭제했어요."),
+    ]);
+    f.runtime.start(&id, "이제 정말 지워줘").await.unwrap();
+    f.decide(&id, "allow_once").await;
+    f.completed(&id).await;
+    assert!(f.store.read(|s| s.disk().routines.is_empty()), "approved deletion removes the routine");
+}
+
+async fn rules_survive_session_reloads(f: &Fixture) {
+    f.configure("", false).await;
+    let bot = f.bot_id();
+    let patch = grok_bot_model::BotPatch { instructions: Some("RULES_CANARY_7Q".into()), ..grok_bot_model::BotPatch::default() };
+    let target = bot.clone();
+    f.store.mutate(move |s| s.update_bot(&target, patch)).await.unwrap();
+    let id = f.conversation(&bot).await;
+    for turn in 1..=5 {
+        f.provider.clear();
+        f.provider.plan(vec![text(&format!("answer {turn}"))]);
+        f.runtime.start(&id, &format!("turn {turn}")).await.unwrap();
+        f.completed(&id).await;
+        let requests = f.provider.inference();
+        let request = requests.last().expect("main inference request");
+        let system: String = messages(request).iter().filter(|m| m["role"] == "system").map(|m| content_text(&m["content"])).collect::<Vec<_>>().join("\n");
+        eprintln!("[runtime] turn {turn}: system prompt {} chars, canary {}", system.len(), system.contains("RULES_CANARY_7Q"));
+        assert!(system.contains("RULES_CANARY_7Q"), "turn {turn} lost the session rules");
+    }
+}
+
 async fn bot_messages(f: &Fixture) {
     f.configure("", true).await;
     let sender = f.bot_id();
@@ -1698,6 +1786,153 @@ async fn startup_errors(base: &Path, engine_root: &Path) {
     assert_eq!(error.status, 503);
 }
 
+/// Permission rules: an allow rule skips the card and labels the tool activity, ask rules and the
+/// default still ask, and the safety floor (hash checks, recipient and webhook conversations)
+/// holds even with allow rules for every category.
+async fn permission_rules(f: &Fixture) {
+    use grok_bot_model::{PermissionAction, PermissionCategory, PermissionRuleInput, PermissionRulePatch, ToolStatus};
+    f.configure("", true).await;
+    let bot = f.bot_id();
+    let saw_permission = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let (mut updates, seen) = (f.store.subscribe(), Arc::clone(&saw_permission));
+        tokio::spawn(async move {
+            while let Ok(state) = updates.recv().await {
+                for c in state.conversations.iter().filter(|c| c.run.permission.is_some()) {
+                    let mut seen = seen.lock().unwrap();
+                    if !seen.contains(&c.id) {
+                        seen.push(c.id.clone());
+                    }
+                }
+            }
+        });
+    }
+    let add = |category, action, bot_id: Option<String>| {
+        let input = PermissionRuleInput { category, action, bot_id };
+        async move { f.store.mutate(move |s| s.add_permission_rule(input, true)).await.unwrap() }
+    };
+    let allow_writes = add(PermissionCategory::FileWrite, PermissionAction::Allow, None).await;
+
+    // Auto-allow: no card, the write lands, and the activity names the rule.
+    let id = f.conversation(&bot).await;
+    f.provider.clear();
+    f.provider.plan(vec![
+        discover("workspace write_file"),
+        use_tool("write_file", json!({"path": "notes.txt", "content": "written by my rule\n"})),
+        text("Saved without asking."),
+    ]);
+    f.runtime.start(&id, "Write notes with my rule").await.unwrap();
+    let completed = f.completed(&id).await;
+    assert_eq!(f.notes(), "written by my rule\n");
+    assert_eq!(last_text(&completed), "Saved without asking.");
+    let tool = completed.messages[1].tools.iter().find(|t| t.title == "Write notes.txt").expect("write activity");
+    assert_eq!(tool.status, ToolStatus::Completed);
+    assert_eq!(tool.approved_by_rule.as_deref(), Some(allow_writes.id.as_str()));
+    assert_eq!(tool.input.as_deref(), Some("written by my rule\n"));
+    assert!(!saw_permission.lock().unwrap().contains(&id), "an allowed write never shows a card");
+    assert_eq!(f.public().conversations.iter().find(|c| c.id == id).unwrap().messages[1].tools.iter().filter(|t| t.approved_by_rule.is_some()).count(), 1);
+
+    // The hash conflict check still applies to auto-allowed writes.
+    f.provider.plan(vec![
+        use_tool("write_file", json!({"path": "notes.txt", "content": "stale overwrite\n", "hash": "0".repeat(64)})),
+        text("Conflict reported."),
+    ]);
+    f.runtime.start(&id, "Stale write").await.unwrap();
+    f.completed(&id).await;
+    assert_eq!(f.notes(), "written by my rule\n");
+    assert!(tool_outcomes(&f.provider.inference()).iter().any(|t| t.contains("File changed on disk")));
+
+    // A bot-specific ask rule beats the all-bots allow rule: the card asks again.
+    let ask_here = add(PermissionCategory::FileWrite, PermissionAction::Ask, Some(bot.clone())).await;
+    f.provider.plan(vec![
+        use_tool("write_file", json!({"path": "notes.txt", "content": "needs a card\n"})),
+        text("Asked."),
+    ]);
+    f.runtime.start(&id, "Write again").await.unwrap();
+    let permission = f.decide(&id, "reject_once").await;
+    assert!(permission.description.contains("needs a card"));
+    let denied = f.completed(&id).await;
+    assert_eq!(f.notes(), "written by my rule\n");
+    let tool = denied.messages.last().unwrap().tools.iter().find(|t| t.title == "Write notes.txt").unwrap();
+    assert_eq!((tool.status, tool.approved_by_rule.as_deref()), (ToolStatus::Failed, None));
+    f.store.mutate(|s| s.update_permission_rule(&ask_here.id, PermissionRulePatch { action: PermissionAction::Allow }, true)).await.unwrap();
+
+    // Other categories: bot creation allowed by rule, bot messages still ask by default.
+    let allow_bots = add(PermissionCategory::BotCreate, PermissionAction::Allow, None).await;
+    f.provider.plan(vec![
+        use_tool("create_bot", json!({"name": "Rule bot", "instructions": "Created by rule."})),
+        text("Created."),
+    ]);
+    f.runtime.start(&id, "Create a bot").await.unwrap();
+    let created = f.completed(&id).await;
+    let rule_bot = f.store.read(|s| s.disk().bots.iter().find(|b| b.name == "Rule bot").cloned()).expect("bot created by rule");
+    let tool = created.messages.last().unwrap().tools.iter().find(|t| t.title == "Create bot: Rule bot").unwrap();
+    assert_eq!(tool.approved_by_rule.as_deref(), Some(allow_bots.id.as_str()));
+    let source = f.conversation(&bot).await;
+    f.provider.plan(vec![
+        use_tool("send_message", json!({"toBotId": rule_bot.id, "text": "Asked by default."})),
+        text("Queued after approval."),
+    ]);
+    f.runtime.start(&source, "Message the rule bot").await.unwrap();
+    f.decide(&source, "allow_once").await;
+    f.completed(&source).await;
+    let delivery = f.store.read(|s| s.disk().bot_deliveries.last().cloned()).expect("delivery");
+    assert!(saw_permission.lock().unwrap().contains(&source));
+
+    // Safety floor: a recipient conversation always asks, even with allow rules for messages.
+    add(PermissionCategory::BotMessage, PermissionAction::Allow, None).await;
+    f.provider.plan(vec![
+        use_tool("send_message", json!({"toBotId": bot, "text": "Recipient reply must ask."})),
+        text("Recipient done."),
+    ]);
+    f.runtime.start(&delivery.recipient_conversation_id, &delivery.text).await.unwrap();
+    let card = f.decide(&delivery.recipient_conversation_id, "reject_once").await;
+    assert!(card.description.contains("Recipient reply must ask."));
+    let answered = f.completed(&delivery.recipient_conversation_id).await;
+    assert!(answered.messages.iter().flat_map(|m| &m.tools).all(|t| t.approved_by_rule.is_none()));
+
+    // Safety floor: a webhook-triggered routine run always asks, even with an allow rule.
+    let routine = f
+        .store
+        .mutate(|s| {
+            s.add_routine(grok_bot_model::RoutineInput {
+                bot_id: bot.clone(),
+                name: "Hook".into(),
+                prompt: "Write notes.txt".into(),
+                schedule: grok_bot_model::RoutineSchedule::Interval { minutes: 60 },
+                enabled: false,
+            })
+        })
+        .await
+        .unwrap();
+    let key = "gbw_runtime-scenario-key";
+    let hash = grok_bot_store::webhooks::webhook_key_hash(key);
+    f.store.mutate(|s| s.set_routine_webhook(&routine.id, hash, "-key".into())).await.unwrap();
+    let now = f.store.now();
+    let claimed = f.store.mutate(|s| s.claim_webhook_routine(&routine.id, key, Some("please write AUTO"), now)).await.unwrap();
+    f.provider.plan(vec![
+        use_tool("write_file", json!({"path": "notes.txt", "content": "webhook write\n"})),
+        text("Webhook asked."),
+    ]);
+    f.runtime.start(&claimed.conversation_id, &claimed.prompt).await.unwrap();
+    f.decide(&claimed.conversation_id, "reject_once").await;
+    f.completed(&claimed.conversation_id).await;
+    assert_eq!(f.notes(), "written by my rule\n");
+
+    // Removing the rules restores the default: ask.
+    for rule in f.store.read(|s| s.permission_rules().to_vec()) {
+        f.store.mutate(|s| s.delete_permission_rule(&rule.id, true)).await.unwrap();
+    }
+    f.provider.plan(vec![
+        use_tool("write_file", json!({"path": "notes.txt", "content": "default asks\n"})),
+        text("Default."),
+    ]);
+    f.runtime.start(&id, "Write by default").await.unwrap();
+    f.decide(&id, "allow_once").await;
+    f.completed(&id).await;
+    assert_eq!(f.notes(), "default asks\n");
+}
+
 #[test]
 fn runtime_on_the_in_process_engine() {
     let base = std::env::temp_dir().join(format!("grok-bot-runtime-{}", std::process::id()));
@@ -1721,6 +1956,7 @@ fn runtime_on_the_in_process_engine() {
                 eprintln!("[runtime] {} ok in {:?}", $name, started.elapsed());
             }};
         }
+        scenario!("rules-reload", Options::default(), rules_survive_session_reloads);
         scenario!("files", Options::default(), file_approvals_and_sessions);
         scenario!("scripted", Options::default(), scripted_file_reply_flow);
         scenario!("fingerprint", Options::default(), fingerprint_migration);
@@ -1738,6 +1974,9 @@ fn runtime_on_the_in_process_engine() {
         scenario!("skills", Options::default(), skills);
         scenario!("bot-messages", Options::default(), bot_messages);
         scenario!("bot-creation", Options::default(), bot_creation);
+        scenario!("bot-data", Options::default(), bot_memory_and_knowledge);
+        scenario!("permission-rules", Options::default(), permission_rules);
+        scenario!("chat-routines", Options::default(), chat_routines);
         scenario!("restart", Options::default(), restart_continuation);
         startup_errors(&base, &engine_root).await;
     });

@@ -63,6 +63,11 @@ impl Redactor<'_> {
                 }
             }
             self.optional_id(&mut message.source_bot_id);
+            for attachment in message.attachments.iter_mut().flatten() {
+                self.id(&mut attachment.id);
+                self.text(&mut attachment.name);
+            }
+            self.optional_id(&mut message.speaker_bot_id);
         }
         self.optional_id(&mut conversation.session_id);
         self.optional_id(&mut conversation.session_fingerprint);
@@ -170,12 +175,29 @@ impl Redactor<'_> {
                 self.text(&mut skill.updated_at);
             }
             self.text(&mut bot.created_at);
+            for memory in bot.memories.iter_mut().flatten() {
+                self.id(&mut memory.id);
+                self.text(&mut memory.text);
+                self.text(&mut memory.created_at);
+            }
+            for file in bot.knowledge.iter_mut().flatten() {
+                self.id(&mut file.id);
+                self.text(&mut file.name);
+                self.text(&mut file.created_at);
+            }
         }
         state.conversations.iter_mut().for_each(|conversation| self.conversation(conversation));
         state.routines.iter_mut().for_each(|routine| self.routine(routine));
         state.routine_runs.iter_mut().for_each(|run| self.routine_run(run));
         state.bot_exchanges.iter_mut().for_each(|exchange| self.exchange(exchange));
         state.bot_deliveries.iter_mut().for_each(|delivery| self.delivery(delivery));
+        for group in &mut state.groups {
+            self.id(&mut group.id);
+            self.text(&mut group.name);
+            group.member_bot_ids.iter_mut().for_each(|id| self.id(id));
+            self.text(&mut group.created_at);
+            self.text(&mut group.updated_at);
+        }
         self.optional(&mut state.routine_scheduling_error);
         self.text(&mut state.settings.base_url);
         self.text(&mut state.settings.model);

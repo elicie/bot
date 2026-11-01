@@ -15,7 +15,9 @@ import {
 } from 'lucide-react';
 import type {
   AppState,
+  Bot,
   Conversation,
+  Group,
   Routine,
   RoutineInput,
   RoutineRunResult,
@@ -31,6 +33,8 @@ import { Computer } from './Computer';
 import { Routines, type RoutineDraftStatus } from './Routines';
 import { Settings } from './Settings';
 import { Skills, confirmSkillsNavigation } from './Skills';
+import { GroupDialog, GroupList, GroupView, shownGroupConversation } from './Groups';
+import { ThreadLinks, ThreadPanel } from './Threads';
 import {
   activeRun,
   conversationPreview,
@@ -51,6 +55,9 @@ import {
   type SettingsTab,
 } from './state';
 import { Avatar, ErrorNotice, IconButton, Spinner } from './ui';
+import { BotDeleteDialog, BotMenuExtras } from './BotMenu';
+import { notificationDeniedText, notificationUnavailableText, requestNotificationPermission, useBotActivity } from './activity';
+import { admitFiles, uploads, type PendingAttachment } from './Attachments';
 
 function historyPosition(): number {
   const position: unknown = window.history.state?.grokBotPosition;
@@ -60,6 +67,7 @@ function historyPosition(): number {
 export function App() {
   const [state, dispatch] = useReducer(reducer, undefined, initialState);
   const [detailsTab, setDetailsTab] = useState<DetailsTab>('computer');
+  const [groupDialog, setGroupDialog] = useState<{ group?: Group } | null>(null);
   const [connectionAttempt, reconnect] = useReducer((attempt: number) => attempt + 1, 0);
   const current = useRef(state);
   current.current = state;
@@ -92,6 +100,12 @@ export function App() {
   const queuedRun = queuedRoutineRun(data, conversation);
   const selectionKey = draftKey(state.selection);
   const draft = state.drafts[selectionKey] ?? '';
+  const [pendingFiles, setPendingFiles] = useState<Record<string, PendingAttachment[]>>({});
+  const [fileErrors, setFileErrors] = useState<Record<string, string[]>>({});
+  const pendingRef = useRef(pendingFiles);
+  pendingRef.current = pendingFiles;
+  const [deleting, setDeleting] = useState<Bot | null>(null);
+  const reading = useRef(new Set<string>());
 
   useEffect(() => {
     const controller = new AbortController();
@@ -296,6 +310,42 @@ export function App() {
       dispatch({ type: 'command', command: null });
     }
   };
+  /** Small bot-state updates that must not take the command lock (they run beside active runs). */
+  const botState = async (botId: string, route: 'unread' | 'notify', body: unknown) => {
+    try {
+      const snapshot = await request<AppState>(`/api/bots/${encodeURIComponent(botId)}/${route}`, { method: 'POST', body });
+      dispatch({ type: 'snapshot', data: snapshot });
+    } catch (error) {
+      dispatch({ type: 'error', error: errorText(error) });
+    }
+  };
+  const markRead = (botId: string) => {
+    if (reading.current.has(botId)) return;
+    reading.current.add(botId);
+    void botState(botId, 'unread', { unread: false }).finally(() => reading.current.delete(botId));
+  };
+  const setNotify = async (bot: Bot, enabled: boolean) => {
+    // Ask inside the click so the browser can show its permission prompt.
+    const permission = enabled ? requestNotificationPermission() : null;
+    await botState(bot.id, 'notify', { enabled });
+    if (!permission) return;
+    const support = await permission;
+    if (support === 'unavailable') dispatch({ type: 'error', error: notificationUnavailableText });
+    else if (support === 'denied') dispatch({ type: 'error', error: notificationDeniedText });
+  };
+  const addFiles = async (key: string, files: File[]) => {
+    const { added, errors } = await admitFiles(pendingRef.current[key] ?? [], files);
+    setPendingFiles((all) => ({ ...all, [key]: [...(all[key] ?? []), ...added] }));
+    setFileErrors((all) => ({ ...all, [key]: errors }));
+  };
+  const deleteBot = async (bot: Bot) => {
+    const deleted = await command('bot-delete', async () => {
+      const snapshot = await request<AppState>(`/api/bots/${encodeURIComponent(bot.id)}`, { method: 'DELETE', body: {} });
+      dispatch({ type: 'snapshot', data: snapshot });
+      return true;
+    });
+    if (deleted) setDeleting(null);
+  };
   const openOverlay = (overlay: Overlay) => {
     if (!confirmSkillsNavigation()) return;
     dispatch({ type: 'sidebar', open: false });
@@ -346,9 +396,10 @@ export function App() {
     const before = current.current;
     const selected = selectedBot(before);
     const text = (before.drafts[draftKey(before.selection)] ?? '').trim();
+    const files = pendingRef.current[draftKey(before.selection)] ?? [];
     if (
       !selected ||
-      !text ||
+      (!text && !files.length) ||
       runningConversation(before.data) ||
       queuedRoutineRun(before.data, selectedConversation(before)) ||
       commandLock.current
@@ -388,12 +439,23 @@ export function App() {
         dispatch({ type: 'snapshot', data: created.state });
         selectCreated({ botId: selected.id, conversationId }, version);
       }
-      const snapshot = await request<AppState>(
-        `/api/conversations/${encodeURIComponent(conversationId)}/messages`,
-        { method: 'POST', body: { text } },
-      );
+      const snapshot = files.length
+        ? await request<AppState>(
+            `/api/conversations/${encodeURIComponent(conversationId)}/attachment-messages`,
+            { method: 'POST', body: { text, attachments: await uploads(files) } },
+          )
+        : await request<AppState>(
+            `/api/conversations/${encodeURIComponent(conversationId)}/messages`,
+            { method: 'POST', body: { text } },
+          );
       dispatch({ type: 'snapshot', data: snapshot });
       dispatch({ type: 'draft-sent', key: sentDraftKey, text: originalDraft });
+      if (files.length) {
+        const sent = new Set(files.map((file) => file.key));
+        const originKey = draftKey(origin);
+        setPendingFiles((all) => ({ ...all, [originKey]: (all[originKey] ?? []).filter((file) => !sent.has(file.key)) }));
+        setFileErrors((all) => ({ ...all, [originKey]: [] }));
+      }
     });
   };
   const cancel = async () => {
@@ -496,10 +558,28 @@ export function App() {
     requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus());
   };
   const botConversations = conversationsFor(data, bot?.id ?? null);
+  useBotActivity({ data, selection: state.selection, chat: state.surface.kind === 'chat', onRead: markRead, onOpen: select });
+  // Group chats and threads (Groups.tsx, Threads.tsx).
+  const snapshot = (next: AppState) => dispatch({ type: 'snapshot', data: next });
+  const surface = state.surface;
+  const threadId = surface.kind === 'chat' || surface.kind === 'group' ? surface.thread : undefined;
+  const openThread = (thread?: string) => {
+    const now = current.current.surface;
+    if (now.kind === 'chat') navigate({ selection: current.current.selection, surface: thread ? { kind: 'chat', thread } : { kind: 'chat' } });
+    else if (now.kind === 'group') navigate({ selection: current.current.selection, surface: { kind: 'group', groupId: now.groupId, conversationId: now.conversationId, ...(thread ? { thread } : {}) } });
+  };
+  const openConversation = (item: Conversation) => {
+    const parent = item.thread ? data?.conversations.find(entry => entry.id === item.thread!.parentConversationId) ?? item : item;
+    const thread = item.thread ? { thread: item.id } : {};
+    if (parent.groupId) navigate({ selection: current.current.selection, surface: { kind: 'group', groupId: parent.groupId, conversationId: parent.id, ...thread } });
+    else navigate({ selection: { botId: parent.botId, conversationId: parent.id }, surface: { kind: 'chat', ...thread } });
+  };
+  const shownIds = [surface.kind === 'chat' ? conversation?.id : surface.kind === 'group' ? shownGroupConversation(data, surface)?.id : undefined, threadId];
+  const openGroupDialog = (group?: Group) => { dispatch({ type: 'error', error: null }); dispatch({ type: 'sidebar', open: false }); setGroupDialog({ group }); };
 
 
   return (
-    <div className={`app-shell ${state.computerOpen && state.surface.kind !== 'bot-chat' ? 'computer-is-open' : ''}`}>
+    <div className={`app-shell ${state.computerOpen && state.surface.kind !== 'bot-chat' && state.surface.kind !== 'group' ? 'computer-is-open' : ''} ${threadId ? 'thread-is-open' : ''}`}>
       {state.sidebarOpen && (
         <button
           type="button"
@@ -515,13 +595,20 @@ export function App() {
         onSettings={() => settings()} onCapabilities={() => openOverlay({ kind: 'capabilities' })}
         onRoutines={() => { if (state.surface.kind === 'routines') dispatch({ type: 'sidebar', open: false }); else navigate({ selection: current.current.selection, surface: { kind: 'routines' } }); }}
         onPatch={(id, patch) => { void command('bot-layout', async () => { const snapshot = await request<AppState>(`/api/bots/${encodeURIComponent(id)}`, { method: 'PATCH', body: patch }); dispatch({ type: 'snapshot', data: snapshot }); }); }}
+        menuExtras={(item, close) => <BotMenuExtras bot={item} busy={busy || !!globalRun} close={close}
+          onUnread={(target, unread) => void botState(target.id, 'unread', { unread })}
+          onNotify={(target, enabled) => void setNotify(target, enabled)}
+          onDelete={(target) => { dispatch({ type: 'error', error: null }); setDeleting(target); }} />}
+        extra={<GroupList data={data} search={state.search} selectedId={surface.kind === 'group' ? surface.groupId : null} busy={busy}
+          onOpen={group => navigate({ selection: current.current.selection, surface: { kind: 'group', groupId: group.id, conversationId: surface.kind === 'group' && surface.groupId === group.id ? surface.conversationId : null } })}
+          onCreate={() => openGroupDialog()} onEdit={group => openGroupDialog(group)} />}
       />
       <main
         className="chat-stage reference-chat"
         aria-label={state.surface.kind === 'routines' ? '루틴' : '대화'}
         inert={state.viewport === 'mobile' && state.sidebarOpen}
       >
-        <header className="chat-header" hidden={state.surface.kind === 'bot-chat'}>
+        <header className="chat-header" hidden={state.surface.kind === 'bot-chat' || state.surface.kind === 'group'}>
           <div className="chat-identity-wrap">
             <IconButton
               label="봇 목록 열기"
@@ -602,12 +689,12 @@ export function App() {
             </ErrorNotice>
           </div>
         )}
-        {globalRun && (state.surface.kind === 'routines' || globalRun.id !== conversation?.id) && (
+        {globalRun && !shownIds.includes(globalRun.id) && (
           <div className="other-run">
             <span>다른 대화에서 작업이 실행 중입니다.</span>
             <button
               type="button"
-              onClick={() => select({ botId: globalRun.botId, conversationId: globalRun.id })}
+              onClick={() => openConversation(globalRun)}
             >
               실행 중인 대화 보기
             </button>
@@ -632,13 +719,20 @@ export function App() {
           />
         ) : data && state.surface.kind === 'bot-chat' ? (
           <BotChat data={data} exchangeId={state.surface.exchangeId} onClose={() => navigate({ selection: current.current.selection, surface: { kind: 'chat' } })} onExecution={(botId, conversationId) => select({ botId, conversationId })} />
+        ) : data && state.surface.kind === 'group' ? (
+          <GroupView data={data} surface={state.surface} busy={busy} online={state.connection === 'online'} run={command} onSnapshot={snapshot}
+            onRoute={next => navigate({ selection: current.current.selection, surface: next })} onSidebar={() => dispatch({ type: 'sidebar', open: true })}
+            onEdit={group => openGroupDialog(group)} onThread={(parent, thread) => navigate({ selection: current.current.selection, surface: { kind: 'group', groupId: parent.groupId ?? parent.botId, conversationId: parent.id, thread } })}
+            draft={key => state.drafts[key] ?? ''} onDraft={(key, text) => dispatch({ type: 'draft', key, text })} onSettings={() => settings('models')} />
         ) : data && bot ? (
           <>
             <Transcript
               bot={bot}
               conversation={conversation}
               data={data}
+              messageExtras={message => conversation && <ThreadLinks data={data} conversation={conversation} message={message} busy={busy} run={command} onSnapshot={snapshot} onOpen={thread => openThread(thread)} />}
               onBotChat={exchangeId => navigate({ selection: current.current.selection, surface: { kind: 'bot-chat', exchangeId } })}
+              onRoutines={() => navigate({ selection: current.current.selection, surface: { kind: 'routines' } })}
               queuedRoutine={queuedRun}
               modelConfigured={!!data.settings.baseUrl && !!data.settings.model}
               runtimeAvailable={data.runtime.available}
@@ -659,6 +753,13 @@ export function App() {
               disabled={state.connection !== 'online' || !!globalRun || !!queuedRun}
               busy={busy}
               model={data.settings.model}
+              attachments={{
+                items: pendingFiles[selectionKey] ?? [],
+                errors: fileErrors[selectionKey] ?? [],
+                add: (files) => void addFiles(selectionKey, files),
+                remove: (key) => setPendingFiles((all) => ({ ...all, [selectionKey]: (all[selectionKey] ?? []).filter((file) => file.key !== key) })),
+                dismiss: () => setFileErrors((all) => ({ ...all, [selectionKey]: [] })),
+              }}
             />
           </>
         ) : (
@@ -693,11 +794,16 @@ export function App() {
           </div>
         )}
       </main>
-      {state.computerOpen && data && bot && state.surface.kind !== 'bot-chat' && (
+      {data && threadId && (
+        <ThreadPanel key={threadId} data={data} threadId={threadId} busy={busy} online={state.connection === 'online'} run={command} onSnapshot={snapshot}
+          onClose={() => openThread()} onSettings={() => settings('models')} />
+      )}
+      {state.computerOpen && data && bot && state.surface.kind !== 'bot-chat' && state.surface.kind !== 'group' && (
         <Details bot={bot} conversation={conversation} data={data} files={state.files} dispatch={dispatch}
           tab={detailsTab} onTab={setDetailsTab} onClose={() => toggleComputer(false)}
           computer={<Computer ownerId={bot.id} canControl={!globalRun} />}
           onEdit={() => openOverlay({ kind: 'bot', bot })} onSettings={() => settings('files')}
+          onBotCreated={(botId) => { select({ botId, conversationId: null }); }}
           onRoutines={() => { toggleComputer(false); navigate({ selection: current.current.selection, surface: { kind: 'routines' } }); }} />
       )}
       {state.overlay?.kind === 'settings' && data && (
@@ -740,6 +846,12 @@ export function App() {
           }}
         />
       )}
+      {deleting && data && (
+        <BotDeleteDialog bot={data.bots.find((item) => item.id === deleting.id) ?? deleting} data={data}
+          busy={state.command === 'bot-delete'} error={state.error}
+          onCancel={() => { setDeleting(null); dispatch({ type: 'error', error: null }); }}
+          onConfirm={() => void deleteBot(deleting)} />
+      )}
       {state.overlay?.kind === 'history' && bot && (
         <History
           bot={bot}
@@ -752,6 +864,11 @@ export function App() {
             select({ botId: bot.id, conversationId: id });
           }}
         />
+      )}
+      {groupDialog && data && (
+        <GroupDialog data={data} group={groupDialog.group} busy={busy} error={state.error} run={command} onSnapshot={snapshot} onClose={() => setGroupDialog(null)}
+          onCreated={group => navigate({ selection: current.current.selection, surface: { kind: 'group', groupId: group.id, conversationId: null } })}
+          onDeleted={group => { const now = current.current.surface; if (now.kind === 'group' && now.groupId === group.id) navigate({ selection: current.current.selection, surface: { kind: 'chat' } }); }} />
       )}
       {state.overlay?.kind === 'capabilities' && bot && (
         <Skills key={bot.id} bot={bot} busy={busy || !!globalRun} onClose={closeOverlay}

@@ -45,7 +45,7 @@ pub struct HttpContext {
     pub stopping: tokio::sync::watch::Sender<bool>,
 }
 
-type Ctx = Arc<HttpContext>;
+pub(crate) type Ctx = Arc<HttpContext>;
 
 pub fn normalize_host(value: &str) -> String {
     value.to_ascii_lowercase().trim_end_matches('.').to_owned()
@@ -71,9 +71,9 @@ impl IntoResponse for ApiError {
     }
 }
 
-type ApiResult<T = Response> = Result<T, ApiError>;
+pub(crate) type ApiResult<T = Response> = Result<T, ApiError>;
 
-fn bad_request(message: impl Into<String>) -> ApiError {
+pub(crate) fn bad_request(message: impl Into<String>) -> ApiError {
     ApiError(HttpError::bad_request(message))
 }
 
@@ -163,7 +163,7 @@ fn origin_authority(name: &str, port: Option<u16>) -> String {
     }
 }
 
-fn is_local(remote: &SocketAddr) -> bool {
+pub(crate) fn is_local(remote: &SocketAddr) -> bool {
     match remote.ip() {
         std::net::IpAddr::V4(ip) => ip.is_loopback() && ip == std::net::Ipv4Addr::LOCALHOST,
         std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.to_ipv4_mapped() == Some(std::net::Ipv4Addr::LOCALHOST),
@@ -205,21 +205,22 @@ fn secure(mut response: Response, api: bool) -> Response {
 }
 
 /// JSON response projected for non-local clients (computer approvals hidden).
-fn reply(status: StatusCode, body: Value, remote: &SocketAddr) -> Response {
+pub(crate) fn reply(status: StatusCode, body: Value, remote: &SocketAddr) -> Response {
     (status, Json(project_response(body, is_local(remote)))).into_response()
 }
 
-fn state_reply(ctx: &HttpContext, status: StatusCode, remote: &SocketAddr) -> Response {
+pub(crate) fn state_reply(ctx: &HttpContext, status: StatusCode, remote: &SocketAddr) -> Response {
     reply(status, serde_json::to_value(ctx.store.snapshot()).unwrap_or(Value::Null), remote)
 }
 
-fn to_value<T: serde::Serialize>(value: &T) -> Value {
+pub(crate) fn to_value<T: serde::Serialize>(value: &T) -> Value {
     serde_json::to_value(value).unwrap_or(Value::Null)
 }
 
-type Remote = ConnectInfo<SocketAddr>;
+pub(crate) type Remote = ConnectInfo<SocketAddr>;
 
 pub fn router(ctx: Ctx) -> Router {
+    // Feature modules add their `/api` routes here, one `.merge(...)` line each.
     let api = Router::new()
         .route("/state", get(get_state))
         .route("/events", get(events))
@@ -242,10 +243,16 @@ pub fn router(ctx: Ctx) -> Router {
         .route("/computer", get(computer_status).post(computer_disabled).delete(computer_status))
         .route("/computer/preview", get(computer_disabled))
         .route("/computer/actions", post(computer_disabled))
+        .merge(crate::http_bots::router())
+        .merge(crate::permission_rules::routes())
+        .merge(crate::webhooks::api_routes())
+        .merge(crate::chat_features::routes())
+        .merge(crate::groups_http::routes())
         .fallback(|| async { (StatusCode::NOT_FOUND, Json(json!({ "error": "API endpoint does not exist." }))) });
     let mut app = Router::new()
         .nest("/api", api)
-        .route("/internal/mcp/{run_id}", post(mcp).get(|| async { StatusCode::METHOD_NOT_ALLOWED }));
+        .route("/internal/mcp/{run_id}", post(mcp).get(|| async { StatusCode::METHOD_NOT_ALLOWED }))
+        .merge(crate::webhooks::hook_routes());
     app = match ctx.web_root.clone() {
         Some(root) => {
             let index = root.join("index.html");

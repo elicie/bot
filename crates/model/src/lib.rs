@@ -7,6 +7,9 @@ use std::sync::Arc;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
+mod bot_data;
+pub use bot_data::*;
+
 pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
 pub fn system_clock() -> Clock {
@@ -110,6 +113,10 @@ pub struct ToolActivity {
     pub paths: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_only: Option<bool>,
+    /// ID of the user's permission rule that approved this action without a card
+    /// ("내 규칙으로 자동 승인됨").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_by_rule: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +138,40 @@ pub struct Message {
     pub bot_exchange_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_bot_id: Option<String>,
+    /// Group conversations: the member bot that wrote this assistant message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_bot_id: Option<String>,
+    /// Files the user attached to this message (metadata; contents live in private blobs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<Attachment>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AttachmentKind {
+    Text,
+    Image,
+}
+
+/// A user attachment stored with its message. The bytes are in
+/// `<data dir>/attachments/<conversation id>/<attachment id>`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Attachment {
+    pub id: String,
+    pub name: String,
+    pub mime_type: String,
+    pub kind: AttachmentKind,
+    pub size: u64,
+}
+
+/// One file in a message request: `data` is standard base64.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttachmentUpload {
+    pub name: String,
+    pub mime_type: String,
+    pub data: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -247,6 +288,89 @@ pub struct Conversation {
     pub session_fingerprint: Option<String>,
     pub run: RunState,
     pub updated_at: String,
+    /// Group conversations: the group ID (`bot_id` holds the same ID).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    /// Thread conversations: the message the thread replies to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<ThreadLink>,
+    /// Group conversations: members still to answer the latest user message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_round: Option<GroupRound>,
+    /// Group conversations: one engine session per member bot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_sessions: Option<Vec<MemberSession>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadLink {
+    pub parent_conversation_id: String,
+    pub parent_message_id: String,
+}
+
+/// The ordered member turns that answer one user message in a group conversation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GroupRound {
+    pub id: String,
+    pub user_message_id: String,
+    /// Members that have not started yet, in speaking order.
+    pub pending_bot_ids: Vec<String>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MemberSession {
+    pub bot_id: String,
+    pub session_id: String,
+    pub session_fingerprint: String,
+}
+
+/// A group chat: several bots answering in one conversation. Listed in the sidebar like a bot.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Group {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<AvatarShape>,
+    /// Speaking order.
+    pub member_bot_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// `POST /api/groups` body.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GroupInput {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<AvatarShape>,
+    pub member_bot_ids: Vec<String>,
+}
+
+/// `PATCH /api/groups/:id` body.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GroupPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<AvatarShape>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_bot_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,7 +420,17 @@ pub struct Bot {
     pub pinned: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden: Option<bool>,
+    /// An assistant answer finished in one of this bot's conversations and nobody opened it yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread: Option<bool>,
+    /// Show a browser notification when this bot's runs finish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_on_updates: Option<bool>,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memories: Option<Vec<Memory>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge: Option<Vec<KnowledgeFile>>,
 }
 
 /// Persisted provider settings, including the secret API key. Never sent to browsers.
@@ -361,6 +495,20 @@ pub struct Routine {
     pub next_run_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Webhook trigger. Only a SHA-256 hash of the key is stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook: Option<RoutineWebhook>,
+}
+
+/// Webhook trigger of a routine. `key_hash` (hex SHA-256 of the key) is persisted but removed from
+/// the public snapshot; `key_hint` is the last characters of the key for recognition.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutineWebhook {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key_hash: String,
+    pub key_hint: String,
+    pub created_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -398,6 +546,7 @@ pub struct RoutineResult {
 pub enum RoutineTrigger {
     Manual,
     Scheduled,
+    Webhook,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -437,6 +586,10 @@ pub struct DiskState {
     pub bot_exchanges: Vec<BotExchange>,
     #[serde(default)]
     pub bot_deliveries: Vec<BotDelivery>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permission_rules: Vec<PermissionRule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<Group>,
 }
 
 /// Public snapshot sent to browsers over HTTP and SSE.
@@ -450,6 +603,11 @@ pub struct AppState {
     pub routine_runs: Vec<RoutineRun>,
     pub bot_exchanges: Vec<BotExchange>,
     pub bot_deliveries: Vec<BotDelivery>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permission_rules: Vec<PermissionRule>,
+    /// Omitted when empty, like `state.json`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<Group>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routine_scheduling_error: Option<String>,
     pub settings: PublicSettings,
@@ -560,6 +718,64 @@ pub struct BotMessageInput {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+}
+
+/// Kind of model-initiated action a permission rule governs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionCategory {
+    /// `workspace__write_file`
+    FileWrite,
+    /// `workspace__send_message`
+    BotMessage,
+    /// `workspace__create_bot`
+    BotCreate,
+    /// `workspace__create_skill`
+    SkillSave,
+    /// Bot memory saves.
+    MemorySave,
+}
+
+impl PermissionCategory {
+    pub const ALL: [Self; 5] = [Self::FileWrite, Self::BotMessage, Self::BotCreate, Self::SkillSave, Self::MemorySave];
+}
+
+/// "항상 묻기" (`ask`, the default without rules) or "묻지 않고 허용" (`allow`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionAction {
+    Ask,
+    Allow,
+}
+
+/// A user rule: when a bot (all bots when `bot_id` is absent) attempts `category`, do `action`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PermissionRule {
+    pub id: String,
+    pub category: PermissionCategory,
+    pub action: PermissionAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// `POST /api/permission-rules` body.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PermissionRuleInput {
+    pub category: PermissionCategory,
+    pub action: PermissionAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_id: Option<String>,
+}
+
+/// `PATCH /api/permission-rules/:id` body ("규칙의 동작 편집").
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PermissionRulePatch {
+    pub action: PermissionAction,
 }
 
 #[cfg(test)]

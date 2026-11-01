@@ -1,0 +1,31 @@
+/* Permission rules editor (Settings > 권한) and the auto-approval badge in tool activity. */
+.permission-rules .permission-count { margin-left: 4px; color: var(--muted, #929292); }
+.permission-rules .permission-rule .settings-copy { gap: 2px; }
+.permission-rules .permission-rule .settings-copy > span:first-child { font-size: 11px; color: var(--muted, #929292); }
+.permission-rule-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.permission-rule-actions .icon-button { width: 28px; height: 28px; border-radius: 50%; color: var(--muted, #929292); }
+.permission-rule-actions .icon-button:hover:not(:disabled) { color: var(--danger, #ff7b86); }
+.permission-rules .permission-add { margin-top: 9px; }
+.permission-editor { display: grid; gap: 16px; }
+.permission-editor .settings-field + .settings-field { margin-top: 0; }
+.settings-modal .permission-editor select { max-width: 100%; justify-self: start; }
+.permission-action-field { border: 0; padding: 0; margin: 0; min-width: 0; }
+.permission-action-field legend { padding: 0; margin-bottom: 8px; font-size: 12px; }
+.permission-action-option { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; border: 1px solid var(--line, #ffffff1a); border-radius: 10px; cursor: pointer; }
+.permission-action-option + .permission-action-option { margin-top: 6px; }
+.permission-action-option:has(input:checked) { border-color: #2883e6; }
+.permission-action-option:has(input:disabled) { opacity: 0.55; cursor: not-allowed; }
+.permission-action-option input { margin-top: 3px; accent-color: #1084fe; }
+.permission-action-option > span { display: grid; gap: 2px; min-width: 0; }
+.permission-action-option strong { font-weight: 400; font-size: 12px; }
+.permission-action-option small { font-size: 11px; color: var(--secondary, #b7b7b7); line-height: 17px; }
+.permission-editor-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.settings-modal .permission-lan-note { display: flex; gap: 6px; align-items: flex-start; color: var(--settings-success, #95c7ad); }
+.settings-modal .permission-lan-note svg { flex-shrink: 0; margin-top: 3px; }
+@media (max-width: 540px) {
+  .permission-rules .permission-rule { flex-wrap: wrap; }
+  .permission-rule-actions { width: 100%; justify-content: space-between; }
+}
+
+.tool-card summary .tool-rule-badge { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; padding: 1px 6px; border-radius: 5px; background: #1475db26; color: #87bdfc; font-size: 10px; white-space: nowrap; }
+:root:is([data-theme='light'], [data-theme='system']) .tool-card summary .tool-rule-badge { color: light-dark(#0b5cad, #87bdfc); }

@@ -42,6 +42,8 @@ pub struct RoutineScheduler {
 enum Work {
     Routine { run_id: String, conversation_id: String, prompt: String },
     Delivery { delivery_id: String, conversation_id: String, prompt: String },
+    /// The next member turn of a group round.
+    Group { conversation_id: String },
 }
 
 impl RoutineScheduler {
@@ -75,7 +77,11 @@ impl RoutineScheduler {
             let mut interval = tokio::time::interval(this.options.poll_interval);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                interval.tick().await;
+                // A settled run may leave queued work (the next group member) ready at once.
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = this.runtime.settled() => {}
+                }
                 if this.tick().await.is_err() {
                     eprintln!("Routine scheduler stopped. Check application state before restarting.");
                     break;
@@ -112,6 +118,17 @@ impl RoutineScheduler {
 
     /// Manual run (`POST /api/routines/:id/run`).
     pub async fn run(&self, id: &str) -> HttpResult<RoutineRun> {
+        self.claim_now(id, |s, now| s.run_routine(id, now)).await
+    }
+
+    /// Webhook run (`POST /hooks/routines/:id`): authenticates `key` and claims the run in one store
+    /// mutation (so a concurrent rotation or revocation cannot race it), then dispatches FIFO.
+    pub async fn run_webhook(&self, id: &str, key: &str, payload: Option<&str>) -> HttpResult<RoutineRun> {
+        self.claim_now(id, |s, now| s.claim_webhook_routine(id, key, payload, now)).await
+    }
+
+    /// Claim an immediate run through `claim`, rejecting a concurrent claim of the same routine.
+    async fn claim_now(&self, id: &str, claim: impl FnOnce(&mut grok_bot_store::State, DateTime<Utc>) -> HttpResult<RoutineRun>) -> HttpResult<RoutineRun> {
         let latest = |store: &Store| store.read(|s| s.disk().routine_runs.iter().rev().find(|r| r.routine_id == id).map(|r| r.id.clone()));
         let observed = latest(&self.store);
         self.queue
@@ -126,7 +143,7 @@ impl RoutineScheduler {
                     return Err(HttpError::conflict("This routine was just claimed by another command."));
                 }
                 let now = (self.options.now)();
-                let run = match self.store.mutate(|s| s.run_routine(id, now)).await {
+                let run = match self.store.mutate(|s| claim(s, now)).await {
                     Ok(run) => run,
                     Err(error) => {
                         if self.store.read(|s| s.assert_writable()).is_err() {
@@ -161,10 +178,11 @@ impl RoutineScheduler {
             return Ok(());
         }
         let Some(work) = self.next_work() else { return Ok(()) };
-        let (conversation_id, prompt) = match &work {
-            Work::Routine { conversation_id, prompt, .. } | Work::Delivery { conversation_id, prompt, .. } => (conversation_id.clone(), prompt.clone()),
+        let started = match &work {
+            Work::Routine { conversation_id, prompt, .. } | Work::Delivery { conversation_id, prompt, .. } => self.runtime.start(conversation_id, prompt).await,
+            Work::Group { conversation_id } => self.runtime.start_group_turn(conversation_id).await,
         };
-        if let Err(error) = self.runtime.start(&conversation_id, &prompt).await {
+        if let Err(error) = started {
             self.store.read(|s| s.assert_writable())?;
             match work {
                 Work::Routine { run_id, .. } => {
@@ -174,6 +192,10 @@ impl RoutineScheduler {
                 Work::Delivery { delivery_id, .. } => {
                     let message = if error.status == 500 { "Bot delivery could not start. Check runtime and provider settings.".to_owned() } else { error.message };
                     self.store.mutate(|s| s.fail_bot_delivery(&delivery_id, &message, now)).await?;
+                }
+                Work::Group { conversation_id } => {
+                    let message = if error.status == 500 { "The next group member could not start. Check runtime and provider settings.".to_owned() } else { error.message };
+                    self.store.mutate(|s| s.fail_group_round(&conversation_id, &message)).await?;
                 }
             }
         }
@@ -195,6 +217,10 @@ impl RoutineScheduler {
             let mut work: Vec<(i64, usize, Work)> = routines
                 .map(|run| (parse(&run.created_at), position(&run.conversation_id), Work::Routine { run_id: run.id.clone(), conversation_id: run.conversation_id.clone(), prompt: run.prompt.clone() }))
                 .chain(deliveries.map(|d| (parse(&d.created_at), position(&d.recipient_conversation_id), Work::Delivery { delivery_id: d.id.clone(), conversation_id: d.recipient_conversation_id.clone(), prompt: d.text.clone() })))
+                .chain(disk.conversations.iter().filter(|c| !c.run.status.is_active()).filter_map(|c| {
+                    let round = c.group_round.as_ref().filter(|round| !round.pending_bot_ids.is_empty())?;
+                    Some((parse(&round.created_at), position(&c.id), Work::Group { conversation_id: c.id.clone() }))
+                }))
                 .collect();
             work.sort_by_key(|(created, position, _)| (*created, *position));
             work.into_iter().next().map(|(_, _, work)| work)
