@@ -1,0 +1,27 @@
+[package]
+name = "grok-bot-store"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+grok-bot-files.workspace = true
+grok-bot-model.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+chrono-tz = { version = "0.10", features = ["case-insensitive"] }
+libc = "0.2"
+regex = "1"
+url = "2"
+yaml-rust2 = { version = "0.13", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -13,7 +13,11 @@
     "build:engine": "node scripts/build-engine.mjs",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "build:server": "node scripts/cargo.mjs build --locked -p grok-bot-server",
+    "start:server": "node scripts/cargo.mjs run --locked -p grok-bot-server",
+    "test:rust": "node scripts/cargo.mjs test --locked --workspace",
+    "test:e2e:rust": "GROK_BOT_BACKEND=rust playwright test"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "2.2.0",

@@ -9,3 +9,5 @@ test-results/
 *.log
 engine/target/
 .engine/
+target/
+.claude/worktrees/
