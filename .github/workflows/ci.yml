@@ -12,6 +12,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   web:
     name: Web (typecheck, build)
@@ -26,22 +29,44 @@ jobs:
       - run: npm ci
       - run: npm run build
 
-  rust:
-    name: Rust (fmt, tests, clippy, Node tests, e2e)
+  # Lints run on their own runner: clippy's artifacts and the test build together do not fit the
+  # default runner disk next to the pinned Grok Build engine source build.
+  lint:
+    name: Rust lint (fmt, clippy)
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-    env:
-      CARGO_TERM_COLOR: always
-      # One target dir for cargo, scripts/build-engine.mjs (defaults to engine/target), and rust-cache.
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    timeout-minutes: 90
     steps:
-      # The pinned Grok Build engine is a large source build; the default runner disk is tight.
       - name: Free disk space
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost && df -h /
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - run: cargo fmt --all --check
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install ripgrep (bundled into the engine build)
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      # scripts/cargo.mjs stages a checksum-verified protoc and sets the ripgrep paths.
+      - run: node scripts/cargo.mjs clippy --locked --workspace --all-targets -- -D warnings
+      - name: Disk usage
+        if: always()
+        run: df -h / && du -sh target 2>/dev/null || true
+
+  test:
+    name: Tests (Rust, Node, e2e)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      # One target dir for cargo, scripts/build-engine.mjs (defaults to engine/target), and rust-cache.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost && df -h /
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
@@ -49,11 +74,10 @@ jobs:
           cache: npm
       - name: Install ripgrep (bundled into the engine build)
         run: sudo apt-get update && sudo apt-get install -y ripgrep
-      - run: cargo fmt --all --check
       - run: npm ci
-      # scripts/cargo.mjs stages a checksum-verified protoc and sets the ripgrep paths.
       - run: npm run test:rust
-      - run: node scripts/cargo.mjs clippy --locked --workspace --all-targets -- -D warnings
+      - name: Disk usage after Rust tests
+        run: df -h / && du -sh target
       # The Node backend tests drive the real engine binary; it reuses the workspace build above.
       - run: npm run build:engine
       # Per-test timeout so a hang names the test instead of stalling the job.
@@ -67,6 +91,9 @@ jobs:
         env:
           GROK_BOT_BACKEND: rust
           GROK_BOT_SERVER_BIN: ${{ github.workspace }}/target/debug/grok-bot
+      - name: Disk usage
+        if: always()
+        run: df -h / && du -sh target 2>/dev/null || true
       - name: Upload Playwright results
         if: failure()
         uses: actions/upload-artifact@v4
