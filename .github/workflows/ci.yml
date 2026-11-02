@@ -1,8 +1,9 @@
 name: CI
 
-# Keep crate and isolated-test checks targeted (scripts/ci-changes.mjs). App/build/fixture/CI
-# changes run the full Rust-backed browser suite; backend/build/frontend changes also verify
-# the standalone release binary outside the checkout, without Node on PATH.
+# Checks only what a change touches (scripts/ci-changes.mjs): the web build, rustfmt plus
+# clippy/tests of the changed crates, and only the unit tests and Playwright specs that changed.
+# Release-path changes also verify the standalone release binary outside the checkout, without
+# Node on PATH. There is no full-suite run on pull requests.
 # Build jobs run on the self-hosted ai-dev runner (label grok-bot) except for fork PRs.
 
 on:
