@@ -1,12 +1,32 @@
 import { test, expect } from '@playwright/test';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { Store } from '../server/store';
+import type { Bot, Conversation } from '../shared/types';
 import { startTestApp } from './app-fixture';
 
 test.use({ locale: 'ko-KR' });
+
+type SeedState = { bots: Bot[]; conversations: Conversation[] };
+const seedTime = '2026-11-02T00:00:00Z';
+
+async function seedState(dataDir: string, populate: (state: SeedState) => void) {
+  // Let the actual Rust backend create the current disk schema, then seed only disposable data
+  // after shutdown so the fixture never imports the removed Node store or races a state write.
+  const initial = await startTestApp({ env: { GROK_BOT_DATA_DIR: dataDir } });
+  await initial.stop();
+  const file = join(dataDir, 'state.json');
+  const state = JSON.parse(await readFile(file, 'utf8')) as SeedState;
+  populate(state);
+  await writeFile(file, JSON.stringify(state), { mode: 0o600 });
+}
+
+function addBot(state: SeedState, name: string) {
+  const bot: Bot = { ...state.bots[0], id: randomUUID(), name, color: '#75a9c0', instructions: '', shape: 'blob', pinned: false, createdAt: seedTime };
+  state.bots.push(bot);
+  return bot;
+}
 
 const image = '/api/generated-images/12345678-1234-1234-1234-123456789abc';
 const examples = [
@@ -26,16 +46,16 @@ test('sidebar previews show plain text and short media labels without changing s
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   try {
-    // Seed ordinary persisted conversations, shared by the Node and Rust backends; no model needed.
-    const store = await Store.open(dataDir, { now: () => new Date('2026-11-02T00:00:00Z') });
-    await store.updateBot(store.bots[0].id, { shape: 'blob' });
-    for (const example of examples) {
-      const bot = await store.addBot({ name: example.name, color: '#75a9c0', instructions: '', shape: 'blob', pinned: false });
-      const conversation = await store.addConversation(bot.id);
-      conversation.messages.push({ id: randomUUID(), role: 'assistant', text: example.text, tools: [], createdAt: conversation.updatedAt });
-      conversation.run.status = 'completed';
-    }
-    await store.changed();
+    await seedState(dataDir, state => {
+      state.bots[0].shape = 'blob';
+      for (const example of examples) {
+        const bot = addBot(state, example.name);
+        state.conversations.push({
+          id: randomUUID(), botId: bot.id, title: example.name, updatedAt: seedTime, run: { id: '', status: 'completed' },
+          messages: [{ id: randomUUID(), role: 'assistant', text: example.text, tools: [], createdAt: seedTime }],
+        });
+      }
+    });
     app = await startTestApp({ env: { GROK_BOT_DATA_DIR: dataDir } });
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.emulateMedia({ colorScheme: 'dark' });
@@ -76,19 +96,20 @@ test('large history stays usable across fresh SSE snapshots and composer input',
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   try {
-    const store = await Store.open(dataDir);
-    const bot = await store.addBot({ name: '긴 대화', color: '#75a9c0', instructions: '', shape: 'blob', pinned: false });
+    let bot!: Bot;
     const sources = Array.from({ length: 120 }, (_, index) => `**대화 ${index}** \\(23 = 20 + 3\\)\n\n${'내용과 [문서](https://example.com)입니다. '.repeat(100)}`);
     sources[117] += '긴 답변 '.repeat(50_000);
     sources[118] = '> '.repeat(4096) + '중첩된 인용문';
     sources[119] = '\\('.repeat(30_000);
-    for (const [index, text] of sources.entries()) {
-      store.conversations.push({
-        id: randomUUID(), botId: bot.id, title: `대화 ${index}`, updatedAt: '2026-11-02T00:00:00Z', run: { id: '', status: 'completed' },
-        messages: [{ id: randomUUID(), role: 'assistant', text, tools: [], createdAt: '2026-11-02T00:00:00Z' }],
-      });
-    }
-    await store.changed();
+    await seedState(dataDir, state => {
+      bot = addBot(state, '긴 대화');
+      for (const [index, text] of sources.entries()) {
+        state.conversations.push({
+          id: randomUUID(), botId: bot.id, title: `대화 ${index}`, updatedAt: seedTime, run: { id: '', status: 'completed' },
+          messages: [{ id: randomUUID(), role: 'assistant', text, tools: [], createdAt: seedTime }],
+        });
+      }
+    });
     app = await startTestApp({ env: { GROK_BOT_DATA_DIR: dataDir } });
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(`${app.url}?bot=${bot.id}`);

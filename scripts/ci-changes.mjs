@@ -3,7 +3,7 @@
 //   web=true|false      web UI typecheck and build
 //   rust=true|false     rustfmt check (and clippy/tests for `packages`)
 //   packages=...        `-p <crate>` flags of the changed crates, `--workspace` for Cargo.toml/Cargo.lock changes, or empty
-//   unit=...            frontend unit test files that changed (only those run), space-separated
+//   unit=...            unit test files that changed (only those run), space-separated
 //   specs=...           Playwright spec files that changed (only those run), space-separated
 //   release=true|false  standalone Rust release build and smoke check, only for release-path changes
 // Usage: git diff --name-only <base>...HEAD | node scripts/ci-changes.mjs
