@@ -16,6 +16,8 @@ mod groups_http;
 pub mod http;
 mod http_bots;
 mod main_bot;
+pub mod mcp_oauth;
+mod mcp_oauth_http;
 mod mcp_probe;
 pub mod permission_rules;
 pub mod provider;

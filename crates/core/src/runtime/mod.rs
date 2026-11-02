@@ -15,6 +15,7 @@ mod broker;
 mod custom_mcp;
 pub(crate) use custom_mcp::McpLaunchContext;
 mod engine;
+mod oauth;
 mod permissions;
 pub mod text;
 mod todos;
@@ -148,6 +149,8 @@ pub(crate) struct Run {
     keys: Vec<String>,
     /// The bot's enabled custom MCP servers, resolved for this run (none for recipients).
     mcp: custom_mcp::RunMcp,
+    /// Drop the per-turn frozen OAuth gateways with the run, including on cancellation.
+    _oauth_leases: Vec<crate::mcp_oauth::relay::Lease>,
     flags: Mutex<RunFlags>,
     /// Wakes the inactivity watcher after updates and approval changes.
     activity: tokio::sync::Notify,
@@ -223,6 +226,11 @@ pub struct Runtime {
     /// The provider relay the engine talks to (`crate::provider_relay`); absent in runtimes built
     /// without one, which then point the engine at the provider directly.
     relay: std::sync::OnceLock<crate::provider_relay::RelayEndpoint>,
+    /// Optional authenticated remote MCP lifecycle; old embedders retain their static transports.
+    oauth: std::sync::OnceLock<Arc<crate::mcp_oauth::service::OAuthService>>,
+    /// Per-runtime synthetic upstream; absent from production builds and other test runtimes.
+    #[cfg(test)]
+    oauth_test_upstream: std::sync::OnceLock<Arc<crate::mcp_oauth::relay::test_support::Upstream>>,
 }
 
 /// 409 when a turn is requested while another reply is running (one active run at a time).
@@ -346,6 +354,9 @@ impl Runtime {
             this: this.clone(),
             computer: std::sync::OnceLock::new(),
             relay: std::sync::OnceLock::new(),
+            oauth: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            oauth_test_upstream: std::sync::OnceLock::new(),
         })
     }
 
@@ -374,6 +385,14 @@ impl Runtime {
     /// Origin of this server for the per-run MCP broker URL, e.g. `http://127.0.0.1:3000`.
     pub fn set_relay(&self, relay: crate::provider_relay::RelayEndpoint) {
         let _ = self.relay.set(relay);
+    }
+
+    pub fn set_oauth(&self, service: Arc<crate::mcp_oauth::service::OAuthService>) {
+        let _ = self.oauth.set(service);
+    }
+
+    pub fn oauth(&self) -> Option<Arc<crate::mcp_oauth::service::OAuthService>> {
+        self.oauth.get().cloned()
     }
 
     pub fn set_origin(&self, origin: String) {
@@ -410,6 +429,9 @@ impl Runtime {
                 return Err(HttpError::unavailable("The server is shutting down."));
             }
             state.assert_idle()?;
+            if self.oauth().is_some_and(|oauth| oauth.is_busy()) {
+                return Err(HttpError::conflict("Complete or cancel the pending OAuth login before maintenance."));
+            }
             if !self.runs().is_empty() {
                 return Err(HttpError::conflict(RUN_BUSY));
             }
@@ -466,6 +488,8 @@ impl Runtime {
         let origin = self.origin.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
         let id = conversation_id.to_owned();
         let metas: Vec<grok_bot_model::Attachment> = attachments.iter().map(|a| a.meta.clone()).collect();
+        let mut prepared = self.prepare_oauth(conversation_id, &turn).await?;
+        let oauth_leases = prepared.as_mut().map(|prepared| std::mem::take(&mut prepared.leases)).unwrap_or_default();
         let (run_id, message_id, settings, plan, extras, prompt, report_deliveries) = self
             .store
             .mutate(move |state| {
@@ -516,6 +540,11 @@ impl Runtime {
                     Turn::Report => report.as_ref().map(|report| report.prompt.clone()),
                 };
                 let plan = turns::plan(state, &id, requested.as_deref())?;
+                if let Some(prepared) = &prepared
+                    && (prepared.bot_id != plan.bot.id || prepared.signature != oauth::signature(state, &plan.bot.id))
+                {
+                    return Err(HttpError::conflict("OAuth 준비 중 MCP 구성이 변경되었어요. 다시 시도해 주세요."));
+                }
                 let delivery = state
                     .disk()
                     .bot_deliveries
@@ -573,9 +602,19 @@ impl Runtime {
                 }
                 // Recipient (bot-message) conversations get no custom MCP servers.
                 let recipient = state.disk().bot_deliveries.iter().any(|d| d.recipient_conversation_id == id);
-                let (servers, failures) = if recipient { Default::default() } else { state.resolve_mcp_servers(&plan.bot.id) };
+                let (servers, failures, mut keys) = if recipient {
+                    (Vec::new(), Vec::new(), Vec::new())
+                } else if let Some(prepared) = prepared {
+                    (prepared.servers, prepared.failures, prepared.keys)
+                } else {
+                    let (servers, failures) = state.resolve_mcp_servers(&plan.bot.id);
+                    (servers, failures, Vec::new())
+                };
+                keys.extend(state.redaction_keys());
+                keys.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+                keys.dedup();
                 let mcp_fingerprint = if recipient { None } else { state.mcp_fingerprint(&plan.bot.id) };
-                let extras = (state.redaction_keys(), (servers, failures), mcp_fingerprint);
+                let extras = (keys, (servers, failures), mcp_fingerprint);
                 Ok((run_id, message_id, settings, plan, extras, requested.unwrap_or_default(), report_deliveries))
             })
             .await?;
@@ -606,6 +645,7 @@ impl Runtime {
             report_deliveries,
             keys,
             mcp,
+            _oauth_leases: oauth_leases,
             flags: Mutex::new(RunFlags { skills, ..RunFlags::default() }),
             activity: tokio::sync::Notify::new(),
             stop: watch::Sender::new(false),
@@ -1364,6 +1404,9 @@ impl Runtime {
 
     pub async fn shutdown(&self) {
         self.closing.store(true, Ordering::SeqCst);
+        if let Some(oauth) = self.oauth() {
+            oauth.shutdown().await;
+        }
         let runs: Vec<Arc<Run>> = self.runs().clone();
         for run in &runs {
             self.request_stop(run);

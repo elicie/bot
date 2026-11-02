@@ -1,9 +1,9 @@
 import { useEffect, useId, useRef, useState, type Dispatch, type FormEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { KeyRound, Plug, Plus, Search, ShieldAlert, Terminal, Trash2, X } from 'lucide-react';
+import { KeyRound, Plug, Plus, RefreshCw, Search, ShieldAlert, Terminal, Trash2, X } from 'lucide-react';
 import type { AppState, Bot } from '../shared/types';
 import type { McpConfigDocument, PublicMcpServer, PublicSecret, SecretInput, VaultAccess } from '../shared/vault';
-import { errorText, request } from './api';
+import { ApiError, errorText, request } from './api';
 import { type Action, runningConversation } from './state';
 import { ErrorNotice, IconButton, Modal } from './ui';
 import { McpServerForm } from './McpServerForm';
@@ -203,6 +203,255 @@ function McpEditor({ bot, onClose, onSaved }: { bot: Bot; onClose: () => void; o
   </Modal>;
 }
 
+type McpOAuthStatus = {
+  status: 'not_connected' | 'awaiting_login' | 'connected' | 'login_required' | 'error' | 'unavailable';
+  canLogin: boolean;
+};
+const OAUTH_LABELS: Record<McpOAuthStatus['status'], string> = {
+  not_connected: '로그인 안 됨', awaiting_login: '로그인 대기 중', connected: '연결됨',
+  login_required: '로그인 필요', error: '인증 오류', unavailable: '로그인 지원 안 됨',
+};
+const OAUTH_POLL_MS = 90_000;
+const OAUTH_TIMEOUT = '로그인 확인 시간이 지났어요. 상태를 새로고침하거나 다시 로그인해 주세요.';
+
+function readOAuthStatus(value: unknown): McpOAuthStatus {
+  if (value && typeof value === 'object' && 'status' in value && typeof value.status === 'string'
+    && Object.hasOwn(OAUTH_LABELS, value.status) && 'canLogin' in value && typeof value.canLogin === 'boolean') {
+    // Deliberately discard backend diagnostics: they must never expose an authorization URL here.
+    return { status: value.status as McpOAuthStatus['status'], canLogin: value.canLogin };
+  }
+  throw new Error('Invalid MCP OAuth status');
+}
+
+function closeOAuthPopup(popup: Window | null) {
+  try { popup?.close(); } catch { /* The browser may already have discarded the blank window. */ }
+}
+
+/* THESIS: Add account connection to HTTP rows without changing server configuration or enablement.
+ * OWN-WORLD: Inherit the vault's compact status text, text actions, labelled fields and native dialog.
+ * STORY: Read auth state, optionally supply public client metadata, then finish login in a new window.
+ * FIRST VIEWPORT: Auth state and Login/Logout sit below each HTTP server's existing name and switch.
+ * FORM: Local Operate extension; JSON, server creation and write-only secret controls stay intact. */
+function McpOAuthConnect({ name, pending, running, canLogin, error, onClose, onLogin }: {
+  name: string; pending: boolean; running: boolean; canLogin: boolean; error: string | null;
+  onClose: () => void; onLogin: (input: { clientId?: string; resource?: string }) => void;
+}) {
+  const [clientId, setClientId] = useState('');
+  const [resource, setResource] = useState('');
+  const prefix = useId();
+  const submit = (event: FormEvent) => {
+    event.preventDefault(); event.stopPropagation();
+    if (!pending && !running && canLogin) onLogin({
+      ...(clientId.trim() ? { clientId: clientId.trim() } : {}),
+      ...(resource.trim() ? { resource: resource.trim() } : {}),
+    });
+  };
+  return createPortal(<Modal title={`${name} 로그인`} onClose={onClose} className="compact-modal vault-oauth-modal">
+    <header className="modal-header"><h2><Plug size={16} />{name} 로그인</h2><IconButton label="MCP 로그인 닫기" onClick={onClose}><X size={18} /></IconButton></header>
+    <form onSubmit={submit}>
+      <div className="modal-body vault-modal-body">
+        <p className="mcp-form-note">새 브라우저 창에서 로그인해요. 로그인해도 이 서버의 사용 스위치는 바뀌지 않아요.</p>
+        <label className="vault-field"><span>클라이언트 ID (선택)</span>
+          <input aria-label="클라이언트 ID (선택)" value={clientId} onChange={event => setClientId(event.target.value)} placeholder="자동 등록" maxLength={1024} spellCheck={false} autoComplete="off" disabled={pending || running || !canLogin} data-autofocus aria-describedby={`${prefix}-client-help`} />
+          <small id={`${prefix}-client-help`} className="mcp-form-note">서버가 제공한 ID가 없다면 비워 두세요. 자동 등록을 시도해요. 수동 ID는 issuer 응답을 지원하는 공개 클라이언트만 사용할 수 있어요.</small>
+        </label>
+        <label className="vault-field"><span>리소스 식별자 (선택)</span>
+          <input aria-label="리소스 식별자 (선택)" value={resource} onChange={event => setResource(event.target.value)} placeholder="MCP 서버 주소 사용" maxLength={2048} spellCheck={false} autoComplete="off" inputMode="url" disabled={pending || running || !canLogin} aria-describedby={`${prefix}-resource-help`} />
+          <small id={`${prefix}-resource-help`} className="mcp-form-note">비워 두면 MCP 서버 주소를 사용해요.</small>
+        </label>
+        <details className="vault-oauth-resource-help"><summary>리소스 식별자가 필요한 경우</summary><p>서버가 연결 주소와 다른 식별자를 요구할 때만 입력하세요. 예를 들어 Notion의 <code>/mcp</code> 연결에는 <code>https://mcp.notion.com</code>이 필요할 수 있어요.</p></details>
+        {running && <p className="mcp-form-note" role="note">실행 중인 작업을 마친 뒤 로그인해 주세요. 입력은 유지돼요.</p>}
+        {!canLogin && <p className="mcp-form-note" role="note">지금은 이 서버에 로그인할 수 없어요. 창을 닫고 인증 상태를 새로고침해 주세요.</p>}
+        {error && <ErrorNotice>{error}</ErrorNotice>}
+      </div>
+      <footer className="modal-footer"><button type="button" className="small-button" onClick={onClose}>취소</button><button type="submit" className="primary-button" disabled={pending || running || !canLogin}>{pending ? '로그인 준비 중…' : '브라우저에서 로그인'}</button></footer>
+    </form>
+  </Modal>, document.body);
+}
+
+/** Keyed by bot/server/config identity at the row: no response can acquire a different server label. */
+function McpOAuthControls({ server, canEdit, running }: { server: PublicMcpServer; canEdit: boolean | null; running: boolean }) {
+  const [oauth, setOAuth] = useState<McpOAuthStatus | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [polling, setPolling] = useState(false);
+  const [timedOut, setTimedOut] = useState(false);
+  const [cycle, setCycle] = useState({ generation: 0, poll: false });
+  const [pending, setPending] = useState<'login' | 'logout' | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const statusRequest = useRef<AbortController | null>(null);
+  const mutation = useRef<AbortController | null>(null);
+  // This ref holds only an unused about:blank window, never a URL or the provider's opened page.
+  const blankPopup = useRef<Window | null>(null);
+  const latest = useRef({ canEdit, running });
+  latest.current = { canEdit, running };
+  const path = `/api/bots/${encodeURIComponent(server.botId)}/mcp-servers/${encodeURIComponent(server.name)}/oauth`;
+  useEffect(() => () => {
+    const controller = mutation.current;
+    mutation.current = null;
+    controller?.abort();
+    closeOAuthPopup(blankPopup.current);
+    blankPopup.current = null;
+  }, []);
+  useEffect(() => {
+    setChecking(false); setPolling(false);
+    // Even the status route is sensitive. Never request it from LAN or before access is known.
+    if (canEdit !== true || pending) return;
+    const controller = new AbortController();
+    statusRequest.current = controller;
+    let timer: number | undefined;
+    let attempts = 0;
+    setChecking(true); setPolling(cycle.poll); setTimedOut(false); setStatusError(null);
+    const deadline = window.setTimeout(() => {
+      if (controller.signal.aborted) return;
+      controller.abort(); setChecking(false); setPolling(false);
+      setTimedOut(cycle.poll);
+      setStatusError(cycle.poll ? OAUTH_TIMEOUT : '인증 상태를 확인하지 못했어요. 잠시 후 상태를 새로고침해 주세요.');
+      window.clearTimeout(timer);
+    }, cycle.poll ? OAUTH_POLL_MS : 15_000);
+    const load = async () => {
+      if (controller.signal.aborted) return;
+      try {
+        const next = readOAuthStatus(await request<unknown>(path, { signal: controller.signal }));
+        if (controller.signal.aborted) return;
+        attempts++;
+        setOAuth(next); setChecking(false);
+        const waiting = next.status === 'awaiting_login' || next.status === 'not_connected';
+        if (cycle.poll && next.canLogin && waiting && attempts < 45) {
+          timer = window.setTimeout(() => void load(), 2_000);
+        } else {
+          window.clearTimeout(deadline); setPolling(false);
+          if (cycle.poll && next.canLogin && waiting) { setTimedOut(true); setStatusError(OAUTH_TIMEOUT); }
+          else if (next.status === 'error') setStatusError('서버의 인증 상태에 오류가 있어요. 상태를 새로고침하거나 다시 로그인해 주세요.');
+        }
+      } catch {
+        if (controller.signal.aborted) return;
+        window.clearTimeout(deadline); setChecking(false); setPolling(false);
+        setStatusError('인증 상태를 확인하지 못했어요. 잠시 후 상태를 새로고침해 주세요.');
+      }
+    };
+    void load();
+    return () => {
+      controller.abort(); window.clearTimeout(timer); window.clearTimeout(deadline);
+      if (statusRequest.current === controller) statusRequest.current = null;
+    };
+  }, [canEdit, path, pending, cycle, running]);
+  const refresh = () => {
+    if (canEdit !== true || mutation.current) return;
+    setActionError(null);
+    setCycle(current => ({ generation: current.generation + 1, poll: false }));
+  };
+  const closeConnect = () => {
+    const controller = mutation.current;
+    mutation.current = null;
+    controller?.abort();
+    closeOAuthPopup(blankPopup.current); blankPopup.current = null;
+    setPending(null); setConnecting(false); setActionError(null);
+  };
+  const login = async (input: { clientId?: string; resource?: string }) => {
+    if (canEdit !== true || running || !oauth?.canLogin || oauth.status === 'connected' || mutation.current || polling) return;
+    let popup: Window | null = null;
+    try {
+      // `noopener` in window.open can discard the handle. Detach and verify it synchronously on a
+      // same-origin blank window, before requesting any URL or loading untrusted provider content.
+      popup = window.open('about:blank', '_blank');
+      if (!popup || popup.closed) throw new Error('Popup blocked');
+      popup.opener = null;
+      if (popup.opener !== null) throw new Error('Cannot detach opener');
+      popup.document.title = 'MCP 로그인 준비 중';
+      popup.document.documentElement.lang = 'ko';
+      const referrer = popup.document.createElement('meta');
+      referrer.name = 'referrer'; referrer.content = 'no-referrer';
+      popup.document.head.append(referrer);
+      popup.document.body.textContent = '로그인 페이지를 준비하고 있어요. 취소하면 이 창이 닫혀요.';
+    } catch {
+      closeOAuthPopup(popup);
+      setActionError('로그인 창을 열 수 없어요. 이 사이트의 팝업을 허용한 뒤 다시 시도해 주세요.');
+      return;
+    }
+    blankPopup.current = popup;
+    statusRequest.current?.abort();
+    const controller = new AbortController();
+    mutation.current = controller;
+    setPending('login'); setActionError(null);
+    setCycle(current => ({ generation: current.generation + 1, poll: false }));
+    const timeout = window.setTimeout(() => controller.abort(), 30_000);
+    try {
+      const result = await request<{ authorizationUrl: string }>(`${path}/login`, { method: 'POST', body: input, signal: controller.signal });
+      if (mutation.current !== controller) return;
+      if (controller.signal.aborted) throw new Error('MCP login timed out');
+      if (!latest.current.canEdit || latest.current.running) {
+        setActionError('지금은 로그인할 수 없어요. 실행 중인 작업을 마친 뒤 서버 컴퓨터에서 다시 시도해 주세요.');
+        return;
+      }
+      if (popup.closed) { setActionError('로그인 창이 닫혔어요. 다시 로그인해 주세요.'); return; }
+      // The authorization URL exists only in this call frame, never in React/shared state or errors.
+      const url = new URL(result.authorizationUrl);
+      if (url.protocol !== 'https:' || url.username || url.password || url.hash || result.authorizationUrl.length > 16_384) throw new Error('Invalid authorization URL');
+      popup.opener = null;
+      if (popup.opener !== null) throw new Error('Cannot detach opener');
+      popup.location.replace(url.href);
+      blankPopup.current = null;
+      setConnecting(false);
+      setCycle(current => ({ generation: current.generation + 1, poll: true }));
+    } catch (failure) {
+      if (mutation.current !== controller) return;
+      setActionError(failure instanceof ApiError && failure.status === 409
+        ? '지금은 로그인할 수 없어요. 실행 중인 작업을 마친 뒤 다시 시도해 주세요.'
+        : '로그인을 시작하지 못했어요. 서버 연결과 클라이언트 ID·리소스 식별자를 확인한 뒤 다시 시도해 주세요.');
+    } finally {
+      window.clearTimeout(timeout);
+      if (blankPopup.current === popup) { closeOAuthPopup(popup); blankPopup.current = null; }
+      if (mutation.current === controller) { mutation.current = null; setPending(null); }
+    }
+  };
+  const logout = async () => {
+    if (canEdit !== true || running || mutation.current) return;
+    statusRequest.current?.abort();
+    const controller = new AbortController();
+    mutation.current = controller;
+    setPending('logout'); setActionError(null); setConnecting(false);
+    setCycle(current => ({ generation: current.generation + 1, poll: false }));
+    const timeout = window.setTimeout(() => controller.abort(), 25_000);
+    try {
+      const next = readOAuthStatus(await request<unknown>(`${path}/logout`, { method: 'POST', body: {}, signal: controller.signal }));
+      if (mutation.current !== controller) return;
+      if (controller.signal.aborted) throw new Error('MCP logout timed out');
+      setOAuth(next);
+    } catch (failure) {
+      if (mutation.current !== controller) return;
+      setActionError(failure instanceof ApiError && failure.status === 409
+        ? '로그아웃하지 못했어요. 실행 중인 작업을 마친 뒤 다시 시도해 주세요.'
+        : '로그아웃하지 못했어요. 연결 상태를 확인한 뒤 다시 시도해 주세요.');
+    } finally {
+      window.clearTimeout(timeout);
+      if (mutation.current === controller) { mutation.current = null; setPending(null); }
+    }
+  };
+  const label = canEdit === null ? '접근 확인 중…' : canEdit === false ? '로컬에서만 로그인'
+    : pending === 'logout' ? '로그아웃 중…' : statusError ? timedOut ? '로그인 확인 시간 초과' : '인증 확인 실패'
+      : checking ? '인증 확인 중…' : oauth ? OAUTH_LABELS[oauth.status] : '인증 확인 중…';
+  const loginLabel = timedOut || oauth?.status === 'login_required' || oauth?.status === 'error' ? '다시 로그인' : '로그인';
+  const canLogout = oauth && ['connected', 'awaiting_login', 'login_required'].includes(oauth.status);
+  return <div className="vault-oauth">
+    <div className="vault-oauth-bar">
+      <span className={`vault-oauth-state${!statusError && oauth?.status === 'connected' ? ' connected' : ''}`} role="status" aria-label={`${server.name} 인증 상태`}>{label}</span>
+      <span className="vault-oauth-actions">
+        {canEdit === true && <IconButton label={`${server.name} 인증 상태 새로고침`} onClick={refresh} disabled={checking || polling || !!pending}><RefreshCw size={12} /></IconButton>}
+        {oauth?.status !== 'connected' && <button type="button" className="text-button" aria-label={`${server.name} ${loginLabel}`} disabled={canEdit !== true || !oauth?.canLogin || running || !!pending || checking || polling} onClick={() => { setActionError(null); setConnecting(true); }}>{loginLabel}</button>}
+        {canLogout && <button type="button" className="text-button" aria-label={`${server.name} 로그아웃`} disabled={canEdit !== true || running || !!pending} onClick={() => void logout()}>로그아웃</button>}
+      </span>
+    </div>
+    {polling && <p className="vault-oauth-note">새 창에서 로그인을 마쳐 주세요. 최대 90초 동안 연결 상태를 확인해요.</p>}
+    {running && <p className="vault-oauth-note">실행 중인 작업을 마친 뒤 로그인·로그아웃할 수 있어요.</p>}
+    {canEdit && oauth?.canLogin === false && oauth.status !== 'connected' && <p className="vault-oauth-note">이 서버 구성에서는 OAuth 로그인을 사용할 수 없어요.</p>}
+    {statusError && <ErrorNotice>{statusError}</ErrorNotice>}
+    {actionError && !connecting && <ErrorNotice>{actionError}</ErrorNotice>}
+    {connecting && <McpOAuthConnect name={server.name} pending={pending === 'login'} running={running} canLogin={canEdit === true && !!oauth?.canLogin && oauth.status !== 'connected'} error={actionError} onClose={closeConnect} onLogin={input => void login(input)} />}
+  </div>;
+}
+
 /** Details-pane sections: the bot's custom MCP servers and the secrets it can use. */
 export function BotIntegrations({ bot, data, dispatch }: { bot: Bot; data: AppState; dispatch: Dispatch<Action> }) {
   const canEdit = useVaultAccess();
@@ -237,13 +486,14 @@ export function BotIntegrations({ bot, data, dispatch }: { bot: Bot; data: AppSt
       {servers.length ? <ul className="vault-list" aria-label={`${bot.name}의 MCP 서버`}>
         {servers.map((server) => {
           const missing = (server.secretRefs ?? []).filter((name) => !available.has(name));
-          return <li key={server.id} className="vault-row" aria-label={`MCP 서버 ${server.name}`}>
+          return <li key={server.id} className={`vault-row${server.transport === 'http' ? ' vault-mcp-row' : ''}`} aria-label={`MCP 서버 ${server.name}`}>
             {server.transport === 'stdio' ? <Terminal size={14} aria-hidden="true" /> : <Plug size={14} aria-hidden="true" />}
             <span className="vault-row-copy"><code>{server.name}</code><small>{server.transport === 'stdio' ? 'STDIO · 서버 컴퓨터에서 명령 실행' : 'HTTP'}{missing.length ? ` · 보관함에 없는 시크릿: ${missing.join(', ')}` : ''}</small></span>
             <label className="vault-switch">
               <input type="checkbox" role="switch" aria-label={`${server.name} 사용`} checked={server.enabled} disabled={toggling !== null || (!server.enabled && !canEdit)} onChange={(event) => void toggle(server, event.target.checked)} />
               <span>{server.enabled ? '켜짐' : '꺼짐'}</span>
             </label>
+            {server.transport === 'http' && <McpOAuthControls key={JSON.stringify([bot.id, server.id, server.name, server.updatedAt])} server={server} canEdit={canEdit} running={running} />}
           </li>;
         })}
       </ul> : <p className="detail-empty">아직 사용자 지정 MCP 서버가 없어요</p>}

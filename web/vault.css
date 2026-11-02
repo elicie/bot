@@ -30,6 +30,24 @@
 .vault-warning svg { flex-shrink: 0; margin-top: 2px; }
 .vault-warning strong { font-weight: 600; }
 
+.vault-mcp-row { flex-wrap: wrap; }
+.vault-oauth { flex: 0 0 100%; min-width: 0; display: grid; gap: 6px; padding-left: 22px; }
+.vault-oauth-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; column-gap: 8px; }
+.vault-oauth-state { color: var(--secondary); font-size: 11px; }
+.vault-oauth-state.connected { color: var(--settings-success, #95c7ad); }
+.vault-oauth-actions { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-left: auto; }
+.vault-oauth-actions .icon-button { width: 26px; height: 26px; }
+.vault-oauth-actions .text-button { font-size: 11px; min-height: 26px; }
+.vault-oauth-note { color: var(--muted); font-size: 11px; line-height: 17px; }
+.vault-oauth .error-notice { padding: 8px; font-size: 11px; line-height: 17px; }
+.modal.vault-oauth-modal { width: 458px; }
+.vault-oauth-modal h2 { min-width: 0; overflow-wrap: anywhere; }
+.vault-oauth-modal .vault-field input { width: 100%; min-height: 34px; }
+.vault-oauth-resource-help { color: var(--secondary); font-size: 11px; line-height: 18px; }
+.vault-oauth-resource-help summary { cursor: pointer; padding-block: 4px; }
+.vault-oauth-resource-help p { margin-top: 6px; overflow-wrap: anywhere; }
+.vault-oauth-resource-help code { font-size: inherit; }
+
 .modal.mcp-form-modal { width: 560px; }
 .mcp-form-body { display: grid; gap: 16px; }
 .mcp-form-note { margin: 0; color: var(--secondary); font-size: 11px; line-height: 18px; overflow-wrap: anywhere; }

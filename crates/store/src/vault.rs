@@ -581,7 +581,11 @@ fn secret_value(value: &str) -> HttpResult<String> {
 impl State {
     /// Every string the public snapshot and model-facing text must redact.
     pub fn redaction_keys(&self) -> Vec<String> {
-        redaction_keys(&self.disk)
+        let mut keys = redaction_keys(&self.disk);
+        keys.extend(self.external_redaction_keys.iter().cloned());
+        keys.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        keys.dedup();
+        keys
     }
 
     pub fn secrets(&self) -> &[VaultSecret] {

@@ -67,6 +67,26 @@ async fn secrets_are_write_only_loopback_only_and_redacted_everywhere() {
     assert!(!serde_json::to_string(&reopened.snapshot()).unwrap().contains("replacement-value-1"));
 }
 
+#[tokio::test]
+async fn externally_managed_tokens_redact_state_and_sse_without_persisting_the_key_registry() {
+    let f = Fixture::new().await;
+    let bot = f.bot_id();
+    let token = "oauth-external-canary-value-42";
+    f.store.set_external_redaction_keys(vec![token.into(), token.into(), String::new()]);
+    assert!(!f.disk_text().contains(token), "registering a server-only token must not write it to state.json");
+    assert!(f.store.read(|s| s.redaction_keys()).contains(&token.to_owned()));
+    assert_eq!(f.store.read(|s| s.redact(&format!("Bearer {token}"))), "Bearer [redacted]");
+    let mut events = f.store.subscribe();
+    // Exercise publication with hostile text. Actual OAuth runtime results are redacted before
+    // persistence; this direct mutation deliberately bypasses that runtime boundary.
+    f.store.mutate(|s| s.update_bot(&bot, BotPatch { instructions: Some(format!("untrusted echo: {token}")), ..BotPatch::default() })).await.unwrap();
+    assert!(!serde_json::to_string(&f.store.snapshot()).unwrap().contains(token));
+    let event = events.try_recv().expect("committed public state");
+    assert!(!serde_json::to_string(&*event).unwrap().contains(token));
+    assert!(event.bots[0].instructions.contains("[redacted]"));
+    assert!(f.store.snapshot().secrets.is_empty(), "external tokens do not become visible vault records");
+}
+
 const DOCUMENT: &str = r#"{"mcpServers": {
   "web": {"url": "https://example.com/mcp", "headers": {"Authorization": "Bearer ${secret:API_TOKEN}"}},
   "local": {"command": "node", "args": ["server.js"], "env": {"TOKEN": "${secret:LOCAL_TOKEN}"}}

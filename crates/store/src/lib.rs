@@ -209,8 +209,11 @@ fn backup_before_shape(path: &Path, name: &str, uses_shape: fn(&DiskState) -> bo
 }
 
 /// `Store.snapshot()`: the public state with the API key removed and redacted.
-fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_error: Option<String>) -> AppState {
-    let keys = vault::redaction_keys(&disk);
+fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_error: Option<String>, external_keys: &[String]) -> AppState {
+    let mut keys = vault::redaction_keys(&disk);
+    keys.extend(external_keys.iter().filter(|key| !key.is_empty()).cloned());
+    keys.sort_by_key(|key| std::cmp::Reverse(key.len()));
+    keys.dedup();
     let (secrets, mcp_servers) = vault::public_vault(&disk);
     let DiskState {
         revision,
@@ -319,7 +322,8 @@ fn writer_loop(shared: Arc<Shared>, path: PathBuf, jobs: mpsc::Receiver<Job>) {
                         if shared.events.receiver_count() > 0 {
                             match serde_json::from_slice::<DiskState>(&bytes) {
                                 Ok(disk) => {
-                                    let _ = shared.events.send(Arc::new(public_snapshot(disk, runtime, routine_scheduling_error)));
+                                    let keys = shared.lock().external_redaction_keys.clone();
+                                    let _ = shared.events.send(Arc::new(public_snapshot(disk, runtime, routine_scheduling_error, &keys)));
                                 }
                                 Err(_) => debug_assert!(false, "committed state must deserialize"),
                             }
@@ -444,6 +448,7 @@ impl Store {
             clock: now.clone(),
             runtime: RuntimeInfo { available: false, bot_message_chains: None, version: None, error: Some("Checking Grok Build.".into()) },
             routine_scheduling_error: None,
+            external_redaction_keys: Vec::new(),
             dirty: false,
             write_failed: false,
         };
@@ -514,6 +519,16 @@ impl Store {
         self.shared.lock().snapshot()
     }
 
+    /// Register server-only credentials held outside DiskState (for example the encrypted OAuth
+    /// vault). Values remain in memory only; callers retain retired values to scrub delayed echoes.
+    /// The writer reads this list immediately before publishing each committed SSE snapshot.
+    pub fn set_external_redaction_keys(&self, mut keys: Vec<String>) {
+        keys.retain(|key| !key.is_empty());
+        keys.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        keys.dedup();
+        self.shared.lock().external_redaction_keys = keys;
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<AppState>> {
         self.shared.events.subscribe()
     }
@@ -533,6 +548,8 @@ pub struct State {
     clock: Clock,
     runtime: RuntimeInfo,
     routine_scheduling_error: Option<String>,
+    /// Never serialized to state.json or exposed in public DTOs.
+    external_redaction_keys: Vec<String>,
     dirty: bool,
     write_failed: bool,
 }
@@ -794,7 +811,7 @@ impl State {
     }
 
     fn snapshot(&self) -> AppState {
-        public_snapshot(self.disk.clone(), self.runtime.clone(), self.routine_scheduling_error.clone())
+        public_snapshot(self.disk.clone(), self.runtime.clone(), self.routine_scheduling_error.clone(), &self.external_redaction_keys)
     }
 
     pub fn disk(&self) -> &DiskState {
@@ -822,10 +839,16 @@ impl State {
     pub fn settings(&self) -> &PrivateSettings {
         &self.disk.settings
     }
+    /// Server-owned credentials stored outside DiskState, used at the provider boundary before
+    /// the native engine can persist a response. This slice is never part of a public DTO.
+    pub fn external_redaction_keys(&self) -> &[String] {
+        &self.external_redaction_keys
+    }
+
     /// `[redacted]` replacement for the stored API key and every vault secret value.
     pub fn redact(&self, value: &str) -> String {
         let mut value = value.to_owned();
-        for key in vault::redaction_keys(&self.disk) {
+        for key in self.redaction_keys() {
             if value.contains(key.as_str()) {
                 value = value.replace(key.as_str(), "[redacted]");
             }
