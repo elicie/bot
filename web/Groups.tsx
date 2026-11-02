@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowDown, ArrowUp, AtSign, Clock3, Menu, MoreHorizontal, Pencil, Plus, SquarePen, Trash2, Users, X } from 'lucide-react';
 import type { AppState, AvatarShape, Bot, Conversation, Group, GroupInput, Message } from '../shared/types';
 import { request } from './api';
@@ -155,11 +155,12 @@ export function GroupDialog({ data, group, busy, error: serverError, run, onSnap
   </Modal>;
 }
 
-export function GroupView({ data, surface, busy, online, run, onSnapshot, onRoute, onSidebar, onEdit, onThread, draft, onDraft, onSettings }: {
+export function GroupView({ data, surface, busy, online, run, onSnapshot, onRoute, onSidebar, onEdit, onThread, draft, onDraft, onSettings, canvasControl }: {
   data: AppState; surface: GroupSurface; busy: boolean; online: boolean; run: Run;
   onSnapshot: (state: AppState) => void; onRoute: (surface: Surface) => void; onSidebar: () => void; onEdit: (group: Group) => void;
   onThread: (conversation: Conversation, threadId: string) => void;
   draft: (key: string) => string; onDraft: (key: string, text: string) => void; onSettings: () => void;
+  canvasControl?: ReactNode;
 }) {
   const [history, setHistory] = useState(false);
   const group = data.groups?.find(item => item.id === surface.groupId);
@@ -222,6 +223,7 @@ export function GroupView({ data, surface, busy, online, run, onSnapshot, onRout
       <div className="chat-controls">
         <IconButton label="대화 기록" onClick={() => setHistory(true)}><Clock3 size={17} /></IconButton>
         <IconButton label="새 대화" onClick={() => void newConversation()} disabled={busy || !!globalRun}><SquarePen size={17} /></IconButton>
+        {canvasControl}
       </div>
     </header>
     {members.length < 2 && <div className="group-warning" role="status"><span>멤버가 {members.length}명입니다. 그룹 편집에서 Bot을 2개 이상 추가하세요.</span><button type="button" onClick={() => onEdit(group)}>그룹 편집</button></div>}

@@ -11,6 +11,7 @@ import type { ManagedComputerOptions } from './computer.js';
 import { projectComputerPermissions, projectResponse } from './public-state.js';
 import { importSkillMarkdown, skillInputSchema, skillPatchSchema } from './skills.js';
 import { RoutineScheduler, routineInputSchema, type EnqueueCommand, type RoutineSchedulerOptions } from './routines.js';
+import { canvasInputSchema, canvasRestoreSchema } from './canvas.js';
 
 const name = z.string().trim().min(1).max(100);
 const color = z.string().regex(/^#[\da-fA-F]{6}$/);
@@ -197,6 +198,16 @@ export async function createBackend(options: BackendOptions): Promise<{
     const input = z.object({ botId: z.string().uuid() }).strict().parse(request.body);
     const conversation = await command(() => store.addConversation(input.botId));
     response.status(201).json({ conversation, state: store.snapshot() });
+  });
+  app.put('/api/conversations/:id/canvas', async (request, response) => {
+    const input = canvasInputSchema.parse(request.body);
+    await command(() => store.updateCanvas(String(request.params.id), input));
+    response.json(store.snapshot());
+  });
+  app.post('/api/conversations/:id/canvas/restore', async (request, response) => {
+    const input = canvasRestoreSchema.parse(request.body);
+    await command(() => store.restoreCanvas(String(request.params.id), input));
+    response.json(store.snapshot());
   });
   app.post('/api/conversations/:id/messages', async (request, response) => {
     const input = z.object({ text: z.string().trim().min(1).max(100000) }).strict().parse(request.body);

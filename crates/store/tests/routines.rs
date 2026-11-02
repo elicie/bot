@@ -590,6 +590,7 @@ async fn routine_count_is_bounded_and_oversize_mutations_leave_existing_state_un
         thread: None,
         group_round: None,
         member_sessions: None,
+        canvas: None,
     };
     let edit = RoutineInput { name: "Would exceed capacity".into(), ..f.input(interval(1)) };
     let error = f

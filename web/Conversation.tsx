@@ -23,9 +23,9 @@ import type {
   RoutineRun,
   ToolActivity,
 } from '../shared/types';
-import { activeRun, runLabels } from './state';
+import { activeRun, pendingBotWork, runLabels } from './state';
 import { Avatar, ErrorNotice, IconButton } from './ui';
-import { BotMessageLinks, BotReportMarker } from './BotChat';
+import { BotMessageLinks, BotReportMarker, BotRequestBanner } from './BotChat';
 import { RichMarkdown } from './RichMarkdown';
 import { TodoList } from './TodoList';
 import { AttachButton, AttachmentTray, DropOverlay, MessageAttachments, useFileDrop, type ComposerAttachments } from './Attachments';
@@ -235,7 +235,7 @@ export function Transcript({
   onPermission: (optionId: string) => void;
   data?: AppState;
   onBotChat?: (id: string) => void;
-  onCancelReports?: (conversationId: string) => void;
+  onCancelReports?: (conversationId: string, deliveryIds: string[]) => void;
   cancelReportsDisabled?: boolean;
   onRoutines?: () => void;
   /** Group conversations: the member bot that wrote an assistant message. */
@@ -281,6 +281,9 @@ export function Transcript({
     return () => observer.disconnect();
   }, []);
   const running = conversation && activeRun(conversation.run.status);
+  const waitingBotWork = !running && pendingBotWork(data ?? null, conversation);
+  const tailDelivery = data?.botDeliveries?.find(delivery => delivery.sourceConversationId === conversation?.id && delivery.sourceMessageId === tail?.id);
+  const chainTermination = tailDelivery && data?.botDeliveries?.find(delivery => delivery.id === tailDelivery.chainId)?.chainTermination;
   const status = conversation?.run.status;
   return (
     <div className="transcript-container">
@@ -301,6 +304,7 @@ export function Transcript({
           {messages.length > 0 && (
             <div className="conversation-label">{conversation?.title || '새 대화'}</div>
           )}
+          {data && conversation && <BotRequestBanner conversationId={conversation.id} data={data} onOpen={onBotChat} />}
           {messages.length === 0 && (
             <div className="conversation-empty">
               <Avatar size={54} color={bot.color} seed={bot.id} shape={bot.shape} />
@@ -378,8 +382,8 @@ export function Transcript({
           )}
           {status === 'completed' && (
             <p className="terminal-note" role="status">
-              <CheckCircle2 size={13} />
-              작업 완료
+              {waitingBotWork ? <Clock3 size={13} /> : chainTermination ? <Square size={12} /> : <CheckCircle2 size={13} />}
+              {waitingBotWork ? 'Bot 답변 대기 중' : chainTermination ? (chainTermination.status === 'cancelled' ? 'Bot 작업을 중단했습니다.' : 'Bot 작업이 실패했습니다.') : '작업 완료'}
             </p>
           )}
           {!runtimeAvailable && (
@@ -420,12 +424,14 @@ export function Composer({
   onFiles,
   onCancel,
   running,
+  pendingBotWork = false,
   disabled,
   busy,
   model,
   attachments,
   placeholder,
   label = '메시지',
+  readOnly = false,
 }: {
   botName: string;
   value: string;
@@ -435,6 +441,8 @@ export function Composer({
   onFiles?: () => void;
   onCancel: () => void;
   running: boolean;
+  /** Logical Bot work may be stopped without disabling a new user message. */
+  pendingBotWork?: boolean;
   disabled: boolean;
   busy: boolean;
   model: string;
@@ -442,9 +450,11 @@ export function Composer({
   attachments?: ComposerAttachments;
   placeholder?: string;
   label?: string;
+  /** Nothing can be typed here at all (a recipient's dedicated bot-message conversation). */
+  readOnly?: boolean;
 }) {
   const textarea = useRef<HTMLTextAreaElement>(null);
-  const attachable = !!attachments && !disabled && !busy && !running;
+  const attachable = !!attachments && !disabled && !readOnly && !busy && !running;
   const drop = useFileDrop(attachable, (files) => attachments?.add(files));
   const hasFiles = !!attachments?.items.length;
   useLayoutEffect(() => {
@@ -473,6 +483,7 @@ export function Composer({
           ref={textarea}
           rows={1}
           aria-label={label}
+          disabled={readOnly}
           placeholder={placeholder ?? `${botName}에게 메시지 보내기`}
           value={value}
           onChange={(event) => onChange(event.target.value)}
@@ -504,15 +515,20 @@ export function Composer({
             <Square size={14} fill="currentColor" />
           </IconButton>
         ) : (
-          <button
-            type="submit"
-            className="send-button"
-            aria-label="메시지 보내기"
-            title="메시지 보내기"
-            disabled={disabled || busy || (!value.trim() && !hasFiles)}
-          >
-            <ArrowUp size={19} />
-          </button>
+          <>
+            {pendingBotWork && <IconButton label="Bot 체인 중단" className="send-button stop-button" onClick={onCancel} disabled={busy}>
+              <Square size={14} fill="currentColor" />
+            </IconButton>}
+            <button
+              type="submit"
+              className="send-button"
+              aria-label="메시지 보내기"
+              title="메시지 보내기"
+              disabled={disabled || busy || (!value.trim() && !hasFiles)}
+            >
+              <ArrowUp size={19} />
+            </button>
+          </>
         )}
       </form>
       <div className="composer-meta">
