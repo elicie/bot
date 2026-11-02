@@ -21,6 +21,7 @@ env:
   CARGO_TERM_COLOR: always
   # Rust on the self-hosted runner: `rustup toolchain install <ver> --profile minimal -c clippy -c rustfmt`.
   SELF_HOSTED_RUST: 1.98.0
+  SELF_HOSTED_TARGET_CAP_GB: 40
 
 jobs:
   changes:
@@ -81,7 +82,13 @@ jobs:
       - name: Cargo target dir (persistent on self-hosted)
         run: |
           if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
-            dir="$HOME/.cache/grok-bot-ci/target"
+            # One target dir per runner so parallel jobs don't wait on each other's cargo lock.
+            dir="$HOME/.cache/grok-bot-ci/$RUNNER_NAME/target"
+            # Each dir grows with every branch built; clear it past the cap (next build is cold).
+            real=$(readlink -f "$dir" || true)
+            if [ -d "$real" ] && [ "$(du -s --block-size=1G "$real" | cut -f1)" -gt "$SELF_HOSTED_TARGET_CAP_GB" ]; then
+              echo "Clearing $real (over ${SELF_HOSTED_TARGET_CAP_GB}G)"; rm -rf "$real"; rm -f "$dir"
+            fi
             # A pinned toolchain installed on the runner, so its default `stable` (shared with other repos) stays untouched.
             echo "RUSTUP_TOOLCHAIN=$SELF_HOSTED_RUST" >> "$GITHUB_ENV"
           else
@@ -127,7 +134,13 @@ jobs:
       - name: Cargo target dir (persistent on self-hosted)
         run: |
           if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
-            dir="$HOME/.cache/grok-bot-ci/target"
+            # One target dir per runner so parallel jobs don't wait on each other's cargo lock.
+            dir="$HOME/.cache/grok-bot-ci/$RUNNER_NAME/target"
+            # Each dir grows with every branch built; clear it past the cap (next build is cold).
+            real=$(readlink -f "$dir" || true)
+            if [ -d "$real" ] && [ "$(du -s --block-size=1G "$real" | cut -f1)" -gt "$SELF_HOSTED_TARGET_CAP_GB" ]; then
+              echo "Clearing $real (over ${SELF_HOSTED_TARGET_CAP_GB}G)"; rm -rf "$real"; rm -f "$dir"
+            fi
             # A pinned toolchain installed on the runner, so its default `stable` (shared with other repos) stays untouched.
             echo "RUSTUP_TOOLCHAIN=$SELF_HOSTED_RUST" >> "$GITHUB_ENV"
           else
