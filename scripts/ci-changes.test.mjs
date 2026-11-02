@@ -9,7 +9,6 @@ import { readCargoMetadata, selectChanges } from './ci-changes.mjs';
 const script = fileURLToPath(new URL('./ci-changes.mjs', import.meta.url));
 const cwd = path.resolve('synthetic-workspace');
 const empty = { web: false, rust: false, packages: '', node: '', specs: '', tools: false };
-const full = { web: true, rust: true, packages: '--workspace', node: 'all', specs: 'all', tools: true };
 const noMetadata = { loadMetadata: () => assert.fail('metadata must remain lazy') };
 const dependency = (dir, fields = {}) => ({ name: path.basename(dir), path: path.join(cwd, dir), ...fields });
 const member = (name, dir, dependencies = []) => ({
@@ -191,12 +190,6 @@ test('mixed crate docs and Rust changes keep focused reverse-dependent selection
   }
 });
 
-test('--full selection includes every check and bypasses metadata', () => {
-  for (const files of [[], ['README.md'], ['crates/deleted/src/lib.rs']]) {
-    assert.deepEqual(selectChanges(files, { ...noMetadata, full: true }), full);
-  }
-});
-
 test('CI workflow, selector and runner changes select only tools, not app suites', () => {
   for (const file of [
     '.github/workflows/ci.yml', 'scripts/ci-changes.mjs', 'scripts/ci-changes.test.mjs',
@@ -250,12 +243,6 @@ test('otherwise selects only changed top-level Node tests and Playwright specs',
   });
 });
 
-test('CLI --full preserves the five app outputs and adds tools without Cargo', () => {
-  assert.deepEqual(outputs(cli(['--full'])), {
-    web: 'true', rust: 'true', packages: '--workspace', node: 'all', specs: 'all', tools: 'true',
-  });
-});
-
 test('CLI parses stdin and preserves focused web, Node and spec outputs without Cargo', () => {
   assert.deepEqual(outputs(cli([], 'shared/protocol.ts\r\n tests/one.test.ts \n\ntests/ui.spec.ts\n')), {
     web: 'true', rust: 'false', packages: '', node: 'tests/one.test.ts', specs: 'tests/ui.spec.ts', tools: 'false',
@@ -301,12 +288,14 @@ test('workflow detection preserves selector failure through tee', { skip: proces
   assert.match(result.stderr, /cargo.*ENOENT/);
 });
 
-test('CLI rejects unknown flags rather than silently producing partial coverage', () => {
-  const result = cli(['--all']);
-  assert.equal(result.error, undefined);
-  assert.equal(result.status, 1);
-  assert.equal(result.stdout, '');
-  assert.match(result.stderr, /Usage:.*\[--full\]/);
+test('CLI rejects flags, including the removed --full mode', () => {
+  for (const flag of ['--all', '--full']) {
+    const result = cli([flag]);
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /Usage:/);
+  }
 });
 
 test('importing the selector does not read stdin, invoke child processes or print outputs', () => {
