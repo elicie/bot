@@ -63,6 +63,7 @@ impl Backend {
             port: AtomicU16::new(0),
             closing: AtomicBool::new(false),
             web_root: options.web_root,
+            mcp_test_stopping: tokio::sync::watch::Sender::new(false),
             stopping: tokio::sync::watch::Sender::new(false),
         });
         Ok(Self { store, runtime, scheduler, queue, context })
@@ -82,6 +83,9 @@ impl Backend {
         let closer = tokio::spawn(async move {
             shutdown.await;
             context.closing.store(true, Ordering::SeqCst);
+            // Probes hold the command queue. Cancel them before draining it, while leaving SSE
+            // open until run cancellation and the final state flush below have completed.
+            context.mcp_test_stopping.send_replace(true);
             scheduler.close().await;
             queue.run(async {}).await;
             runtime.shutdown().await;
