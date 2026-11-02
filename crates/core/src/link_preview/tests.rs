@@ -131,6 +131,22 @@ async fn serve_fixture(State(requests): State<Arc<Requests>>, uri: Uri, headers:
             tokio::time::sleep(Duration::from_millis(45)).await;
             page(r#"<title>Keep text</title><meta property="og:image" content="/slow">"#)
         }
+        "/deadline-slow" => {
+            tokio::time::sleep(Duration::from_millis(2500)).await;
+            page("<title>Slow deadline fixture</title>")
+        }
+        "/deadline-redirect" => {
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            redirect("/deadline-slow")
+        }
+        "/deadline-thumbnail" => {
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            page(r#"<title>Keep text</title><meta property="og:image" content="/deadline-image">"#)
+        }
+        "/deadline-image" => {
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            Response::builder().header(header::CONTENT_TYPE, "image/png").body(Body::from(PNG)).unwrap()
+        }
         "/compressed" => {
             Response::builder().header(header::CONTENT_TYPE, "text/html").header(header::CONTENT_ENCODING, "gzip").body(Body::from("not gzip")).unwrap()
         }
@@ -312,8 +328,17 @@ async fn content_length_and_chunked_responses_are_byte_bounded() {
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let peer = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
-        let mut request = [0; 4096];
-        socket.read(&mut request).await.unwrap();
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0; 1024];
+            let count = socket.read(&mut chunk).await.unwrap();
+            assert!(count > 0, "client sent a complete request before the fixture responds");
+            request.extend_from_slice(&chunk[..count]);
+            if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                break;
+            }
+            assert!(request.len() <= 4096, "fixture request headers are bounded");
+        }
         socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 99999999\r\n\r\n").await.unwrap();
         let mut tail = [0; 1];
         assert_eq!(socket.read(&mut tail).await.unwrap_or(0), 0, "client rejects headers without downloading body");
@@ -327,29 +352,31 @@ async fn content_length_and_chunked_responses_are_byte_bounded() {
 #[tokio::test]
 async fn one_deadline_covers_dns_redirects_html_and_thumbnail() {
     let fixture = Fixture::start().await;
-    let limits = Limits { total: Duration::from_millis(70), ..Limits::default() };
+    // Wide phase gaps preserve the shared-deadline assertion under parallel Chrome/engine tests;
+    // sub-100ms total deadlines mostly measure CI scheduler contention rather than this contract.
+    let limits = Limits { total: Duration::from_millis(1500), ..Limits::default() };
     let (_root, service) = fixture.service(limits).await;
-    for path in ["/slow", "/slow-redirect"] {
+    for path in ["/deadline-slow", "/deadline-redirect"] {
         let start = Instant::now();
         assert!(matches!(service.preview(&fixture.url(path)).await.unwrap_err().status, 502 | 504));
-        assert!(start.elapsed() < Duration::from_millis(180));
+        assert!(start.elapsed() < Duration::from_millis(2250));
     }
     let start = Instant::now();
-    let card = service.preview(&fixture.url("/delayed-thumb")).await.unwrap();
+    let card = service.preview(&fixture.url("/deadline-thumbnail")).await.unwrap();
     assert_eq!(card.title, "Keep text");
-    assert!(card.image_url.is_none());
-    assert!(start.elapsed() < Duration::from_millis(130), "thumbnail does not receive a fresh timeout");
+    assert!(card.image_url.is_none(), "a fresh thumbnail deadline would incorrectly keep the image");
+    assert!(start.elapsed() < Duration::from_millis(2000), "thumbnail does not receive a fresh timeout");
 
-    let (_root, mut service) = fixture.service(Limits { total: Duration::from_millis(20), ..Limits::default() }).await;
+    let (_root, mut service) = fixture.service(Limits { total: Duration::from_millis(150), ..Limits::default() }).await;
     Arc::get_mut(&mut service).unwrap().policy.lookup = Arc::new(|_, _slot| {
         Box::pin(async {
-            tokio::time::sleep(Duration::from_millis(150)).await;
+            tokio::time::sleep(Duration::from_millis(1000)).await;
             Ok(vec!["8.8.8.8".parse().unwrap()])
         })
     });
     let start = Instant::now();
     assert_eq!(service.preview("http://slow-dns.invalid/").await.unwrap_err().status, 504);
-    assert!(start.elapsed() < Duration::from_millis(100));
+    assert!(start.elapsed() < Duration::from_millis(800));
 }
 
 #[tokio::test]
