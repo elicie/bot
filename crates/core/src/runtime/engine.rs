@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use agent_client_protocol as acp;
+use agent_client_protocol::{self as acp, Agent as _};
 use anyhow::{Result, anyhow};
 use grok_bot_engine::host::{EngineEvent, EngineHost, EngineSettings, ModelSpec};
 use grok_bot_model::PrivateSettings;
@@ -14,6 +14,17 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 
 use super::Runtime;
 use crate::provider_relay::RelayEndpoint;
+
+const MCP_STATE_ERROR: &str = "Could not confirm MCP initialization for this session.";
+
+/// Parse only the readiness predicate. Never surface the catalog or engine errors: MCP
+/// declarations may contain credentials, and this response is internal bookkeeping only.
+fn mcp_resolved(response: &serde_json::Value) -> Result<bool> {
+    if !response["error"].is_null() {
+        return Err(anyhow!(MCP_STATE_ERROR));
+    }
+    response["result"]["sessionMcpResolved"].as_bool().ok_or_else(|| anyhow!(MCP_STATE_ERROR))
+}
 
 /// Engine-side alias of the single configured provider model.
 pub const MODEL_ALIAS: &str = "local";
@@ -57,6 +68,26 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Await the session's searchable MCP snapshot, including settled failures. A server's
+    /// `ready` status alone is too early: upstream publishes the final tool index afterwards.
+    /// Called inside open_session's startup deadline/cancellation select, before prompt/idle time.
+    /// Keep the loop here, not inside host.call: engine jobs outlive dropped caller futures.
+    pub async fn wait_for_mcp(&self, session_id: &str) -> Result<()> {
+        loop {
+            let params = serde_json::value::to_raw_value(&serde_json::json!({"sessionId":session_id,"cache":true}))?;
+            let response = self
+                .host
+                .call(move |connection| async move { connection.ext_method(acp::ExtRequest::new("x.ai/mcp/list", params.into())).await })
+                .await?
+                .map_err(|_| anyhow!(MCP_STATE_ERROR))?;
+            let response = serde_json::from_str(response.0.get()).map_err(|_| anyhow!(MCP_STATE_ERROR))?;
+            if mcp_resolved(&response)? {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
     /// Wait until every event the engine emitted before this call has been projected.
     ///
     /// ACP dispatches each notification on its own engine-thread task, so a response can overtake
@@ -171,4 +202,31 @@ async fn dispatch(runtime: &Arc<Runtime>, event: EngineEvent) {
 
 pub fn cancelled_permission() -> acp::RequestPermissionResponse {
     acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn readiness_requires_the_session_completion_flag_not_tool_counts() {
+        assert!(!mcp_resolved(&json!({"result":{"sessionMcpResolved":false,"servers":[{"session":{"status":"ready","tools":[{"name":"search"}]}}]}})).unwrap());
+        // Failed servers can settle with no tools: do not wait forever for a healthy connector.
+        assert!(mcp_resolved(&json!({"result":{"sessionMcpResolved":true,"servers":[]}})).unwrap());
+    }
+
+    #[test]
+    fn missing_malformed_or_failed_readiness_is_not_accepted_and_does_not_echo_details() {
+        for response in [
+            json!(null),
+            json!({"result":null,"error":"private-server-credential"}),
+            json!({"result":{"sessionMcpResolved":true},"error":{"message":"private-server-credential"}}),
+            json!({"result":{"servers":[]}}),
+            json!({"result":{"sessionMcpResolved":"true"}}),
+            json!({"sessionMcpResolved":true}),
+        ] {
+            assert_eq!(mcp_resolved(&response).unwrap_err().to_string(), MCP_STATE_ERROR);
+        }
+    }
 }
