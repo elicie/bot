@@ -1,5 +1,4 @@
 import { useEffect, useLayoutEffect, useRef, type FormEvent, type ReactNode } from 'react';
-import Markdown from 'react-markdown';
 import {
   ArrowDown,
   ArrowUp,

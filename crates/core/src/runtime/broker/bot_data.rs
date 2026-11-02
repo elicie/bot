@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use grok_bot_model::{HttpError, MemorySource, PendingPermission, ToolActivity, ToolStatus, new_id};
-use grok_bot_store::memory::{MAX_MEMORIES_PER_BOT, MAX_MEMORY_CHARACTERS, find_memory, normalize_memory};
 use grok_bot_store::knowledge::MAX_KNOWLEDGE_FILES_PER_BOT;
+use grok_bot_store::memory::{MAX_MEMORIES_PER_BOT, MAX_MEMORY_CHARACTERS, find_memory, normalize_memory};
 use grok_bot_store::skills::{MAX_SKILL_RESPONSE_BYTES, skill_response_text};
 use serde_json::{Map, Value, json};
 
@@ -153,7 +153,8 @@ pub(in crate::runtime) fn rules(run: &Run, recipient: bool) -> Vec<String> {
 impl Runtime {
     pub(super) async fn bot_data_call(&self, run: &Arc<Run>, call: Call) -> BrokerResult<Value> {
         let recipient = self.is_recipient(run);
-        let chat_only = || -> BrokerError { HttpError::forbidden("Recipient conversations are chat-only and cannot use bot memories or knowledge files.").into() };
+        let chat_only =
+            || -> BrokerError { HttpError::forbidden("Recipient conversations are chat-only and cannot use bot memories or knowledge files.").into() };
         let bot_id = run.bot.id.clone();
         match call {
             Call::ListMemories { offset } => {
@@ -211,7 +212,17 @@ impl Runtime {
         }
         let title = run.redact(&format!("Remember: {}", truncate_utf16(&text, 80)));
         let description = run.redact_all(&format!("Save this memory for {}. It will be included in this bot's future chats.\n\n{text}", run.bot.name));
-        let tool = ToolActivity { id: new_id(), title: title.clone(), kind: "edit".into(), status: ToolStatus::Pending, input: Some(run.redact_all(&text)), output: None, paths: None, local_only: None, approved_by_rule: None };
+        let tool = ToolActivity {
+            id: new_id(),
+            title: title.clone(),
+            kind: "edit".into(),
+            status: ToolStatus::Pending,
+            input: Some(run.redact_all(&text)),
+            output: None,
+            paths: None,
+            local_only: None,
+            approved_by_rule: None,
+        };
         let tool_id = tool.id.clone();
         let (allow, _, options) = approval_options("Save memory once", "Deny");
         let permission = PendingPermission { id: new_id(), title, kind: "edit".into(), description, options, paths: Vec::new(), local_only: None };
@@ -238,7 +249,9 @@ impl Runtime {
         };
         match saved {
             Ok(result) => {
-                let Some(memory) = result.added.into_iter().next().or_else(|| result.existing.into_iter().next()) else { return Err(conflict_finished().into()) };
+                let Some(memory) = result.added.into_iter().next().or_else(|| result.existing.into_iter().next()) else {
+                    return Err(conflict_finished().into());
+                };
                 run.flags().memory_saves += 1;
                 self.settle_tool(run, &tool_id, ToolStatus::Completed, Some("Saved memory.".into())).await;
                 Ok(json!({ "id": memory.id, "text": run.redact(&memory.text), "saved": true }))
@@ -258,7 +271,17 @@ impl Runtime {
             .ok_or_else(|| HttpError::not_found("Memory does not exist for this bot."))?;
         let title = run.redact(&format!("Forget memory: {}", truncate_utf16(&memory.text, 80)));
         let description = run.redact_all(&format!("Forget this memory of {}. Future chats will no longer include it.\n\n{}", run.bot.name, memory.text));
-        let tool = ToolActivity { id: new_id(), title: title.clone(), kind: "edit".into(), status: ToolStatus::Pending, input: Some(run.redact_all(&memory.text)), output: None, paths: None, local_only: None, approved_by_rule: None };
+        let tool = ToolActivity {
+            id: new_id(),
+            title: title.clone(),
+            kind: "edit".into(),
+            status: ToolStatus::Pending,
+            input: Some(run.redact_all(&memory.text)),
+            output: None,
+            paths: None,
+            local_only: None,
+            approved_by_rule: None,
+        };
         let tool_id = tool.id.clone();
         let (allow, _, options) = approval_options("Forget once", "Deny");
         let permission = PendingPermission { id: new_id(), title, kind: "edit".into(), description, options, paths: Vec::new(), local_only: None };

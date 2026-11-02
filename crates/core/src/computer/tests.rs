@@ -78,7 +78,8 @@ async fn read_request(stream: &mut TcpStream) -> Option<Request> {
     let mut lines = text.split("\r\n");
     let mut first = lines.next()?.split(' ');
     let (method, path) = (first.next()?.to_owned(), first.next()?.to_owned());
-    let headers = lines.take_while(|line| !line.is_empty()).filter_map(|line| line.split_once(':').map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))).collect();
+    let headers =
+        lines.take_while(|line| !line.is_empty()).filter_map(|line| line.split_once(':').map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))).collect();
     Some(Request { method, path, headers })
 }
 
@@ -119,9 +120,36 @@ fn denied(status: u16) -> impl Fn(&HttpError) -> bool {
 #[test]
 fn network_policy_rejects_non_global_ipv4_ipv6_mapped_and_ambiguous_addresses() {
     for address in [
-        "0.0.0.0", "10.1.2.3", "100.64.0.1", "127.0.0.1", "169.254.169.254", "172.16.1.1", "192.168.1.1", "192.0.2.1", "198.18.0.1", "198.51.100.1", "203.0.113.1", "224.0.0.1",
-        "255.255.255.255", "::", "::1", "::ffff:127.0.0.1", "::ffff:7f00:1", "::ffff:10.0.0.1", "::ffff:8.8.8.8", "fc00::1", "fe80::1", "fe80::1%lo", "ff02::1", "64:ff9b::7f00:1",
-        "2001:db8::1", "2002:7f00:1::1", "3fff::1", "127.1", "2130706433", "not-an-address",
+        "0.0.0.0",
+        "10.1.2.3",
+        "100.64.0.1",
+        "127.0.0.1",
+        "169.254.169.254",
+        "172.16.1.1",
+        "192.168.1.1",
+        "192.0.2.1",
+        "198.18.0.1",
+        "198.51.100.1",
+        "203.0.113.1",
+        "224.0.0.1",
+        "255.255.255.255",
+        "::",
+        "::1",
+        "::ffff:127.0.0.1",
+        "::ffff:7f00:1",
+        "::ffff:10.0.0.1",
+        "::ffff:8.8.8.8",
+        "fc00::1",
+        "fe80::1",
+        "fe80::1%lo",
+        "ff02::1",
+        "64:ff9b::7f00:1",
+        "2001:db8::1",
+        "2002:7f00:1::1",
+        "3fff::1",
+        "127.1",
+        "2130706433",
+        "not-an-address",
     ] {
         assert!(!is_global_address(address), "{address}");
     }
@@ -201,7 +229,10 @@ impl Destination for Rewriting {
 async fn proxy_request(server: &str, credentials: Option<(&str, &str)>, method: &str, target: &str) -> std::io::Result<(u16, String)> {
     let address = server.trim_start_matches("http://");
     let mut stream = TcpStream::connect(address).await?;
-    let mut request = format!("{method} {target} HTTP/1.1\r\nHost: {}\r\nCookie: secret=cookie\r\nAuthorization: Bearer secret\r\nConnection: close\r\n", url::Url::parse(target).map(|u| u.authority().to_owned()).unwrap_or_default());
+    let mut request = format!(
+        "{method} {target} HTTP/1.1\r\nHost: {}\r\nCookie: secret=cookie\r\nAuthorization: Bearer secret\r\nConnection: close\r\n",
+        url::Url::parse(target).map(|u| u.authority().to_owned()).unwrap_or_default()
+    );
     if let Some((user, password)) = credentials {
         request.push_str(&format!("Proxy-Authorization: Basic {}\r\n", base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"))));
     }
@@ -221,7 +252,10 @@ async fn proxy_request(server: &str, credentials: Option<(&str, &str)>, method: 
 async fn the_loopback_proxy_authenticates_pins_the_validated_address_blocks_rebinding_and_closes_sockets() {
     let site = site(|_| text("200 OK", "", "pinned fixture")).await;
     let port = site.origin.rsplit(':').next().unwrap().to_owned();
-    let destination = Arc::new(Rewriting { policy: NetworkPolicy::new(std::slice::from_ref(&site.origin), std::slice::from_ref(&site.origin), None).unwrap(), rebinding: AtomicBool::new(false) });
+    let destination = Arc::new(Rewriting {
+        policy: NetworkPolicy::new(std::slice::from_ref(&site.origin), std::slice::from_ref(&site.origin), None).unwrap(),
+        rebinding: AtomicBool::new(false),
+    });
     let proxy = ComputerProxy::new(destination.clone());
     proxy.start().await.unwrap();
     let configuration = proxy.configuration().unwrap();
@@ -296,7 +330,12 @@ async fn the_computer_starts_stopped_and_requires_an_explicit_user_operation_wit
     assert_eq!(computer.status().frame_id, None);
     let refused = computer.start(json!({ "requestId": new_id(), "userInitiated": false, "origins": ["https://example.com"] })).await;
     assert!(refused.is_err_and(|e| e.status == 400));
-    assert!(computer.start(json!({ "requestId": new_id(), "userInitiated": true, "origins": ["https://example.com"], "extra": 1 })).await.is_err_and(|e| e.status == 400));
+    assert!(
+        computer
+            .start(json!({ "requestId": new_id(), "userInitiated": true, "origins": ["https://example.com"], "extra": 1 }))
+            .await
+            .is_err_and(|e| e.status == 400)
+    );
     let private = computer.start(start_input(&["http://127.0.0.1:12345"])).await;
     assert!(private.is_err_and(|e| e.status == 403));
     assert_eq!(computer.status().state, ComputerState::Stopped);
@@ -402,7 +441,12 @@ impl Fixture {
             ),
         })
         .await;
-        let computer = ManagedComputer::new(ComputerOptions { allow_test_origins: vec![site.origin.clone()], test_browser: Some(TestBrowser { executable_path: None, chromium_sandbox: true }), lookup: None }).unwrap();
+        let computer = ManagedComputer::new(ComputerOptions {
+            allow_test_origins: vec![site.origin.clone()],
+            test_browser: Some(TestBrowser { executable_path: None, chromium_sandbox: true }),
+            lookup: None,
+        })
+        .unwrap();
         Self { computer, site, private, hang }
     }
 
@@ -412,7 +456,12 @@ impl Fixture {
 
     async fn click_label(&self, label: &str) -> HttpResult<ComputerObservation> {
         let observation = self.computer.perform(command(&self.computer, json!({ "type": "observe" }))).await?;
-        let control = observation.frame.controls.iter().find(|c| c.label == label).unwrap_or_else(|| panic!("Expected visible control {label}: {:?}", observation.frame.controls));
+        let control = observation
+            .frame
+            .controls
+            .iter()
+            .find(|c| c.label == label)
+            .unwrap_or_else(|| panic!("Expected visible control {label}: {:?}", observation.frame.controls));
         let (x, y) = (control.bounds.x + control.bounds.width / 2.0, control.bounds.y + control.bounds.height / 2.0);
         self.computer.perform(command(&self.computer, json!({ "type": "click", "x": x, "y": y }))).await
     }
@@ -445,13 +494,23 @@ async fn real_sandboxed_chrome_provides_png_frames_controls_typed_actions_stale_
     let shown = f.click_label("Show query").await.unwrap();
     assert!(shown.frame.controls.iter().any(|c| c.label == "typed fixture text"), "{:?}", shown.frame.controls);
     let count = shown.frame.controls.iter().find(|c| c.label == "Count 0").unwrap();
-    let click = command(&f.computer, json!({ "type": "click", "x": count.bounds.x + count.bounds.width / 2.0, "y": count.bounds.y + count.bounds.height / 2.0 }));
+    let click =
+        command(&f.computer, json!({ "type": "click", "x": count.bounds.x + count.bounds.width / 2.0, "y": count.bounds.y + count.bounds.height / 2.0 }));
     let mut raced = click.clone();
     raced["requestId"] = json!(new_id());
+    // Whichever of the three concurrent attempts the computer admits first runs (the scheduling
+    // order is not fixed, so slow hosts may admit the differently-keyed one); the other two must be
+    // refused, and the page must have been clicked exactly once.
     let (first, duplicate, raced) = tokio::join!(f.computer.perform(click.clone()), f.computer.perform(click.clone()), f.computer.perform(raced));
-    assert!(duplicate.is_err_and(|e| e.status == 409));
-    assert!(raced.is_err_and(|e| e.status == 409));
-    assert!(first.unwrap().frame.controls.iter().any(|c| c.label == "Count 1"));
+    let mut winners = Vec::new();
+    for result in [first, duplicate, raced] {
+        match result {
+            Ok(done) => winners.push(done),
+            Err(error) => assert_eq!(error.status, 409, "{}", error.message),
+        }
+    }
+    assert_eq!(winners.len(), 1, "exactly one concurrent click runs");
+    assert!(winners[0].frame.controls.iter().any(|c| c.label == "Count 1"));
     let mut again = click.clone();
     again["requestId"] = json!(new_id());
     assert!(f.computer.perform(again).await.is_err_and(|e| e.status == 409));
@@ -530,8 +589,21 @@ async fn real_chrome_observations_carry_visible_page_text_without_hidden_text_or
         assert!(text.contains(visible), "{visible}: {text:?}");
     }
     for absent in [
-        "hidden by class", "hidden attribute", "invisible text", "transparent text", "closed details", "noscript text", "template text", "script text", "unslotted light text",
-        "prefilled-value", "typed-value", "textarea-default", "select-option-value", "hunter2", "editable-content",
+        "hidden by class",
+        "hidden attribute",
+        "invisible text",
+        "transparent text",
+        "closed details",
+        "noscript text",
+        "template text",
+        "script text",
+        "unslotted light text",
+        "prefilled-value",
+        "typed-value",
+        "textarea-default",
+        "select-option-value",
+        "hunter2",
+        "editable-content",
     ] {
         assert!(!text.contains(absent), "{absent}: {text:?}");
     }
@@ -541,7 +613,11 @@ async fn real_chrome_observations_carry_visible_page_text_without_hidden_text_or
 
     let long = f.computer.perform(command(&f.computer, json!({ "type": "navigate", "url": format!("{}/long", f.site.origin) }))).await.unwrap();
     assert!(long.frame.text_truncated);
-    assert!(long.frame.page_text.starts_with("Paragraph 0 한글 😀 filler text.\n\nParagraph 1 "), "{:?}", long.frame.page_text.chars().take(80).collect::<String>());
+    assert!(
+        long.frame.page_text.starts_with("Paragraph 0 한글 😀 filler text.\n\nParagraph 1 "),
+        "{:?}",
+        long.frame.page_text.chars().take(80).collect::<String>()
+    );
     let count = long.frame.page_text.chars().count();
     assert!((PAGE_TEXT_LIMIT - 10..=PAGE_TEXT_LIMIT).contains(&count), "{count}");
     assert!(!long.frame.page_text.contains('\u{fffd}'));
@@ -602,7 +678,17 @@ struct Fake {
 }
 
 fn stopped_status() -> ComputerStatus {
-    ComputerStatus { state: ComputerState::Stopped, epoch: new_id(), frame_id: None, viewport: VIEWPORT, origins: vec![], url: None, busy: false, sandboxed: false, error: None }
+    ComputerStatus {
+        state: ComputerState::Stopped,
+        epoch: new_id(),
+        frame_id: None,
+        viewport: VIEWPORT,
+        origins: vec![],
+        url: None,
+        busy: false,
+        sandboxed: false,
+        error: None,
+    }
 }
 
 impl ComputerService for Fake {
@@ -644,7 +730,17 @@ impl ComputerService for Fake {
     fn screenshot(&self, _: Value) -> BoxFuture<'_, HttpResult<ComputerScreenshot>> {
         Box::pin(async move {
             let status = self.status();
-            let frame = ComputerFrame { id: status.frame_id.clone().unwrap(), epoch: status.epoch.clone(), url: "about:blank".into(), title: "Fixture".into(), viewport: VIEWPORT, controls: vec![], mime_type: "image/png".into(), page_text: String::new(), text_truncated: false };
+            let frame = ComputerFrame {
+                id: status.frame_id.clone().unwrap(),
+                epoch: status.epoch.clone(),
+                url: "about:blank".into(),
+                title: "Fixture".into(),
+                viewport: VIEWPORT,
+                controls: vec![],
+                mime_type: "image/png".into(),
+                page_text: String::new(),
+                text_truncated: false,
+            };
             Ok(ComputerScreenshot { status, frame, png: b"fixture PNG".to_vec() })
         })
     }
@@ -691,7 +787,12 @@ async fn a_command_admitted_before_stop_cannot_start_a_browser_after_the_command
 #[tokio::test]
 async fn a_replacement_owner_stays_bound_when_an_older_stop_completes_after_a_new_start() {
     let (store, _root) = store().await;
-    let other = store.mutate(|state| state.add_bot(BotInput { name: "Other".into(), color: Some("#75a9c0".into()), instructions: Some(String::new()), shape: None, pinned: None })).await.unwrap();
+    let other = store
+        .mutate(|state| {
+            state.add_bot(BotInput { name: "Other".into(), color: Some("#75a9c0".into()), instructions: Some(String::new()), shape: None, pinned: None })
+        })
+        .await
+        .unwrap();
     let fake = Arc::new(Fake::default());
     let computer = Arc::new(ApplicationComputer::with_service(store.clone(), fake.clone()));
     let owner = first_bot(&store);

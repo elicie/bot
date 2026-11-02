@@ -28,8 +28,8 @@ use super::cdp::{self, CdpError, Chrome, Event};
 use super::network::{Lookup, NetworkPolicy};
 use super::proxy::{ComputerProxy, DENIED_BODY};
 use super::{
-    COMPUTER_KEYS, ComputerControl, ComputerFrame, ComputerObservation, ComputerScreenshot, ComputerService, ComputerState, ComputerStatus, PAGE_TEXT_LIMIT, PAGE_TEXT_NODE_LIMIT, VIEWPORT,
-    VIEWPORT_HEIGHT, VIEWPORT_WIDTH, bounded_text, is_uuid, safe_label, scripts, test_mode, utf16_len,
+    COMPUTER_KEYS, ComputerControl, ComputerFrame, ComputerObservation, ComputerScreenshot, ComputerService, ComputerState, ComputerStatus, PAGE_TEXT_LIMIT,
+    PAGE_TEXT_NODE_LIMIT, VIEWPORT, VIEWPORT_HEIGHT, VIEWPORT_WIDTH, bounded_text, is_uuid, safe_label, scripts, test_mode, utf16_len,
 };
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
@@ -107,7 +107,13 @@ impl ComputerOptions {
     /// Options for the server binary. `GROK_BOT_COMPUTER_TEST_ORIGINS` (comma-separated loopback
     /// fixture origins) is read only in [`test_mode`]; otherwise it is ignored.
     pub fn from_environment() -> Self {
-        let origins: Vec<String> = std::env::var("GROK_BOT_COMPUTER_TEST_ORIGINS").unwrap_or_default().split(',').map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned).collect();
+        let origins: Vec<String> = std::env::var("GROK_BOT_COMPUTER_TEST_ORIGINS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+            .collect();
         if origins.is_empty() {
             return Self::default();
         }
@@ -400,7 +406,14 @@ impl ManagedComputer {
         Ok(Self {
             core: Arc::new(Core {
                 options,
-                inner: Mutex::new(Inner { state: ComputerState::Stopped, epoch: new_id(), session: None, used_requests: HashSet::new(), error: None, stopping: None }),
+                inner: Mutex::new(Inner {
+                    state: ComputerState::Stopped,
+                    epoch: new_id(),
+                    session: None,
+                    used_requests: HashSet::new(),
+                    error: None,
+                    stopping: None,
+                }),
             }),
         })
     }
@@ -526,7 +539,9 @@ impl Core {
             return Err(invalid());
         }
         let origins: Vec<String> = match request.get("origins") {
-            Some(Value::Array(items)) if (1..=16).contains(&items.len()) => items.iter().map(|item| item.as_str().map(str::to_owned)).collect::<Option<_>>().ok_or_else(invalid)?,
+            Some(Value::Array(items)) if (1..=16).contains(&items.len()) => {
+                items.iter().map(|item| item.as_str().map(str::to_owned)).collect::<Option<_>>().ok_or_else(invalid)?
+            }
             _ => return Err(invalid()),
         };
         self.consume(&request_id)?;
@@ -607,13 +622,20 @@ impl Core {
         self.assert_live(session)?;
         let (page_events, _) = broadcast::channel(4096);
         self.listen(session, events, page_events.clone());
-        interruptible(session, async { tokio::time::timeout(LAUNCH_TIMEOUT, chrome.send(None, "Browser.getVersion", json!({}))).await.map_err(|_| Fault::Other)?.map_err(Fault::from) }).await?;
+        interruptible(session, async {
+            tokio::time::timeout(LAUNCH_TIMEOUT, chrome.send(None, "Browser.getVersion", json!({}))).await.map_err(|_| Fault::Other)?.map_err(Fault::from)
+        })
+        .await?;
         let context = interruptible(session, async { Ok(chrome.send(None, "Target.createBrowserContext", json!({ "disposeOnDetach": true })).await?) }).await?;
         let browser_context = context["browserContextId"].as_str().ok_or(Fault::Other)?.to_owned();
-        let created = interruptible(session, async { Ok(chrome.send(None, "Target.createTarget", json!({ "url": "about:blank", "browserContextId": browser_context })).await?) }).await?;
+        let created = interruptible(session, async {
+            Ok(chrome.send(None, "Target.createTarget", json!({ "url": "about:blank", "browserContextId": browser_context })).await?)
+        })
+        .await?;
         let target = created["targetId"].as_str().ok_or(Fault::Other)?.to_owned();
         session.main_target.set(target.clone()).map_err(|_| Fault::Other)?;
-        let attached = interruptible(session, async { Ok(chrome.send(None, "Target.attachToTarget", json!({ "targetId": target, "flatten": true })).await?) }).await?;
+        let attached =
+            interruptible(session, async { Ok(chrome.send(None, "Target.attachToTarget", json!({ "targetId": target, "flatten": true })).await?) }).await?;
         let page_session = attached["sessionId"].as_str().ok_or(Fault::Other)?.to_owned();
         let tree = interruptible(session, async { Ok(chrome.send(Some(&page_session), "Page.getFrameTree", json!({})).await?) }).await?;
         let frame = tree["frameTree"]["frame"]["id"].as_str().ok_or(Fault::Other)?.to_owned();
@@ -641,7 +663,9 @@ impl Core {
     /// denied, service workers bypassed, request interception with proxy authentication.
     async fn prepare_page(&self, _session: &Arc<Session>, page: &Arc<Page>) -> Op<()> {
         let chrome = &page.chrome;
-        chrome.send(None, "Browser.setDownloadBehavior", json!({ "behavior": "deny", "browserContextId": page.browser_context, "eventsEnabled": false })).await?;
+        chrome
+            .send(None, "Browser.setDownloadBehavior", json!({ "behavior": "deny", "browserContextId": page.browser_context, "eventsEnabled": false }))
+            .await?;
         page.send("Page.enable", json!({})).await?;
         page.send("Page.setLifecycleEventsEnabled", json!({ "enabled": true })).await?;
         page.send("Network.enable", json!({})).await?;
@@ -672,7 +696,8 @@ impl Core {
         {
             return Err(HttpError::unavailable("Chrome did not enable the required sandbox and network protections.").into());
         }
-        interruptible(session, async { Ok(chrome.send(None, "Browser.setDownloadBehavior", json!({ "behavior": "deny", "eventsEnabled": false })).await?) }).await?;
+        interruptible(session, async { Ok(chrome.send(None, "Browser.setDownloadBehavior", json!({ "behavior": "deny", "eventsEnabled": false })).await?) })
+            .await?;
         if session.sandboxed && cfg!(target_os = "linux") {
             interruptible(session, goto(page, "chrome://sandbox", Duration::from_secs(8))).await?;
             let adequate = interruptible(session, async {
@@ -794,7 +819,12 @@ impl Core {
         stopping
     }
 
-    async fn enqueue<T: Send + 'static>(self: &Arc<Self>, request: FrameRequest, observe: bool, work: impl FnOnce(Arc<Session>) -> BoxFuture<'static, Op<T>> + Send + 'static) -> HttpResult<T> {
+    async fn enqueue<T: Send + 'static>(
+        self: &Arc<Self>,
+        request: FrameRequest,
+        observe: bool,
+        work: impl FnOnce(Arc<Session>) -> BoxFuture<'static, Op<T>> + Send + 'static,
+    ) -> HttpResult<T> {
         self.consume(&request.request_id)?;
         let session = {
             let inner = self.inner();
@@ -1080,7 +1110,10 @@ async fn attached(session: &Arc<Session>, event: &Event) {
         }
         "iframe" | "worker" => {
             let child = Some(child.as_str());
-            let mut ready = chrome.send(child, "Fetch.enable", json!({ "patterns": [{ "urlPattern": "*", "requestStage": "Request" }], "handleAuthRequests": true })).await.is_ok();
+            let mut ready = chrome
+                .send(child, "Fetch.enable", json!({ "patterns": [{ "urlPattern": "*", "requestStage": "Request" }], "handleAuthRequests": true }))
+                .await
+                .is_ok();
             if kind == "iframe" {
                 ready = ready
                     && chrome.send(child, "Page.enable", json!({})).await.is_ok()
@@ -1119,7 +1152,11 @@ async fn goto(page: &Page, url: &str, timeout: Duration) -> Op<Option<u16>> {
                 "Network.responseReceived" if params["requestId"].as_str() == Some(loader.as_str()) => {
                     status = params["response"]["status"].as_u64().map(|s| s as u16);
                 }
-                "Page.lifecycleEvent" if params["frameId"].as_str() == Some(page.frame.as_str()) && params["loaderId"].as_str() == Some(loader.as_str()) && params["name"] == "DOMContentLoaded" => {
+                "Page.lifecycleEvent"
+                    if params["frameId"].as_str() == Some(page.frame.as_str())
+                        && params["loaderId"].as_str() == Some(loader.as_str())
+                        && params["name"] == "DOMContentLoaded" =>
+                {
                     return Ok(status);
                 }
                 "Page.frameNavigated" if params["frame"].get("parentId").is_none() && params["frame"]["loaderId"].as_str().is_some_and(|id| id != loader) => {
@@ -1155,9 +1192,12 @@ async fn body_text(page: &Page) -> Op<String> {
 }
 
 async fn screenshot(page: &Page) -> Op<Vec<u8>> {
-    let result = tokio::time::timeout(Duration::from_secs(6), page.send("Page.captureScreenshot", json!({ "format": "png", "captureBeyondViewport": false, "fromSurface": true })))
-        .await
-        .map_err(|_| Fault::Other)??;
+    let result = tokio::time::timeout(
+        Duration::from_secs(6),
+        page.send("Page.captureScreenshot", json!({ "format": "png", "captureBeyondViewport": false, "fromSurface": true })),
+    )
+    .await
+    .map_err(|_| Fault::Other)??;
     let data = result["data"].as_str().ok_or(Fault::Other)?;
     base64::engine::general_purpose::STANDARD.decode(data).map_err(|_| Fault::Other)
 }
@@ -1176,7 +1216,8 @@ async fn press(page: &Page, key: &str) -> Op<()> {
     };
     let modifiers = if shift { 8 } else { 0 };
     if shift {
-        page.send("Input.dispatchKeyEvent", json!({ "type": "rawKeyDown", "key": "Shift", "code": "ShiftLeft", "windowsVirtualKeyCode": 16, "modifiers": 8 })).await?;
+        page.send("Input.dispatchKeyEvent", json!({ "type": "rawKeyDown", "key": "Shift", "code": "ShiftLeft", "windowsVirtualKeyCode": 16, "modifiers": 8 }))
+            .await?;
     }
     let (key, code, key_code, text) = key_definition(name);
     let down = if text.is_empty() {
@@ -1185,9 +1226,11 @@ async fn press(page: &Page, key: &str) -> Op<()> {
         json!({ "type": "keyDown", "key": key, "code": code, "windowsVirtualKeyCode": key_code, "modifiers": modifiers, "text": text, "unmodifiedText": text })
     };
     page.send("Input.dispatchKeyEvent", down).await?;
-    page.send("Input.dispatchKeyEvent", json!({ "type": "keyUp", "key": key, "code": code, "windowsVirtualKeyCode": key_code, "modifiers": modifiers })).await?;
+    page.send("Input.dispatchKeyEvent", json!({ "type": "keyUp", "key": key, "code": code, "windowsVirtualKeyCode": key_code, "modifiers": modifiers }))
+        .await?;
     if shift {
-        page.send("Input.dispatchKeyEvent", json!({ "type": "keyUp", "key": "Shift", "code": "ShiftLeft", "windowsVirtualKeyCode": 16, "modifiers": 0 })).await?;
+        page.send("Input.dispatchKeyEvent", json!({ "type": "keyUp", "key": "Shift", "code": "ShiftLeft", "windowsVirtualKeyCode": 16, "modifiers": 0 }))
+            .await?;
     }
     Ok(())
 }

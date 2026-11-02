@@ -94,8 +94,7 @@ impl State {
         if disk.bot_deliveries.iter().any(|d| deliveries.contains(d.id.as_str()) && matches!(d.status, DeliveryStatus::Queued | DeliveryStatus::Running)) {
             return Err(HttpError::conflict(QUEUED_DELIVERIES));
         }
-        let exchanges: HashSet<String> =
-            disk.bot_deliveries.iter().filter(|d| deliveries.contains(d.id.as_str())).map(|d| d.exchange_id.clone()).collect();
+        let exchanges: HashSet<String> = disk.bot_deliveries.iter().filter(|d| deliveries.contains(d.id.as_str())).map(|d| d.exchange_id.clone()).collect();
         let deliveries: HashSet<String> = deliveries.into_iter().map(str::to_owned).collect();
         let conversations: HashSet<String> = conversations.into_iter().map(str::to_owned).collect();
 

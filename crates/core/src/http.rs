@@ -256,17 +256,16 @@ pub fn router(ctx: Ctx) -> Router {
     app = match ctx.web_root.clone() {
         Some(root) => {
             let index = root.join("index.html");
-            let files = tower_http::services::ServeDir::new(&root).append_index_html_on_directories(false).fallback(tower::service_fn(move |request: Request| {
-                let index = index.clone();
-                async move { Ok::<_, std::convert::Infallible>(spa_fallback(request, index).await) }
-            }));
+            let files =
+                tower_http::services::ServeDir::new(&root).append_index_html_on_directories(false).fallback(tower::service_fn(move |request: Request| {
+                    let index = index.clone();
+                    async move { Ok::<_, std::convert::Infallible>(spa_fallback(request, index).await) }
+                }));
             app.fallback_service(files)
         }
         None => app.fallback(|| async { StatusCode::NOT_FOUND }),
     };
-    app.layer(middleware::from_fn_with_state(ctx.clone(), guard))
-        .layer(axum::extract::DefaultBodyLimit::max(MAX_JSON_BYTES))
-        .with_state(ctx)
+    app.layer(middleware::from_fn_with_state(ctx.clone(), guard)).layer(axum::extract::DefaultBodyLimit::max(MAX_JSON_BYTES)).with_state(ctx)
 }
 
 async fn spa_fallback(request: Request, index: PathBuf) -> Response {
@@ -275,7 +274,9 @@ async fn spa_fallback(request: Request, index: PathBuf) -> Response {
     }
     match tokio::fs::read(&index).await {
         Ok(bytes) => ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], bytes).into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, Json(json!({ "error": "File or directory does not exist. Build the frontend before production startup." }))).into_response(),
+        Err(_) => {
+            (StatusCode::NOT_FOUND, Json(json!({ "error": "File or directory does not exist. Build the frontend before production startup." }))).into_response()
+        }
     }
 }
 
@@ -338,7 +339,13 @@ async fn provider_test(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Json
     let requested = input.base_url.as_deref().map(str::trim).filter(|u| !u.is_empty()).unwrap_or(&settings.base_url).to_owned();
     let target = grok_bot_store::base_url(&requested)?;
     let same = target == settings.base_url;
-    let key = input.api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()).map(str::to_owned).unwrap_or_else(|| if same { settings.api_key.clone() } else { String::new() });
+    let key = input
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| if same { settings.api_key.clone() } else { String::new() });
     let model = if same { settings.model.clone() } else { String::new() };
     let result = crate::provider::check_provider(&target, &key, &model).await;
     Ok(reply(StatusCode::OK, to_value(&result), &remote))
@@ -419,7 +426,12 @@ async fn add_skill(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(bot
     Ok(state_reply(&ctx, StatusCode::CREATED, &remote))
 }
 
-async fn update_skill(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path((bot_id, id)): Path<(String, String)>, JsonBody(input): JsonBody<SkillPatch>) -> ApiResult {
+async fn update_skill(
+    State(ctx): State<Ctx>,
+    ConnectInfo(remote): Remote,
+    Path((bot_id, id)): Path<(String, String)>,
+    JsonBody(input): JsonBody<SkillPatch>,
+) -> ApiResult {
     if input.revision < 1 {
         return Err(bad_request("revision: Number must be greater than or equal to 1"));
     }
@@ -434,7 +446,12 @@ struct Revision {
     revision: u64,
 }
 
-async fn delete_skill(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path((bot_id, id)): Path<(String, String)>, JsonBody(input): JsonBody<Revision>) -> ApiResult {
+async fn delete_skill(
+    State(ctx): State<Ctx>,
+    ConnectInfo(remote): Remote,
+    Path((bot_id, id)): Path<(String, String)>,
+    JsonBody(input): JsonBody<Revision>,
+) -> ApiResult {
     if input.revision < 1 {
         return Err(bad_request("revision: Number must be greater than or equal to 1"));
     }
@@ -502,7 +519,12 @@ struct Decision {
     option_id: String,
 }
 
-async fn resolve_permission(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path((id, permission_id)): Path<(String, String)>, JsonBody(input): JsonBody<Decision>) -> ApiResult {
+async fn resolve_permission(
+    State(ctx): State<Ctx>,
+    ConnectInfo(remote): Remote,
+    Path((id, permission_id)): Path<(String, String)>,
+    JsonBody(input): JsonBody<Decision>,
+) -> ApiResult {
     let length = input.option_id.chars().count();
     if !(1..=256).contains(&length) {
         return Err(bad_request("optionId: String must contain between 1 and 256 character(s)"));
@@ -528,14 +550,22 @@ struct PathQuery {
     path: Option<String>,
 }
 
-async fn list_files(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, query: Result<Query<PathQuery>, axum::extract::rejection::QueryRejection>) -> ApiResult {
+async fn list_files(
+    State(ctx): State<Ctx>,
+    ConnectInfo(remote): Remote,
+    query: Result<Query<PathQuery>, axum::extract::rejection::QueryRejection>,
+) -> ApiResult {
     let Query(query) = query.map_err(|_| bad_request("Request: invalid query"))?;
     let files = workspace(&ctx)?;
     let listing = tokio::task::spawn_blocking(move || files.list(query.path.as_deref().unwrap_or(""))).await.map_err(|_| internal())??;
     Ok(reply(StatusCode::OK, to_value(&listing), &remote))
 }
 
-async fn read_file(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, query: Result<Query<PathQuery>, axum::extract::rejection::QueryRejection>) -> ApiResult {
+async fn read_file(
+    State(ctx): State<Ctx>,
+    ConnectInfo(remote): Remote,
+    query: Result<Query<PathQuery>, axum::extract::rejection::QueryRejection>,
+) -> ApiResult {
     let Query(query) = query.map_err(|_| bad_request("Request: invalid query"))?;
     let path = query.path.ok_or_else(|| bad_request("path: Required"))?;
     let files = workspace(&ctx)?;
@@ -564,7 +594,9 @@ async fn save_file(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, JsonBody
         .run(async move {
             context.store.read(|s| s.assert_idle())?;
             let files = workspace(&context)?;
-            tokio::task::spawn_blocking(move || files.save(&input.path, &input.content, &input.hash)).await.map_err(|_| HttpError::new(500, "The operation failed. Check that the workspace and data directory are accessible."))?
+            tokio::task::spawn_blocking(move || files.save(&input.path, &input.content, &input.hash))
+                .await
+                .map_err(|_| HttpError::new(500, "The operation failed. Check that the workspace and data directory are accessible."))?
         })
         .await?;
     Ok(reply(StatusCode::OK, to_value(&document), &remote))

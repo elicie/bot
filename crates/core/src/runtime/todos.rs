@@ -7,10 +7,7 @@ use grok_bot_model::{TodoItem, TodoStatus};
 use serde_json::{Value, json};
 
 fn item(value: &Value) -> Option<TodoItem> {
-    Some(TodoItem {
-        content: value.get("content")?.as_str()?.to_owned(),
-        status: serde_json::from_value::<TodoStatus>(value.get("status")?.clone()).ok()?,
-    })
+    Some(TodoItem { content: value.get("content")?.as_str()?.to_owned(), status: serde_json::from_value::<TodoStatus>(value.get("status")?.clone()).ok()? })
 }
 
 fn signature(todo: &TodoItem) -> String {
@@ -30,10 +27,7 @@ impl TodoTracker {
         let input = &update["rawInput"];
         if input["variant"] == "TodoWrite"
             && let Some(todos) = input["todos"].as_array()
-            && let Some(ids) = todos
-                .iter()
-                .map(|todo| todo.get("id")?.as_str().map(str::to_owned))
-                .collect::<Option<Vec<_>>>()
+            && let Some(ids) = todos.iter().map(|todo| todo.get("id")?.as_str().map(str::to_owned)).collect::<Option<Vec<_>>>()
         {
             self.calls.insert(call.to_owned(), ids);
         }
@@ -45,13 +39,7 @@ impl TodoTracker {
         let state = success["state"]["todos"].as_object()?;
         let ids = self.calls.get(call)?;
         let ordered = success["todos"].as_array()?.iter().map(item).collect::<Option<Vec<_>>>()?;
-        let active = self
-            .active
-            .iter()
-            .chain(ids)
-            .filter(|id| state.contains_key(*id))
-            .cloned()
-            .collect::<HashSet<_>>();
+        let active = self.active.iter().chain(ids).filter(|id| state.contains_key(*id)).cloned().collect::<HashSet<_>>();
         let mut counts = HashMap::<String, usize>::new();
         for id in &active {
             *counts.entry(signature(&item(state.get(id)?)?)).or_default() += 1;
@@ -98,13 +86,7 @@ mod tests {
     }
 
     fn expected(todos: &[(&str, TodoStatus)]) -> Vec<TodoItem> {
-        todos
-            .iter()
-            .map(|(content, status)| TodoItem {
-                content: (*content).into(),
-                status: *status,
-            })
-            .collect()
+        todos.iter().map(|(content, status)| TodoItem { content: (*content).into(), status: *status }).collect()
     }
 
     #[test]
@@ -121,10 +103,7 @@ mod tests {
             }),
             vec![old, first, second],
         ));
-        assert_eq!(
-            result,
-            Some(expected(&[("First", TodoStatus::InProgress), ("Second", TodoStatus::Pending)]))
-        );
+        assert_eq!(result, Some(expected(&[("First", TodoStatus::InProgress), ("Second", TodoStatus::Pending)])));
         assert!(tracker.native);
     }
 
@@ -133,12 +112,7 @@ mod tests {
         let mut tracker = TodoTracker::default();
         let a = todo("A", "pending");
         let b = todo("B", "pending");
-        tracker.project(&update(
-            "first",
-            input(&["a", "b"]),
-            json!({"a": a, "b": b}),
-            vec![a.clone(), b.clone()],
-        ));
+        tracker.project(&update("first", input(&["a", "b"]), json!({"a": a, "b": b}), vec![a.clone(), b.clone()]));
         let partial = json!({"variant": "TodoWrite", "merge": false, "todos": [{"id": "b", "status": "completed"}]});
         assert_eq!(tracker.project(&json!({"toolCallId": "partial", "rawInput": partial})), None);
         let done = todo("B", "completed");
@@ -151,37 +125,20 @@ mod tests {
         let mut tracker = TodoTracker::default();
         let old = todo("Prior task intentionally resumed", "in_progress");
         let new = todo("New", "pending");
-        tracker.project(&update(
-            "first",
-            input(&["new"]),
-            json!({"old": old, "new": new}),
-            vec![old.clone(), new.clone()],
-        ));
+        tracker.project(&update("first", input(&["new"]), json!({"old": old, "new": new}), vec![old.clone(), new.clone()]));
         let result = tracker.project(&update("resume", input(&["old"]), json!({"old": old, "new": new}), vec![old, new]));
-        assert_eq!(
-            result,
-            Some(expected(&[
-                ("Prior task intentionally resumed", TodoStatus::InProgress),
-                ("New", TodoStatus::Pending)
-            ]))
-        );
+        assert_eq!(result, Some(expected(&[("Prior task intentionally resumed", TodoStatus::InProgress), ("New", TodoStatus::Pending)])));
     }
 
     #[test]
     fn failed_calls_do_not_admit_ids_or_enter_native_mode() {
         let mut tracker = TodoTracker::default();
-        let failed =
-            json!({"toolCallId": "failed", "rawInput": input(&["rejected"]), "rawOutput": {"type": "Todo", "DuplicateId": "duplicate"}});
+        let failed = json!({"toolCallId": "failed", "rawInput": input(&["rejected"]), "rawOutput": {"type": "Todo", "DuplicateId": "duplicate"}});
         assert_eq!(tracker.project(&failed), None);
         assert!(!tracker.native);
         let old = todo("Rejected ID already persisted", "pending");
         let new = todo("Accepted", "pending");
-        let result = tracker.project(&update(
-            "good",
-            input(&["accepted"]),
-            json!({"rejected": old, "accepted": new}),
-            vec![old, new],
-        ));
+        let result = tracker.project(&update("good", input(&["accepted"]), json!({"rejected": old, "accepted": new}), vec![old, new]));
         assert_eq!(result, Some(expected(&[("Accepted", TodoStatus::Pending)])));
     }
 
@@ -211,10 +168,7 @@ mod tests {
             }),
             vec![same.clone(), same.clone(), same],
         ));
-        assert_eq!(
-            result,
-            Some(expected(&[("Same task", TodoStatus::Pending), ("Same task", TodoStatus::Pending)]))
-        );
+        assert_eq!(result, Some(expected(&[("Same task", TodoStatus::Pending), ("Same task", TodoStatus::Pending)])));
     }
 
     #[test]
@@ -225,18 +179,12 @@ mod tests {
         assert_eq!(tracker.project(&missing), None);
         assert!(!tracker.native);
         assert!(tracker.active.is_empty());
-        let unrelated =
-            json!({"toolCallId": "unrelated", "rawOutput": {"type": "MCP", "TodosUpdated": {"todos": [], "state": {"todos": {}}}}});
+        let unrelated = json!({"toolCallId": "unrelated", "rawOutput": {"type": "MCP", "TodosUpdated": {"todos": [], "state": {"todos": {}}}}});
         assert_eq!(tracker.project(&unrelated), None);
         assert!(!tracker.native);
         let no_input = update("unknown", Value::Null, json!({}), vec![]);
         assert_eq!(tracker.project(&no_input), None);
-        let bad = update(
-            "bad",
-            input(&["bad"]),
-            json!({"bad": {"content": "Bad", "status": "other"}}),
-            vec![good],
-        );
+        let bad = update("bad", input(&["bad"]), json!({"bad": {"content": "Bad", "status": "other"}}), vec![good]);
         assert_eq!(tracker.project(&bad), None);
         assert!(!tracker.native);
     }

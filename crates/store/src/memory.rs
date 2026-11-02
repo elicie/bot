@@ -292,7 +292,8 @@ impl State {
             self.assert_idle()?;
         }
         let index = self.bot_index(bot_id)?;
-        let memory = self.memories(bot_id)?.iter().find(|memory| memory.id == id).cloned().ok_or_else(|| HttpError::not_found("Memory does not exist for this bot."))?;
+        let memory =
+            self.memories(bot_id)?.iter().find(|memory| memory.id == id).cloned().ok_or_else(|| HttpError::not_found("Memory does not exist for this bot."))?;
         let bot = &mut self.disk_mut().bots[index];
         if let Some(memories) = bot.memories.as_mut() {
             memories.retain(|memory| memory.id != id);

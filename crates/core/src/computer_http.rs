@@ -29,7 +29,9 @@ pub(crate) fn routes() -> Router<Ctx> {
 
 fn local(remote: &std::net::SocketAddr) -> ApiResult<()> {
     if !is_local(remote) {
-        return Err(ApiError(HttpError::forbidden("Managed browser control requires a local loopback connection. This network server has no user authentication.")));
+        return Err(ApiError(HttpError::forbidden(
+            "Managed browser control requires a local loopback connection. This network server has no user authentication.",
+        )));
     }
     Ok(())
 }
@@ -59,7 +61,11 @@ fn json_response<T: serde::Serialize>(value: &T) -> Response {
     (StatusCode::OK, axum::Json(to_value(value))).into_response()
 }
 
-async fn status(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, input: Result<Query<HashMap<String, String>>, axum::extract::rejection::QueryRejection>) -> ApiResult {
+async fn status(
+    State(ctx): State<Ctx>,
+    ConnectInfo(remote): Remote,
+    input: Result<Query<HashMap<String, String>>, axum::extract::rejection::QueryRejection>,
+) -> ApiResult {
     local(&remote)?;
     let input = query(input, &["owner"])?;
     Ok(json_response(&computer(&ctx)?.status(&input["owner"])?))
@@ -112,7 +118,11 @@ async fn stop(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, body: Result<
     Ok(json_response(&computer(&ctx)?.stop(Some(&input.owner_id)).await?))
 }
 
-async fn preview(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, input: Result<Query<HashMap<String, String>>, axum::extract::rejection::QueryRejection>) -> ApiResult {
+async fn preview(
+    State(ctx): State<Ctx>,
+    ConnectInfo(remote): Remote,
+    input: Result<Query<HashMap<String, String>>, axum::extract::rejection::QueryRejection>,
+) -> ApiResult {
     local(&remote)?;
     let input = query(input, &["owner", "epoch", "frame"])?;
     let png = computer(&ctx)?.preview(&input["owner"], &input["epoch"], &input["frame"])?;

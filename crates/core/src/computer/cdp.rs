@@ -189,7 +189,8 @@ pub(crate) fn launch(executable: &Path, arguments: &[String], home: &Path) -> st
     drop((child_read, child_write));
     let writer = pipe::Sender::from_owned_fd(parent_write)?;
     let mut reader = pipe::Receiver::from_owned_fd(parent_read)?;
-    let connection = Arc::new(Connection { writer: tokio::sync::Mutex::new(writer), pending: Mutex::new(HashMap::new()), next: AtomicU64::new(1), closed: false.into() });
+    let connection =
+        Arc::new(Connection { writer: tokio::sync::Mutex::new(writer), pending: Mutex::new(HashMap::new()), next: AtomicU64::new(1), closed: false.into() });
     let (events, receiver) = mpsc::unbounded_channel();
     let reading = Arc::clone(&connection);
     let task = tokio::spawn(async move {

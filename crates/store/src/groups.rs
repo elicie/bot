@@ -96,7 +96,10 @@ pub(crate) fn schema_valid(disk: &DiskState) -> bool {
             conversation.group_id.as_deref().is_none_or(|id| is_uuid(id) && id == conversation.bot_id)
                 && conversation.thread.as_ref().is_none_or(|link| is_uuid(&link.parent_conversation_id) && is_uuid(&link.parent_message_id))
                 && conversation.group_round.as_ref().is_none_or(|round| {
-                    is_uuid(&round.id) && is_uuid(&round.user_message_id) && round.pending_bot_ids.iter().all(|id| is_uuid(id)) && is_timestamp(&round.created_at)
+                    is_uuid(&round.id)
+                        && is_uuid(&round.user_message_id)
+                        && round.pending_bot_ids.iter().all(|id| is_uuid(id))
+                        && is_timestamp(&round.created_at)
                 })
                 && conversation.member_sessions.iter().flatten().all(|session| is_uuid(&session.bot_id))
                 && conversation.messages.iter().all(|message| message.speaker_bot_id.as_deref().is_none_or(is_uuid))
@@ -246,19 +249,27 @@ impl State {
         Ok(())
     }
 
-    /// Delete a group with its conversations and their threads. Member bots are kept.
-    pub fn delete_group(&mut self, id: &str) -> HttpResult<()> {
+    /// Delete a group with its conversations and their threads. Member bots are kept. Returns the
+    /// IDs of the removed conversations (threads included) so the caller can remove their files
+    /// outside `state.json` after the commit.
+    pub fn delete_group(&mut self, id: &str) -> HttpResult<Vec<String>> {
         self.assert_idle()?;
         self.group(id)?;
         self.assert_group_quiet(id)?;
         let disk = self.disk_mut();
         disk.groups.retain(|group| group.id != id);
-        let removed: HashSet<String> =
+        let group_conversations: HashSet<String> =
             disk.conversations.iter().filter(|conversation| conversation.group_id.as_deref() == Some(id)).map(|conversation| conversation.id.clone()).collect();
+        let mut removed = Vec::new();
         disk.conversations.retain(|conversation| {
-            !removed.contains(&conversation.id) && conversation.thread.as_ref().is_none_or(|link| !removed.contains(&link.parent_conversation_id))
+            let keep = !group_conversations.contains(&conversation.id)
+                && conversation.thread.as_ref().is_none_or(|link| !group_conversations.contains(&link.parent_conversation_id));
+            if !keep {
+                removed.push(conversation.id.clone());
+            }
+            keep
         });
-        Ok(())
+        Ok(removed)
     }
 
     /// Remove a bot from every group (for bot deletion). Groups keep their conversations; a group

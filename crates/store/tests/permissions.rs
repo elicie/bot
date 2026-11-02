@@ -85,7 +85,13 @@ async fn rule_count_is_bounded_and_bot_rules_can_be_removed() {
     let f = Fixture::new().await;
     let mut bots = Vec::new();
     for index in 0..20 {
-        bots.push(f.store.mutate(move |s| s.add_bot(BotInput { name: format!("Bot {index}"), color: None, instructions: None, shape: None, pinned: None })).await.unwrap().id);
+        bots.push(
+            f.store
+                .mutate(move |s| s.add_bot(BotInput { name: format!("Bot {index}"), color: None, instructions: None, shape: None, pinned: None }))
+                .await
+                .unwrap()
+                .id,
+        );
     }
     for bot in &bots {
         // Five categories per bot fill the 100-rule limit exactly.
@@ -98,12 +104,13 @@ async fn rule_count_is_bounded_and_bot_rules_can_be_removed() {
     let full = f.store.mutate(|s| s.add_permission_rule(rule(PermissionCategory::FileWrite, PermissionAction::Ask, None), true)).await.unwrap_err();
     assert_eq!(full.status, 409);
     let first = bots[0].clone();
-    f.store.mutate(move |s| {
-        s.remove_permission_rules_for_bot(&first);
-        Ok(())
-    })
-    .await
-    .unwrap();
+    f.store
+        .mutate(move |s| {
+            s.remove_permission_rules_for_bot(&first);
+            Ok(())
+        })
+        .await
+        .unwrap();
     assert_eq!(f.store.read(|s| s.permission_rules().len()), MAX_PERMISSION_RULES - 5);
 }
 
@@ -113,7 +120,8 @@ async fn invalid_persisted_rules_are_rejected() {
     f.store.mutate(|s| s.add_permission_rule(rule(PermissionCategory::FileWrite, PermissionAction::Allow, None), true)).await.unwrap();
     let valid = f.disk_json();
     let mut duplicate_scope = valid.clone();
-    let copy = json!({ "id": new_id(), "category": "file_write", "action": "ask", "createdAt": "2026-01-01T00:00:00.000Z", "updatedAt": "2026-01-01T00:00:00.000Z" });
+    let copy =
+        json!({ "id": new_id(), "category": "file_write", "action": "ask", "createdAt": "2026-01-01T00:00:00.000Z", "updatedAt": "2026-01-01T00:00:00.000Z" });
     duplicate_scope["permissionRules"].as_array_mut().unwrap().push(copy);
     let bytes = write_json(&f.state_file(), &duplicate_scope);
     assert_load_rejected(&f, &bytes).await;

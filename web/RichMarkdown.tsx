@@ -12,6 +12,7 @@
 
 import { useEffect, useState, type ReactNode } from 'react';
 import Markdown, { defaultUrlTransform, type Components, type Options, type UrlTransform } from 'react-markdown';
+import remarkCjkFriendly from 'remark-cjk-friendly';
 import { DiagramPreview, PreviewTrigger, PreviewableImage } from './Previews';
 import { VisualizationCard } from './Visualization';
 import { visualizationLanguages } from './visualization-document';
@@ -153,7 +154,14 @@ const components: Components = {
   },
 };
 
+/**
+ * CommonMark will not close `**…**` when punctuation sits before the closing delimiter and a
+ * letter follows it (`**6월(25)**입니다`), which is routine in Korean, Japanese, and Chinese
+ * text written without spaces between words. This plugin relaxes that rule for CJK neighbours only.
+ */
+const cjk: NonNullable<Options['remarkPlugins']> = [remarkCjkFriendly];
+
 export function RichMarkdown({ text }: { text: string }): ReactNode {
   const math = useMathPlugins(text);
-  return <Markdown skipHtml remarkPlugins={math?.remark} rehypePlugins={math?.rehype} components={components} urlTransform={urlTransform}>{text}</Markdown>;
+  return <Markdown skipHtml remarkPlugins={math ? [...cjk, ...math.remark] : cjk} rehypePlugins={math?.rehype} components={components} urlTransform={urlTransform}>{text}</Markdown>;
 }

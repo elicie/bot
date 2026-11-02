@@ -163,7 +163,8 @@ async fn workspace_files(root: &Path, engine: &Path) {
     let stale = json!({ "path": "notes.txt", "content": "stale write", "hash": hash });
     assert_eq!(app.api("PUT", "/api/file", Some(stale)).await.0, 409);
     for filename in ["../outside.txt", "/etc/passwd", "nested/../../outside.txt", "parent-link/outside.txt", "linked.txt", "hard.txt", "nested/../notes.txt"] {
-        let encoded: String = filename.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+        let encoded: String =
+            filename.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
         assert_eq!(app.api("GET", &format!("/api/file?path={encoded}"), None).await.0, 403, "{filename}");
         assert_eq!(app.api("PUT", "/api/file", Some(json!({ "path": filename, "content": "blocked", "hash": "" }))).await.0, 403, "{filename}");
     }
@@ -233,7 +234,8 @@ async fn invalid_state_and_interrupted_runs(root: &Path, engine: &Path) {
     assert!(run.error.unwrap().contains("server stopped"));
     restarted.close().await;
     std::fs::write(data.join("state.json"), "{invalid").unwrap();
-    let error = TestApp::try_start(AppOptions { engine_root: engine, data_dir: data.clone(), allowed_hosts: vec![] }).await.err().expect("invalid state rejected");
+    let error =
+        TestApp::try_start(AppOptions { engine_root: engine, data_dir: data.clone(), allowed_hosts: vec![] }).await.err().expect("invalid state rejected");
     assert!(format!("{error:#}").contains("existing state.json was not replaced"), "{error:#}");
     assert_eq!(std::fs::read_to_string(data.join("state.json")).unwrap(), "{invalid");
 }

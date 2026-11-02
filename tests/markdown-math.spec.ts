@@ -8,6 +8,8 @@ const snapshot = (page: Page): Promise<AppState> => page.evaluate(async () => (a
 const answer = [
   '질량-에너지 등가: $E=mc^2$ 입니다.',
   '',
+  '정답은 **6월(25)**입니다. 출처는 **“백서”**이고 **굵게**만 써도 됩니다.',
+  '',
   '$$',
   '\\int_0^1 x\\,dx = \\frac{1}{2}',
   '$$',
@@ -65,6 +67,10 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       await expect(message.locator('.katex annotation').first()).toHaveText('E=mc^2');
       await expect(message.locator('.katex-error').first()).toContainText('\\frac{1}{');
       await expect(message.locator('a[href^="javascript"]')).toHaveCount(0);
+
+      // Bold closes before Hangul even after punctuation (CommonMark alone leaves the asterisks).
+      await expect(message.locator('strong')).toHaveText(['6월(25)', '“백서”', '굵게']);
+      await expect(message.getByText(/\*\*/)).toHaveCount(0);
 
       // Mermaid: the valid diagram becomes an image; the invalid one falls back to code.
       const diagram = message.getByRole('img', { name: /^Mermaid 다이어그램/ });

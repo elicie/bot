@@ -4,13 +4,7 @@ use super::common::TestApp;
 use super::{Duration, Instant, Path, Provider, Reply, Value, json, start_provider, text, tool_names, tool_outcomes};
 
 fn conversation(state: &Value, id: &str) -> Value {
-    state["conversations"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|c| c["id"] == id)
-        .unwrap()
-        .clone()
+    state["conversations"].as_array().unwrap().iter().find(|c| c["id"] == id).unwrap().clone()
 }
 
 async fn state(app: &TestApp, id: &str) -> Value {
@@ -52,10 +46,7 @@ pub(super) async fn checklist_updates(base: &Path, engine: &Path) {
     let (status, created) = app.api("POST", "/api/conversations", Some(json!({"botId": bot}))).await;
     assert_eq!(status, 201);
     let id = created["conversation"]["id"].as_str().unwrap().to_owned();
-    assert!(
-        created["conversation"]["run"].get("todos").is_none(),
-        "legacy/idle state omits todos"
-    );
+    assert!(created["conversation"]["run"].get("todos").is_none(), "legacy/idle state omits todos");
 
     let initial = json!([
         {"content": "Inspect [redacted]", "status": "in_progress"},
@@ -105,12 +96,7 @@ pub(super) async fn checklist_updates(base: &Path, engine: &Path) {
         Reply::Hold,
     ]);
     let route = format!("/api/conversations/{id}/messages");
-    assert_eq!(
-        app.api("POST", &route, Some(json!({"text": "Track this multi-step task."})))
-            .await
-            .0,
-        202
-    );
+    assert_eq!(app.api("POST", &route, Some(json!({"text": "Track this multi-step task."}))).await.0, 202);
     let live = wait(&app, &id, |c| c["run"]["todos"] == latest).await;
     assert_eq!(live["run"]["status"], "running");
     assert!(live["run"].get("permission").is_none(), "todo_write requires no browser approval");
@@ -119,15 +105,9 @@ pub(super) async fn checklist_updates(base: &Path, engine: &Path) {
     while let Ok(snapshot) = updates.try_recv() {
         snapshots.push(serde_json::to_value(&*snapshot).unwrap());
     }
-    let checklists = snapshots
-        .iter()
-        .map(|s| conversation(s, &id)["run"]["todos"].clone())
-        .collect::<Vec<_>>();
+    let checklists = snapshots.iter().map(|s| conversation(s, &id)["run"]["todos"].clone()).collect::<Vec<_>>();
     assert!(checklists.contains(&initial), "initial plan was broadcast: {checklists:?}");
-    assert!(
-        checklists.contains(&merged),
-        "partial and repeated writes preserve the merged list: {checklists:?}"
-    );
+    assert!(checklists.contains(&merged), "partial and repeated writes preserve the merged list: {checklists:?}");
     assert!(checklists.contains(&json!([])), "empty plans clear the list");
     for snapshot in &snapshots {
         let wire = snapshot.to_string();
@@ -136,20 +116,13 @@ pub(super) async fn checklist_updates(base: &Path, engine: &Path) {
         let checklist = current["run"]["todos"].to_string();
         assert!(!checklist.contains("Rejected first"));
         assert!(!checklist.contains("Rejected second"));
-        assert!(
-            current["run"]["todos"].as_array().is_none_or(|todos| todos.len() <= 3),
-            "repeated plans never append lists"
-        );
+        assert!(current["run"]["todos"].as_array().is_none_or(|todos| todos.len() <= 3), "repeated plans never append lists");
         assert!(current["run"].get("permission").is_none());
     }
     for request in provider.inference() {
         assert_eq!(tool_names(&request), ["search_tool", "todo_write", "use_tool"]);
     }
-    assert!(
-        tool_outcomes(&provider.inference())
-            .iter()
-            .any(|output| output.contains("Duplicate todo ID"))
-    );
+    assert!(tool_outcomes(&provider.inference()).iter().any(|output| output.contains("Duplicate todo ID")));
     provider.release.notify_one();
     let completed = wait(&app, &id, |c| c["run"]["status"] == "completed").await;
     assert_eq!(completed["run"]["todos"], latest);
@@ -172,19 +145,10 @@ pub(super) async fn checklist_updates(base: &Path, engine: &Path) {
         ),
         text("This task is not finished yet."),
     ]);
-    assert_eq!(
-        app.api("POST", &route, Some(json!({"text": "Start a different task."}))).await.0,
-        202
-    );
+    assert_eq!(app.api("POST", &route, Some(json!({"text": "Start a different task."}))).await.0, 202);
     let next = wait(&app, &id, |c| c["run"]["status"] == "completed").await;
-    assert_eq!(
-        next["sessionId"], completed["sessionId"],
-        "new-turn checklist reset keeps conversation context"
-    );
-    assert_eq!(
-        next["run"]["todos"], unfinished,
-        "transient turn-end cleanup must not falsely complete work"
-    );
+    assert_eq!(next["sessionId"], completed["sessionId"], "new-turn checklist reset keeps conversation context");
+    assert_eq!(next["run"]["todos"], unfinished, "transient turn-end cleanup must not falsely complete work");
     while let Ok(snapshot) = next_updates.try_recv() {
         let snapshot = serde_json::to_value(&*snapshot).unwrap();
         let current = conversation(&snapshot, &id);
@@ -197,11 +161,7 @@ pub(super) async fn checklist_updates(base: &Path, engine: &Path) {
     app.close().await;
 
     let app = TestApp::start(engine, data).await;
-    assert_eq!(
-        state(&app, &id).await["run"]["todos"],
-        unfinished,
-        "server restart retains the model's last actual checklist status"
-    );
+    assert_eq!(state(&app, &id).await["run"]["todos"], unfinished, "server restart retains the model's last actual checklist status");
     // A cold engine must also isolate the new turn from persisted native todo resources.
     let cold = json!([{"content": "Only the cold-restart task", "status": "pending"}]);
     provider.plan(vec![
@@ -213,52 +173,22 @@ pub(super) async fn checklist_updates(base: &Path, engine: &Path) {
         ),
         text("The new checklist is ready."),
     ]);
-    assert_eq!(
-        app.api("POST", &route, Some(json!({"text": "Track a task after server restart."})))
-            .await
-            .0,
-        202
-    );
+    assert_eq!(app.api("POST", &route, Some(json!({"text": "Track a task after server restart."}))).await.0, 202);
     let cold_turn = wait(&app, &id, |c| c["run"]["status"] == "completed").await;
-    assert_eq!(
-        cold_turn["run"]["todos"], cold,
-        "persisted previous-turn IDs must not leak into a cold-engine checklist"
-    );
+    assert_eq!(cold_turn["run"]["todos"], cold, "persisted previous-turn IDs must not leak into a cold-engine checklist");
 
     let before = provider.inference_len();
     provider.plan(vec![Reply::Hold]);
-    assert_eq!(
-        app.api("POST", &route, Some(json!({"text": "A new turn without a checklist."})))
-            .await
-            .0,
-        202
-    );
+    assert_eq!(app.api("POST", &route, Some(json!({"text": "A new turn without a checklist."}))).await.0, 202);
     wait(&app, &id, |c| c["run"]["status"] == "running" && provider.inference_len() > before).await;
-    assert!(
-        state(&app, &id).await["run"].get("todos").is_none(),
-        "loaded session plans do not leak into a new turn"
-    );
-    assert_eq!(
-        app.api("POST", &format!("/api/conversations/{id}/cancel"), Some(json!({}))).await.0,
-        200
-    );
+    assert!(state(&app, &id).await["run"].get("todos").is_none(), "loaded session plans do not leak into a new turn");
+    assert_eq!(app.api("POST", &format!("/api/conversations/{id}/cancel"), Some(json!({}))).await.0, 200);
     provider.release.notify_one();
     assert!(state(&app, &id).await["run"].get("todos").is_none());
 
-    provider.plan(vec![
-        Reply::Tool("todo_write", json!({"merge": false, "todos": []})),
-        text("Cleared."),
-    ]);
-    assert_eq!(
-        app.api("POST", &route, Some(json!({"text": "Explicitly clear the checklist."})))
-            .await
-            .0,
-        202
-    );
-    assert_eq!(
-        wait(&app, &id, |c| c["run"]["status"] == "completed").await["run"]["todos"],
-        json!([])
-    );
+    provider.plan(vec![Reply::Tool("todo_write", json!({"merge": false, "todos": []})), text("Cleared.")]);
+    assert_eq!(app.api("POST", &route, Some(json!({"text": "Explicitly clear the checklist."}))).await.0, 202);
+    assert_eq!(wait(&app, &id, |c| c["run"]["status"] == "completed").await["run"]["todos"], json!([]));
     app.close().await;
     eprintln!("[runtime] todos HTTP projection, reload, and restart ok");
 }

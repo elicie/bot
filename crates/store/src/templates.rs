@@ -7,8 +7,7 @@
 //! rejects unknown fields, and always assigns fresh IDs. Exported text is redacted of the API key.
 
 use grok_bot_model::{
-    BOT_TEMPLATE_FORMAT, BOT_TEMPLATE_VERSION, Bot, BotTemplate, HttpError, HttpResult, SkillInput, TemplateBot, TemplateMemory, TemplateSkill, iso,
-    new_id,
+    BOT_TEMPLATE_FORMAT, BOT_TEMPLATE_VERSION, Bot, BotTemplate, HttpError, HttpResult, SkillInput, TemplateBot, TemplateMemory, TemplateSkill, iso, new_id,
 };
 
 use crate::memory::template_memories;
@@ -18,7 +17,12 @@ use crate::{State, bot_field_issues};
 
 /// Prefix every `field: message` issue of `error` with `path`.
 fn nested(error: HttpError, path: &str) -> HttpError {
-    let message = error.message.split("; ").map(|issue| if issue.contains(": ") { format!("{path}.{issue}") } else { format!("{path}: {issue}") }).collect::<Vec<_>>().join("; ");
+    let message = error
+        .message
+        .split("; ")
+        .map(|issue| if issue.contains(": ") { format!("{path}.{issue}") } else { format!("{path}: {issue}") })
+        .collect::<Vec<_>>()
+        .join("; ");
     HttpError::new(error.status, message)
 }
 
@@ -53,7 +57,11 @@ impl State {
                 enabled: skill.enabled,
             })
             .collect();
-        let memories = if include_memories { bot.memories.iter().flatten().map(|memory| TemplateMemory { text: self.redact(&memory.text) }).collect() } else { Vec::new() };
+        let memories = if include_memories {
+            bot.memories.iter().flatten().map(|memory| TemplateMemory { text: self.redact(&memory.text) }).collect()
+        } else {
+            Vec::new()
+        };
         Ok(BotTemplate {
             format: BOT_TEMPLATE_FORMAT.into(),
             version: BOT_TEMPLATE_VERSION,

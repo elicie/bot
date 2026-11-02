@@ -12,9 +12,7 @@
 //! loopback clients. The server has no login, so a LAN client must not be able to remove the
 //! approvals that protect the server computer's files.
 
-use grok_bot_model::{
-    HttpError, HttpResult, PermissionAction, PermissionCategory, PermissionRule, PermissionRuleInput, PermissionRulePatch, iso, new_id,
-};
+use grok_bot_model::{HttpError, HttpResult, PermissionAction, PermissionCategory, PermissionRule, PermissionRuleInput, PermissionRulePatch, iso, new_id};
 
 use crate::State;
 use crate::validate::{is_timestamp, is_uuid};

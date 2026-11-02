@@ -18,18 +18,15 @@ use axum::routing::post;
 use axum::{Json, Router};
 use grok_bot_core::queue::CommandQueue;
 use grok_bot_core::runtime::{Runtime, RuntimeOptions};
-use grok_bot_model::{
-    AppState, BotInput, Conversation, DeliveryStatus, Role, RunStatus, SettingsInput, SkillInput,
-    SkillPatch, system_clock,
-};
+use grok_bot_model::{AppState, BotInput, Conversation, DeliveryStatus, Role, RunStatus, SettingsInput, SkillInput, SkillPatch, system_clock};
 use grok_bot_store::Store;
 use serde_json::{Value, json};
 
+#[path = "runtime_bot_data/mod.rs"]
+mod bot_data;
 mod common;
 #[path = "runtime_todos/mod.rs"]
 mod todos;
-#[path = "runtime_bot_data/mod.rs"]
-mod bot_data;
 use bot_data::bot_memory_and_knowledge;
 #[path = "runtime_custom_mcp/mod.rs"]
 mod custom_mcp;
@@ -61,10 +58,7 @@ fn discover(query: &str) -> Reply {
 }
 
 fn use_tool(name: &str, input: Value) -> Reply {
-    Reply::Tool(
-        "use_tool",
-        json!({"tool_name": format!("workspace__{name}"), "tool_input": input}),
-    )
+    Reply::Tool("use_tool", json!({"tool_name": format!("workspace__{name}"), "tool_input": input}))
 }
 
 #[derive(Default)]
@@ -104,11 +98,7 @@ impl Provider {
 fn content_text(content: &Value) -> String {
     match content {
         Value::String(text) => text.clone(),
-        Value::Array(parts) => parts
-            .iter()
-            .filter_map(|p| p.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
+        Value::Array(parts) => parts.iter().filter_map(|p| p.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join("\n"),
         _ => String::new(),
     }
 }
@@ -118,33 +108,18 @@ fn messages(request: &Value) -> Vec<Value> {
 }
 
 fn tool_names(request: &Value) -> Vec<String> {
-    let mut names: Vec<String> = request["tools"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|t| t["function"]["name"].as_str().map(str::to_owned))
-        .collect();
+    let mut names: Vec<String> = request["tools"].as_array().into_iter().flatten().filter_map(|t| t["function"]["name"].as_str().map(str::to_owned)).collect();
     names.sort();
     names
 }
 
 /// Tool result texts the engine returned to the model in `requests`.
 fn tool_outcomes(requests: &[Value]) -> Vec<String> {
-    requests
-        .iter()
-        .flat_map(messages)
-        .filter(|m| m["role"] == "tool")
-        .map(|m| content_text(&m["content"]))
-        .collect()
+    requests.iter().flat_map(messages).filter(|m| m["role"] == "tool").map(|m| content_text(&m["content"])).collect()
 }
 
 fn user_texts(requests: &[Value]) -> Vec<String> {
-    requests
-        .iter()
-        .flat_map(messages)
-        .filter(|m| m["role"] == "user")
-        .map(|m| content_text(&m["content"]))
-        .collect()
+    requests.iter().flat_map(messages).filter(|m| m["role"] == "user").map(|m| content_text(&m["content"])).collect()
 }
 
 /// The latest prompt the engine sent for this turn (it wraps user text in `<user_query>` and adds
@@ -157,18 +132,14 @@ fn turn_prompt(request: &Value) -> String {
         .map(|m| content_text(&m["content"]))
         .find(|text| text.contains("<user_query>"))
         .unwrap_or_default();
-    let start = query
-        .find("<user_query>\n")
-        .map_or(0, |index| index + "<user_query>\n".len());
+    let start = query.find("<user_query>\n").map_or(0, |index| index + "<user_query>\n".len());
     let end = query.rfind("\n</user_query>").unwrap_or(query.len());
     query[start..end.max(start)].to_owned()
 }
 
 fn scripted_file_reply(request: &Value) -> Reply {
     let messages = messages(request);
-    let latest = messages
-        .iter()
-        .rposition(|m| m["role"] == "user" && m["content"].to_string().contains("fixture"));
+    let latest = messages.iter().rposition(|m| m["role"] == "user" && m["content"].to_string().contains("fixture"));
     let Some(latest) = latest else {
         return text("로컬 OpenAI 호환 서버 응답");
     };
@@ -182,15 +153,8 @@ fn scripted_file_reply(request: &Value) -> Reply {
         return discover("workspace write_file");
     }
     if !calls.iter().any(|n| n == "use_tool") {
-        let content = if user.contains("denied") {
-            "denied edit must never reach disk\n"
-        } else {
-            "AI approved local file content\n"
-        };
-        return use_tool(
-            "write_file",
-            json!({"path": "notes.txt", "content": content}),
-        );
+        let content = if user.contains("denied") { "denied edit must never reach disk\n" } else { "AI approved local file content\n" };
+        return use_tool("write_file", json!({"path": "notes.txt", "content": content}));
     }
     text("로컬 파일 작업 요청 처리가 끝났습니다.")
 }
@@ -227,18 +191,13 @@ async fn completions(State(provider): State<Provider>, Json(request): Json<Value
             if state.scripted_file {
                 scripted_file_reply(&request)
             } else {
-                state
-                    .plan
-                    .pop_front()
-                    .or_else(|| state.fallback.clone())
-                    .unwrap_or_else(|| text("Local turn complete."))
+                state.plan.pop_front().or_else(|| state.fallback.clone()).unwrap_or_else(|| text("Local turn complete."))
             }
         }
     };
     let reply = match reply {
         Reply::Hold => {
-            let _ =
-                tokio::time::timeout(Duration::from_secs(120), provider.release.notified()).await;
+            let _ = tokio::time::timeout(Duration::from_secs(120), provider.release.notified()).await;
             text("Released.")
         }
         other => other,
@@ -253,19 +212,10 @@ async fn completions(State(provider): State<Provider>, Json(request): Json<Value
                 "tool_calls",
             )
         }
-        Reply::Status(status, message) => (
-            StatusCode::from_u16(status).unwrap(),
-            Json(json!({"error": {"message": message, "type": "fixture_error"}})),
-        )
-            .into_response(),
-        Reply::Chunks(parts) => sse_deltas(
-            &model,
-            parts
-                .into_iter()
-                .map(|part| json!({"content": part}))
-                .collect(),
-            "stop",
-        ),
+        Reply::Status(status, message) => {
+            (StatusCode::from_u16(status).unwrap(), Json(json!({"error": {"message": message, "type": "fixture_error"}}))).into_response()
+        }
+        Reply::Chunks(parts) => sse_deltas(&model, parts.into_iter().map(|part| json!({"content": part})).collect(), "stop"),
         Reply::Truncated(content) => sse(&model, json!({"content": content}), "length"),
         Reply::Hold => unreachable!(),
     }
@@ -289,23 +239,12 @@ async fn start_provider(provider: Provider) -> String {
 // ---------------------------------------------------------------------------------------------
 // Test-only broker route: `POST /internal/mcp/:runId` forwards to `Runtime::mcp`.
 
-async fn broker(
-    State(runtime): State<Arc<Runtime>>,
-    UrlPath(run_id): UrlPath<String>,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
-) -> Response {
-    let authorization = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
+async fn broker(State(runtime): State<Arc<Runtime>>, UrlPath(run_id): UrlPath<String>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+    let authorization = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
     match runtime.mcp(&run_id, authorization, body).await {
         Ok(Some(result)) => Json(result).into_response(),
         Ok(None) => StatusCode::ACCEPTED.into_response(),
-        Err(error) => (
-            StatusCode::from_u16(error.status).unwrap(),
-            Json(json!({"error": error.message})),
-        )
-            .into_response(),
+        Err(error) => (StatusCode::from_u16(error.status).unwrap(), Json(json!({"error": error.message}))).into_response(),
     }
 }
 
@@ -329,11 +268,7 @@ struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self {
-            startup: Duration::from_secs(30),
-            idle: Duration::from_secs(30),
-            cancel: Duration::from_millis(800),
-        }
+        Self { startup: Duration::from_secs(30), idle: Duration::from_secs(30), cancel: Duration::from_millis(800) }
     }
 }
 
@@ -345,9 +280,7 @@ impl Fixture {
         std::fs::write(workspace.join("notes.txt"), "original\n").unwrap();
         let provider = Provider::default();
         let base_url = start_provider(provider.clone()).await;
-        let store = Store::open(&root.join("data"), system_clock())
-            .await
-            .unwrap();
+        let store = Store::open(&root.join("data"), system_clock()).await.unwrap();
         let runtime = Runtime::new(
             Arc::clone(&store),
             CommandQueue::new(),
@@ -359,18 +292,9 @@ impl Fixture {
             },
         );
         runtime.initialize().await;
-        let router = Router::new()
-            .route("/internal/mcp/{run_id}", post(broker))
-            .with_state(Arc::clone(&runtime));
+        let router = Router::new().route("/internal/mcp/{run_id}", post(broker)).with_state(Arc::clone(&runtime));
         runtime.set_origin(serve(router).await);
-        let fixture = Fixture {
-            root,
-            workspace,
-            store,
-            runtime,
-            provider,
-            base_url,
-        };
+        let fixture = Fixture { root, workspace, store, runtime, provider, base_url };
         fixture.configure("", true).await;
         fixture
     }
@@ -379,18 +303,11 @@ impl Fixture {
         let input = SettingsInput {
             base_url: self.base_url.clone(),
             model: "local-test-model".into(),
-            workspace: if files {
-                self.workspace.to_string_lossy().into_owned()
-            } else {
-                String::new()
-            },
+            workspace: if files { self.workspace.to_string_lossy().into_owned() } else { String::new() },
             api_key: (!api_key.is_empty()).then(|| api_key.to_owned()),
             clear_api_key: api_key.is_empty().then_some(true),
         };
-        self.store
-            .mutate(move |state| state.update_settings(input))
-            .await
-            .unwrap();
+        self.store.mutate(move |state| state.update_settings(input)).await.unwrap();
     }
 
     fn bot_id(&self) -> String {
@@ -399,88 +316,50 @@ impl Fixture {
 
     async fn conversation(&self, bot_id: &str) -> String {
         let bot_id = bot_id.to_owned();
-        self.store
-            .mutate(move |state| state.add_conversation(&bot_id))
-            .await
-            .unwrap()
-            .id
+        self.store.mutate(move |state| state.add_conversation(&bot_id)).await.unwrap().id
     }
 
     fn get(&self, id: &str) -> Conversation {
-        self.store
-            .read(|state| state.conversation(id).unwrap().clone())
+        self.store.read(|state| state.conversation(id).unwrap().clone())
     }
 
     fn public(&self) -> AppState {
         self.store.snapshot()
     }
 
-    async fn wait(
-        &self,
-        id: &str,
-        what: &str,
-        predicate: impl Fn(&Conversation) -> bool,
-    ) -> Conversation {
+    async fn wait(&self, id: &str, what: &str, predicate: impl Fn(&Conversation) -> bool) -> Conversation {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let current = self.get(id);
             if predicate(&current) {
                 return current;
             }
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for {what}: {}",
-                serde_json::to_string(&current.run).unwrap()
-            );
+            assert!(Instant::now() < deadline, "timed out waiting for {what}: {}", serde_json::to_string(&current.run).unwrap());
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
     }
 
     async fn settled(&self, id: &str) -> Conversation {
-        self.wait(id, "a terminal run", |c| c.run.status.is_terminal())
-            .await
+        self.wait(id, "a terminal run", |c| c.run.status.is_terminal()).await
     }
 
     async fn completed(&self, id: &str) -> Conversation {
         let conversation = self.settled(id).await;
-        assert_eq!(
-            conversation.run.status,
-            RunStatus::Completed,
-            "{:?}",
-            conversation.run
-        );
+        assert_eq!(conversation.run.status, RunStatus::Completed, "{:?}", conversation.run);
         conversation
     }
 
     async fn pending(&self, id: &str) -> Conversation {
-        let conversation = self
-            .wait(id, "an approval", |c| {
-                c.run.status == RunStatus::AwaitingPermission || c.run.status.is_terminal()
-            })
-            .await;
-        assert_eq!(
-            conversation.run.status,
-            RunStatus::AwaitingPermission,
-            "{:?}",
-            conversation.run
-        );
+        let conversation = self.wait(id, "an approval", |c| c.run.status == RunStatus::AwaitingPermission || c.run.status.is_terminal()).await;
+        assert_eq!(conversation.run.status, RunStatus::AwaitingPermission, "{:?}", conversation.run);
         conversation
     }
 
     async fn decide(&self, id: &str, kind: &str) -> grok_bot_model::PendingPermission {
         let conversation = self.pending(id).await;
         let permission = conversation.run.permission.clone().unwrap();
-        let option = permission
-            .options
-            .iter()
-            .find(|o| o.kind == kind)
-            .unwrap()
-            .id
-            .clone();
-        self.runtime
-            .resolve(id, &permission.id, &option, false)
-            .await
-            .unwrap();
+        let option = permission.options.iter().find(|o| o.kind == kind).unwrap().id.clone();
+        self.runtime.resolve(id, &permission.id, &option, false).await.unwrap();
         permission
     }
 
@@ -508,12 +387,7 @@ fn files_containing(directory: &Path, needle: &[u8]) -> Vec<PathBuf> {
         let kind = entry.file_type().unwrap();
         if kind.is_dir() {
             found.extend(files_containing(&path, needle));
-        } else if kind.is_file()
-            && std::fs::read(&path)
-                .unwrap()
-                .windows(needle.len())
-                .any(|w| w == needle)
-        {
+        } else if kind.is_file() && std::fs::read(&path).unwrap().windows(needle.len()).any(|w| w == needle) {
             found.push(path);
         }
     }
@@ -531,95 +405,38 @@ async fn file_approvals_and_sessions(f: &Fixture) {
     let collected = Arc::clone(&snapshots);
     tokio::spawn(async move {
         while let Ok(state) = updates.recv().await {
-            collected
-                .lock()
-                .unwrap()
-                .push(serde_json::to_string(&*state).unwrap());
+            collected.lock().unwrap().push(serde_json::to_string(&*state).unwrap());
         }
     });
-    assert_eq!(
-        f.public().runtime.version.as_deref(),
-        Some("grok-bot-engine 0.1.0 (2bdd1d6a6369)")
-    );
+    assert_eq!(f.public().runtime.version.as_deref(), Some("grok-bot-engine 0.1.0 (2bdd1d6a6369)"));
     assert!(f.public().runtime.available);
     let id = f.conversation(&f.bot_id()).await;
 
     f.provider.plan(vec![
         discover("workspace write_file"),
-        use_tool(
-            "write_file",
-            json!({"path": "notes.txt", "content": "approved by browser\n"}),
-        ),
+        use_tool("write_file", json!({"path": "notes.txt", "content": "approved by browser\n"})),
         text("The approved write succeeded."),
     ]);
-    f.runtime
-        .start(&id, "Write notes.txt using the workspace broker.")
-        .await
-        .unwrap();
-    let busy = f
-        .runtime
-        .start(&id, "second simultaneous run")
-        .await
-        .unwrap_err();
-    assert_eq!(
-        (busy.status, busy.message.as_str()),
-        (
-            409,
-            "Another reply is still running. Wait for it to finish or stop it, then send again."
-        )
-    );
+    f.runtime.start(&id, "Write notes.txt using the workspace broker.").await.unwrap();
+    let busy = f.runtime.start(&id, "second simultaneous run").await.unwrap_err();
+    assert_eq!((busy.status, busy.message.as_str()), (409, "Another reply is still running. Wait for it to finish or stop it, then send again."));
     let pending = f.pending(&id).await;
     assert_eq!(f.notes(), "original\n");
     let permission = pending.run.permission.clone().unwrap();
     assert_eq!(permission.paths, ["notes.txt"]);
-    assert_eq!(
-        permission
-            .options
-            .iter()
-            .map(|o| o.kind.as_str())
-            .collect::<Vec<_>>(),
-        ["allow_once", "reject_once"]
-    );
-    assert!(
-        permission
-            .description
-            .starts_with("Replace notes.txt\n\napproved by browser\n")
-    );
-    let wrong = f
-        .runtime
-        .resolve(&id, &permission.id, "not-a-real-option", false)
-        .await
-        .unwrap_err();
-    assert_eq!(
-        (wrong.status, wrong.message.as_str()),
-        (400, "Choose one of the displayed approval options.")
-    );
+    assert_eq!(permission.options.iter().map(|o| o.kind.as_str()).collect::<Vec<_>>(), ["allow_once", "reject_once"]);
+    assert!(permission.description.starts_with("Replace notes.txt\n\napproved by browser\n"));
+    let wrong = f.runtime.resolve(&id, &permission.id, "not-a-real-option", false).await.unwrap_err();
+    assert_eq!((wrong.status, wrong.message.as_str()), (400, "Choose one of the displayed approval options."));
     let allow = permission.options[0].id.clone();
-    f.runtime
-        .resolve(&id, &permission.id, &allow, false)
-        .await
-        .unwrap();
-    let again = f
-        .runtime
-        .resolve(&id, &permission.id, &allow, false)
-        .await
-        .unwrap_err();
-    assert_eq!(
-        (again.status, again.message.as_str()),
-        (409, "This approval is no longer pending.")
-    );
+    f.runtime.resolve(&id, &permission.id, &allow, false).await.unwrap();
+    let again = f.runtime.resolve(&id, &permission.id, &allow, false).await.unwrap_err();
+    assert_eq!((again.status, again.message.as_str()), (409, "This approval is no longer pending."));
     let completed = f.completed(&id).await;
     assert_eq!(last_text(&completed), "The approved write succeeded.");
-    assert_eq!(
-        completed.title,
-        "Write notes.txt using the workspace broker."
-    );
+    assert_eq!(completed.title, "Write notes.txt using the workspace broker.");
     assert_eq!(f.notes(), "approved by browser\n");
-    let write_tool = completed.messages[1]
-        .tools
-        .iter()
-        .find(|t| t.title == "Write notes.txt")
-        .expect("broker write activity");
+    let write_tool = completed.messages[1].tools.iter().find(|t| t.title == "Write notes.txt").expect("broker write activity");
     assert_eq!(write_tool.status, grok_bot_model::ToolStatus::Completed);
     assert_eq!(write_tool.output.as_deref(), Some("Saved notes.txt."));
     let inference = f.provider.inference();
@@ -628,68 +445,35 @@ async fn file_approvals_and_sessions(f: &Fixture) {
         assert_eq!(tool_names(request), ["search_tool", "todo_write", "use_tool"]);
         assert_eq!(request["model"], "local-test-model");
     }
-    assert!(
-        tool_outcomes(&inference)
-            .iter()
-            .any(|t| t.contains("workspace__write_file"))
-    );
+    assert!(tool_outcomes(&inference).iter().any(|t| t.contains("workspace__write_file")));
     let original_session = completed.session_id.clone().expect("session id");
     assert!(completed.session_fingerprint.is_some());
 
     // Continuation loads the same session and keeps the prior turn in context.
     let before = f.provider.inference_len();
     f.provider.plan(vec![
-        Reply::Tool(
-            "run_terminal_command",
-            json!({"command": "printf bypass > ../outside.txt"}),
-        ),
+        Reply::Tool("run_terminal_command", json!({"command": "printf bypass > ../outside.txt"})),
         Reply::Tool("read_file", json!({"target_file": "/etc/hostname"})),
-        use_tool(
-            "write_file",
-            json!({"path": "../outside.txt", "content": "bypass"}),
-        ),
+        use_tool("write_file", json!({"path": "../outside.txt", "content": "bypass"})),
         use_tool("read_file", json!({"path": "linked-parent/outside.txt"})),
-        use_tool(
-            "write_file",
-            json!({"path": "linked-file.txt", "content": "bypass"}),
-        ),
+        use_tool("write_file", json!({"path": "linked-file.txt", "content": "bypass"})),
         use_tool("computer_observe", json!({})),
         text("Forbidden tools and traversal were blocked."),
     ]);
     std::fs::write(f.root.join("outside.txt"), "outside stays unchanged\n").unwrap();
     std::os::unix::fs::symlink(&f.root, f.workspace.join("linked-parent")).unwrap();
-    std::os::unix::fs::symlink(
-        f.root.join("outside.txt"),
-        f.workspace.join("linked-file.txt"),
-    )
-    .unwrap();
-    f.runtime
-        .start(&id, "Continue and verify the configured confinement.")
-        .await
-        .unwrap();
+    std::os::unix::fs::symlink(f.root.join("outside.txt"), f.workspace.join("linked-file.txt")).unwrap();
+    f.runtime.start(&id, "Continue and verify the configured confinement.").await.unwrap();
     let continued = f.completed(&id).await;
     assert_eq!(continued.messages.len(), 4);
-    assert_eq!(
-        continued.session_id.as_deref(),
-        Some(original_session.as_str())
-    );
+    assert_eq!(continued.session_id.as_deref(), Some(original_session.as_str()));
     assert_eq!(continued.messages[1].text, "The approved write succeeded.");
-    assert_eq!(
-        continued.messages[3].text,
-        "Forbidden tools and traversal were blocked."
-    );
+    assert_eq!(continued.messages[3].text, "Forbidden tools and traversal were blocked.");
     let after = f.provider.inference()[before..].to_vec();
-    assert!(messages(&after[0]).iter().any(|m| m["role"] == "assistant"
-        && content_text(&m["content"]).contains("The approved write succeeded.")));
-    assert_eq!(
-        std::fs::read_to_string(f.root.join("outside.txt")).unwrap(),
-        "outside stays unchanged\n"
-    );
+    assert!(messages(&after[0]).iter().any(|m| m["role"] == "assistant" && content_text(&m["content"]).contains("The approved write succeeded.")));
+    assert_eq!(std::fs::read_to_string(f.root.join("outside.txt")).unwrap(), "outside stays unchanged\n");
     let outcomes = tool_outcomes(&after).join("\n");
-    assert!(
-        outcomes.contains("Managed browser is unavailable."),
-        "computer tools need a managed browser: {outcomes}"
-    );
+    assert!(outcomes.contains("Managed browser is unavailable."), "computer tools need a managed browser: {outcomes}");
     assert!(outcomes.to_lowercase().contains("traversal"), "{outcomes}");
     assert!(outcomes.contains("Symbolic links"), "{outcomes}");
     assert!(!outcomes.contains("outside stays unchanged"));
@@ -698,101 +482,48 @@ async fn file_approvals_and_sessions(f: &Fixture) {
     }
 
     // Denial writes nothing.
-    f.provider.plan(vec![
-        use_tool(
-            "write_file",
-            json!({"path": "notes.txt", "content": "denied write\n"}),
-        ),
-        text("The write was denied."),
-    ]);
-    f.runtime
-        .start(&id, "Propose another write so I can deny it.")
-        .await
-        .unwrap();
+    f.provider.plan(vec![use_tool("write_file", json!({"path": "notes.txt", "content": "denied write\n"})), text("The write was denied.")]);
+    f.runtime.start(&id, "Propose another write so I can deny it.").await.unwrap();
     f.decide(&id, "reject_once").await;
     let denied = f.completed(&id).await;
     assert_eq!(f.notes(), "approved by browser\n");
-    let tool = denied.messages[5]
-        .tools
-        .iter()
-        .find(|t| t.title == "Write notes.txt")
-        .unwrap();
+    let tool = denied.messages[5].tools.iter().find(|t| t.title == "Write notes.txt").unwrap();
     assert_eq!(tool.status, grok_bot_model::ToolStatus::Failed);
-    assert_eq!(
-        tool.output.as_deref(),
-        Some("The user denied this write or cancelled the run.")
-    );
+    assert_eq!(tool.output.as_deref(), Some("The user denied this write or cancelled the run."));
 
     // Cancelling while an approval is pending settles it and writes nothing.
-    f.provider.plan(vec![use_tool(
-        "write_file",
-        json!({"path": "notes.txt", "content": "cancelled write\n"}),
-    )]);
-    f.runtime
-        .start(&id, "Propose a write so I can cancel the task.")
-        .await
-        .unwrap();
+    f.provider.plan(vec![use_tool("write_file", json!({"path": "notes.txt", "content": "cancelled write\n"}))]);
+    f.runtime.start(&id, "Propose a write so I can cancel the task.").await.unwrap();
     let stale = f.pending(&id).await.run.permission.unwrap();
     f.runtime.cancel(&id).await.unwrap();
     let cancelled = f.get(&id);
     assert_eq!(cancelled.run.status, RunStatus::Cancelled);
     assert_eq!(cancelled.run.permission, None);
     assert_eq!(cancelled.run.error, None);
-    let late = f
-        .runtime
-        .resolve(&id, &stale.id, &stale.options[0].id, false)
-        .await
-        .unwrap_err();
+    let late = f.runtime.resolve(&id, &stale.id, &stale.options[0].id, false).await.unwrap_err();
     assert_eq!(late.status, 409);
     assert_eq!(f.notes(), "approved by browser\n");
     // Cancel of an idle conversation is a no-op; an unknown one is 404.
     f.runtime.cancel(&id).await.unwrap();
-    assert_eq!(
-        f.runtime
-            .cancel("00000000-0000-4000-8000-000000000000")
-            .await
-            .unwrap_err()
-            .status,
-        404
-    );
+    assert_eq!(f.runtime.cancel("00000000-0000-4000-8000-000000000000").await.unwrap_err().status, 404);
 
     // A new key replaces the session (settings clear it) and replays visible history once.
     let api_key = "backend-only-local-fixture-key-78584";
     f.configure(api_key, true).await;
-    f.provider.plan(vec![text(&format!(
-        "Authenticated local provider reply {api_key}."
-    ))]);
+    f.provider.plan(vec![text(&format!("Authenticated local provider reply {api_key}."))]);
     let before = f.provider.inference_len();
-    f.runtime
-        .start(&id, "Test provider credential redaction.")
-        .await
-        .unwrap();
+    f.runtime.start(&id, "Test provider credential redaction.").await.unwrap();
     let redacted = f.completed(&id).await;
     assert_eq!(redacted.messages.len(), 10);
-    assert_eq!(
-        last_text(&redacted),
-        "Authenticated local provider reply [redacted]."
-    );
-    assert_ne!(
-        redacted.session_id.as_deref(),
-        Some(original_session.as_str())
-    );
+    assert_eq!(last_text(&redacted), "Authenticated local provider reply [redacted].");
+    assert_ne!(redacted.session_id.as_deref(), Some(original_session.as_str()));
     let replacement = f.provider.inference()[before..].to_vec();
     let prompt = user_texts(&replacement).join("\n");
     assert!(prompt.contains("The approved write succeeded."), "{prompt}");
     assert!(prompt.contains("Current user message:"));
     assert!(prompt.contains("Test provider credential redaction."));
-    assert!(
-        !messages(&replacement[0])
-            .iter()
-            .any(|m| m["role"] == "tool"
-                || m["tool_calls"].as_array().is_some_and(|c| !c.is_empty()))
-    );
-    assert!(
-        !serde_json::to_string(&f.public())
-            .unwrap()
-            .contains(api_key)
-    );
+    assert!(!messages(&replacement[0]).iter().any(|m| m["role"] == "tool" || m["tool_calls"].as_array().is_some_and(|c| !c.is_empty())));
+    assert!(!serde_json::to_string(&f.public()).unwrap().contains(api_key));
     assert!(files_containing(&f.root.join("data").join("grok"), api_key.as_bytes()).is_empty());
 
     // Attachment-like prompts reach the engine as literal JSON and never expand files.
@@ -818,15 +549,9 @@ async fn file_approvals_and_sessions(f: &Fixture) {
         assert_eq!(finished.messages[1].text, "Literal prompt accepted.");
         let requests = f.provider.inference()[before..].to_vec();
         assert!(!requests.is_empty());
-        assert!(
-            !serde_json::to_string(&requests).unwrap().contains(&canary),
-            "prompt expansion read the external file"
-        );
+        assert!(!serde_json::to_string(&requests).unwrap().contains(&canary), "prompt expansion read the external file");
         let wire = user_texts(&requests).join("\n");
-        assert!(
-            !wire.contains("<attached_files>") && !wire.contains('@'),
-            "{wire}"
-        );
+        assert!(!wire.contains("<attached_files>") && !wire.contains('@'), "{wire}");
     }
     tokio::time::sleep(Duration::from_millis(50)).await;
     for snapshot in snapshots.lock().unwrap().iter() {
@@ -847,11 +572,7 @@ async fn scripted_file_reply_flow(f: &Fixture) {
     let completed = f.completed(&id).await;
     assert_eq!(f.notes(), "AI approved local file content\n");
     let session = completed.session_id.clone().unwrap();
-    assert!(
-        !serde_json::to_string(&f.public())
-            .unwrap()
-            .contains("private-local-fixture-key")
-    );
+    assert!(!serde_json::to_string(&f.public()).unwrap().contains("private-local-fixture-key"));
     f.runtime.start(&id, "fixture denied edit").await.unwrap();
     f.decide(&id, "reject_once").await;
     let denied = f.settled(&id).await;
@@ -861,12 +582,7 @@ async fn scripted_file_reply_flow(f: &Fixture) {
     assert!(main.len() >= 4);
     for request in &main {
         let names = tool_names(request);
-        assert!(
-            !names
-                .iter()
-                .any(|n| n == "run_terminal_command" || n == "read_file" || n == "search_replace"),
-            "{names:?}"
-        );
+        assert!(!names.iter().any(|n| n == "run_terminal_command" || n == "read_file" || n == "search_replace"), "{names:?}");
     }
     f.provider.state.lock().unwrap().scripted_file = false;
 }
@@ -878,26 +594,14 @@ async fn fingerprint_migration(f: &Fixture) {
     f.configure(key, true).await;
     let id = f.conversation(&f.bot_id()).await;
     f.provider.plan(vec![text("Hello from the provider.")]);
-    f.runtime
-        .start(&id, &format!("Remember the visible detail {key}"))
-        .await
-        .unwrap();
+    f.runtime.start(&id, &format!("Remember the visible detail {key}")).await.unwrap();
     let first = f.completed(&id).await;
-    assert_eq!(
-        first.messages[0].text,
-        format!("Remember the visible detail {key}")
-    );
+    assert_eq!(first.messages[0].text, format!("Remember the visible detail {key}"));
     for legacy in ["broker-v6", "broker-v2"] {
         let fingerprint = {
             use sha2::Digest;
             let settings = f.store.read(|state| state.settings().clone());
-            let input = json!([
-                settings,
-                "",
-                legacy,
-                "2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8"
-            ])
-            .to_string();
+            let input = json!([settings, "", legacy, "2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8"]).to_string();
             hex::encode(sha2::Sha256::digest(input.as_bytes()))
         };
         let previous = f.get(&id).session_id.clone();
@@ -915,37 +619,20 @@ async fn fingerprint_migration(f: &Fixture) {
         f.runtime.start(&id, &prompt).await.unwrap();
         let migrated = f.completed(&id).await;
         assert_ne!(migrated.session_id, previous);
-        assert_ne!(
-            migrated.session_fingerprint.as_deref(),
-            Some(fingerprint.as_str())
-        );
+        assert_ne!(migrated.session_fingerprint.as_deref(), Some(fingerprint.as_str()));
         let requests = f.provider.inference()[before..].to_vec();
         let wire = turn_prompt(&requests[0]);
-        let start = wire
-            .find("[{")
-            .unwrap_or_else(|| panic!("continuation history: {wire}"));
+        let start = wire.find("[{").unwrap_or_else(|| panic!("continuation history: {wire}"));
         let end = wire.find("\n\nCurrent user message:\n").unwrap();
         let history: Vec<Value> = serde_json::from_str(&wire[start..end]).unwrap();
-        assert_eq!(
-            history[0],
-            json!({"role": "user", "text": "Remember the visible detail [redacted]"})
-        );
-        assert_eq!(
-            history[1],
-            json!({"role": "assistant", "text": "Hello from the provider."})
-        );
+        assert_eq!(history[0], json!({"role": "user", "text": "Remember the visible detail [redacted]"}));
+        assert_eq!(history[1], json!({"role": "assistant", "text": "Hello from the provider."}));
         assert!(!wire.contains(key));
         assert_eq!(wire.matches(prompt.as_str()).count(), 1);
-        assert!(
-            wire.ends_with(&format!("Current user message:\n{prompt}")),
-            "{wire}"
-        );
+        assert!(wire.ends_with(&format!("Current user message:\n{prompt}")), "{wire}");
         // The replacement session then continues without replay.
         let before = f.provider.inference_len();
-        f.runtime
-            .start(&id, "Continue without replay")
-            .await
-            .unwrap();
+        f.runtime.start(&id, "Continue without replay").await.unwrap();
         let continued = f.completed(&id).await;
         assert_eq!(continued.session_id, migrated.session_id);
         let next = f.provider.inference()[before..].to_vec();
@@ -958,44 +645,28 @@ async fn provider_failure(f: &Fixture) {
     let key = "provider-failure-fixture-key";
     f.configure(key, true).await;
     let id = f.conversation(&f.bot_id()).await;
-    f.provider.plan(vec![Reply::Status(
-        500,
-        format!("Local fixture provider error echoing {key}"),
-    )]);
-    f.runtime
-        .start(&id, "Trigger a provider failure.")
-        .await
-        .unwrap();
+    f.provider.plan(vec![Reply::Status(500, format!("Local fixture provider error echoing {key}"))]);
+    f.runtime.start(&id, "Trigger a provider failure.").await.unwrap();
     let failed = f.settled(&id).await;
     assert_eq!(failed.run.status, RunStatus::Error);
     assert_eq!(
         failed.run.error.as_deref(),
-        Some(
-            "Internal error: API error (status 500 Internal Server Error): fixture_error: Local fixture provider error echoing [redacted]"
-        )
+        Some("Internal error: API error (status 500 Internal Server Error): fixture_error: Local fixture provider error echoing [redacted]")
     );
     assert_eq!(last_text(&failed), "");
     assert!(!serde_json::to_string(&f.public()).unwrap().contains(key));
-    assert!(
-        !serde_json::to_string(&f.store.read(|state| state.disk().clone()))
-            .unwrap()
-            .contains(&format!("echoing {key}"))
-    );
+    assert!(!serde_json::to_string(&f.store.read(|state| state.disk().clone())).unwrap().contains(&format!("echoing {key}")));
     // The conversation keeps working after the failure.
     f.provider.plan(vec![text("Recovered.")]);
     f.runtime.start(&id, "Try again.").await.unwrap();
     assert_eq!(last_text(&f.completed(&id).await), "Recovered.");
     // This engine reports a provider length stop as a request error (not a `max_tokens` stop
     // reason); the partial text stays visible.
-    f.provider
-        .plan(vec![Reply::Truncated("Partial answer".into())]);
+    f.provider.plan(vec![Reply::Truncated("Partial answer".into())]);
     f.runtime.start(&id, "Answer at length.").await.unwrap();
     let truncated = f.settled(&id).await;
     assert_eq!(truncated.run.status, RunStatus::Error);
-    assert_eq!(
-        truncated.run.error.as_deref(),
-        Some("Internal error: response truncated by max_tokens")
-    );
+    assert_eq!(truncated.run.error.as_deref(), Some("Internal error: response truncated by max_tokens"));
     assert_eq!(last_text(&truncated), "Partial answer");
 }
 
@@ -1009,10 +680,7 @@ async fn streamed_redaction(f: &Fixture) {
     let collected = Arc::clone(&snapshots);
     tokio::spawn(async move {
         while let Ok(state) = updates.recv().await {
-            collected
-                .lock()
-                .unwrap()
-                .push(serde_json::to_string(&*state).unwrap());
+            collected.lock().unwrap().push(serde_json::to_string(&*state).unwrap());
         }
     });
     let id = f.conversation(&f.bot_id()).await;
@@ -1020,42 +688,21 @@ async fn streamed_redaction(f: &Fixture) {
     f.provider.plan(vec![
         discover("workspace read_file"),
         use_tool("read_file", json!({"path": key})),
-        Reply::Chunks(vec![
-            "Provider returned ".into(),
-            head.into(),
-            format!("{tail} safely."),
-        ]),
+        Reply::Chunks(vec!["Provider returned ".into(), head.into(), format!("{tail} safely.")]),
     ]);
     f.runtime.start(&id, "redact-split").await.unwrap();
     let completed = f.completed(&id).await;
-    assert_eq!(
-        completed.messages[1].text,
-        "Provider returned [redacted] safely."
-    );
-    let read = completed.messages[1]
-        .tools
-        .iter()
-        .find(|t| {
-            t.input
-                .as_deref()
-                .unwrap_or_default()
-                .contains("[redacted]")
-        })
-        .expect("tool input redacted");
+    assert_eq!(completed.messages[1].text, "Provider returned [redacted] safely.");
+    let read = completed.messages[1].tools.iter().find(|t| t.input.as_deref().unwrap_or_default().contains("[redacted]")).expect("tool input redacted");
     assert!(uuid::Uuid::parse_str(&read.id).is_ok());
-    f.provider.plan(vec![Reply::Chunks(vec![
-        "Provider returned ".into(),
-        head.into(),
-    ])]);
+    f.provider.plan(vec![Reply::Chunks(vec!["Provider returned ".into(), head.into()])]);
     f.runtime.start(&id, "redact-prefix").await.unwrap();
     let prefix = f.completed(&id).await;
     assert_eq!(prefix.messages[3].text, "Provider returned [redacted]");
     tokio::time::sleep(Duration::from_millis(50)).await;
     let snapshots = snapshots.lock().unwrap();
     assert!(snapshots.iter().any(|s| s.contains("Provider returned ")));
-    for snapshot in snapshots.iter().chain(std::iter::once(
-        &serde_json::to_string(&f.public()).unwrap(),
-    )) {
+    for snapshot in snapshots.iter().chain(std::iter::once(&serde_json::to_string(&f.public()).unwrap())) {
         assert!(!snapshot.contains(key));
         assert!(!snapshot.contains(head));
         assert!(!snapshot.contains(&key[..16]));
@@ -1073,62 +720,34 @@ async fn deadlines_and_cancellation(f: &Fixture) {
     assert_eq!(silent.run.status, RunStatus::Error);
     assert_eq!(
         silent.run.error.as_deref(),
-        Some(
-            "Grok Build exceeded the inference inactivity deadline without session updates. Check the provider and try again."
-        )
+        Some("Grok Build exceeded the inference inactivity deadline without session updates. Check the provider and try again.")
     );
     assert_eq!(silent.run.permission, None);
-    eprintln!(
-        "[runtime] inactivity settled after {:?}, session kept: {}",
-        started.elapsed(),
-        silent.session_id.is_some()
-    );
+    eprintln!("[runtime] inactivity settled after {:?}, session kept: {}", started.elapsed(), silent.session_id.is_some());
     f.provider.release.notify_waiters();
 
     // Inactivity pauses while a broker approval is pending, then resumes after the decision.
-    f.provider.plan(vec![
-        use_tool(
-            "write_file",
-            json!({"path": "notes.txt", "content": "AI approved contents\n"}),
-        ),
-        text("Written."),
-    ]);
+    f.provider.plan(vec![use_tool("write_file", json!({"path": "notes.txt", "content": "AI approved contents\n"})), text("Written.")]);
     f.runtime.start(&id, "write").await.unwrap();
     let pending = f.pending(&id).await;
     tokio::time::sleep(Duration::from_millis(900)).await;
     let still = f.get(&id);
     assert_eq!(still.run.status, RunStatus::AwaitingPermission);
-    assert_eq!(
-        still.run.permission.as_ref().map(|p| &p.id),
-        pending.run.permission.as_ref().map(|p| &p.id)
-    );
+    assert_eq!(still.run.permission.as_ref().map(|p| &p.id), pending.run.permission.as_ref().map(|p| &p.id));
     f.decide(&id, "allow_once").await;
     let completed = f.completed(&id).await;
     assert_eq!(completed.run.error, None);
     assert_eq!(f.notes(), "AI approved contents\n");
 
     // After an approval the deadline applies again.
-    f.provider.plan(vec![
-        use_tool(
-            "write_file",
-            json!({"path": "notes.txt", "content": "second\n"}),
-        ),
-        Reply::Hold,
-    ]);
+    f.provider.plan(vec![use_tool("write_file", json!({"path": "notes.txt", "content": "second\n"})), Reply::Hold]);
     f.runtime.start(&id, "write-hang").await.unwrap();
     f.pending(&id).await;
     tokio::time::sleep(Duration::from_millis(600)).await;
     f.decide(&id, "allow_once").await;
     let failed = f.settled(&id).await;
     assert_eq!(failed.run.status, RunStatus::Error);
-    assert!(
-        failed
-            .run
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("inactivity deadline")
-    );
+    assert!(failed.run.error.as_deref().unwrap().contains("inactivity deadline"));
     assert_eq!(failed.run.permission, None);
     assert_eq!(f.notes(), "second\n");
     f.provider.release.notify_waiters();
@@ -1136,16 +755,11 @@ async fn deadlines_and_cancellation(f: &Fixture) {
     // Cancelling a running inference settles promptly and the conversation continues.
     f.provider.plan(vec![Reply::Hold]);
     f.runtime.start(&id, "hang").await.unwrap();
-    f.wait(&id, "running", |c| c.run.status == RunStatus::Running)
-        .await;
+    f.wait(&id, "running", |c| c.run.status == RunStatus::Running).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     let started = Instant::now();
     f.runtime.cancel(&id).await.unwrap();
-    assert!(
-        started.elapsed() < Duration::from_secs(8),
-        "cancel took {:?}",
-        started.elapsed()
-    );
+    assert!(started.elapsed() < Duration::from_secs(8), "cancel took {:?}", started.elapsed());
     let cancelled = f.get(&id);
     assert_eq!(cancelled.run.status, RunStatus::Cancelled);
     assert_eq!(cancelled.run.error, None);
@@ -1163,26 +777,13 @@ async fn write_limits_and_model_only(f: &Fixture) {
     let flag = Arc::clone(&saw_permission);
     tokio::spawn(async move {
         while let Ok(state) = updates.recv().await {
-            if state
-                .conversations
-                .iter()
-                .any(|c| c.run.permission.is_some())
-            {
+            if state.conversations.iter().any(|c| c.run.permission.is_some()) {
                 *flag.lock().unwrap() = true;
             }
         }
     });
-    for content in [
-        format!("{}HIDDEN_SUFFIX", "x".repeat(200_100)),
-        format!("{}HIDDEN_SUFFIX", "😀".repeat(50_000)),
-    ] {
-        f.provider.plan(vec![
-            use_tool(
-                "write_file",
-                json!({"path": "notes.txt", "content": content}),
-            ),
-            text("Oversized."),
-        ]);
+    for content in [format!("{}HIDDEN_SUFFIX", "x".repeat(200_100)), format!("{}HIDDEN_SUFFIX", "😀".repeat(50_000))] {
+        f.provider.plan(vec![use_tool("write_file", json!({"path": "notes.txt", "content": content})), text("Oversized.")]);
         f.runtime.start(&id, "large-write").await.unwrap();
         f.completed(&id).await;
         assert_eq!(f.notes(), "original\n");
@@ -1193,19 +794,11 @@ async fn write_limits_and_model_only(f: &Fixture) {
 
     f.configure("", false).await;
     f.provider.clear();
-    f.provider.plan(vec![
-        use_tool(
-            "write_file",
-            json!({"path": "notes.txt", "content": "nope"}),
-        ),
-        text("No workspace."),
-    ]);
+    f.provider.plan(vec![use_tool("write_file", json!({"path": "notes.txt", "content": "nope"})), text("No workspace.")]);
     f.runtime.start(&id, "write").await.unwrap();
     let completed = f.completed(&id).await;
     assert_eq!(completed.run.permission, None);
-    assert!(tool_outcomes(&f.provider.inference()).iter().any(|t| {
-        t.contains("Choose a workspace in Local files settings before using file tools.")
-    }));
+    assert!(tool_outcomes(&f.provider.inference()).iter().any(|t| { t.contains("Choose a workspace in Local files settings before using file tools.") }));
     assert_eq!(f.notes(), "original\n");
 }
 
@@ -1218,37 +811,14 @@ async fn skills(f: &Fixture) {
         description: "Use when reviewing the local test plan PRIVATE_KEY_CANARY.".into(),
         instructions: "SKILL_BODY_CANARY\nReview every item.".into(),
     };
-    let add = |bot: String, input: SkillInput| async move {
-        f.store
-            .mutate(move |state| state.add_skill(&bot, input, false))
-            .await
-            .unwrap()
-    };
+    let add = |bot: String, input: SkillInput| async move { f.store.mutate(move |state| state.add_skill(&bot, input, false)).await.unwrap() };
     let skill = add(bot.clone(), input.clone()).await;
-    let disabled = add(
-        bot.clone(),
-        SkillInput {
-            name: "disabled".into(),
-            instructions: "DISABLED_BODY_CANARY".into(),
-            ..input.clone()
-        },
-    )
-    .await;
+    let disabled = add(bot.clone(), SkillInput { name: "disabled".into(), instructions: "DISABLED_BODY_CANARY".into(), ..input.clone() }).await;
     {
         let (bot, id) = (bot.clone(), disabled.id.clone());
         f.store
             .mutate(move |state| {
-                state.update_skill(
-                    &bot,
-                    &id,
-                    SkillPatch {
-                        name: None,
-                        description: None,
-                        instructions: None,
-                        revision: 1,
-                        enabled: Some(false),
-                    },
-                )
+                state.update_skill(&bot, &id, SkillPatch { name: None, description: None, instructions: None, revision: 1, enabled: Some(false) })
             })
             .await
             .unwrap();
@@ -1256,25 +826,11 @@ async fn skills(f: &Fixture) {
     let other = f
         .store
         .mutate(|state| {
-            state.add_bot(BotInput {
-                name: "Other".into(),
-                color: Some("#ff2543".into()),
-                instructions: Some(String::new()),
-                shape: None,
-                pinned: None,
-            })
+            state.add_bot(BotInput { name: "Other".into(), color: Some("#ff2543".into()), instructions: Some(String::new()), shape: None, pinned: None })
         })
         .await
         .unwrap();
-    let foreign = add(
-        other.id.clone(),
-        SkillInput {
-            name: "foreign".into(),
-            instructions: "OTHER_BOT_BODY_CANARY".into(),
-            ..input.clone()
-        },
-    )
-    .await;
+    let foreign = add(other.id.clone(), SkillInput { name: "foreign".into(), instructions: "OTHER_BOT_BODY_CANARY".into(), ..input.clone() }).await;
     let id = f.conversation(&bot).await;
     f.provider.clear();
     f.provider.plan(vec![
@@ -1289,65 +845,28 @@ async fn skills(f: &Fixture) {
     f.completed(&id).await;
     let captured = serde_json::to_string(&f.provider.inference()).unwrap();
     assert!(captured.contains("SKILL_BODY_CANARY"));
-    assert!(
-        !captured.contains("DISABLED_BODY_CANARY")
-            && !captured.contains("OTHER_BOT_BODY_CANARY")
-            && !captured.contains("PRIVATE_KEY_CANARY")
-    );
+    assert!(!captured.contains("DISABLED_BODY_CANARY") && !captured.contains("OTHER_BOT_BODY_CANARY") && !captured.contains("PRIVATE_KEY_CANARY"));
     assert!(captured.contains("Enabled private skill does not exist for this bot."));
-    let rules: String = f
-        .provider
-        .inference()
-        .iter()
-        .flat_map(messages)
-        .filter(|m| m["role"] == "system")
-        .map(|m| content_text(&m["content"]))
-        .collect();
-    let index = rules
-        .split("Enabled private skill index (data): ")
-        .nth(1)
-        .expect("skill index in rules")
-        .lines()
-        .next()
-        .unwrap()
-        .to_owned();
+    let rules: String = f.provider.inference().iter().flat_map(messages).filter(|m| m["role"] == "system").map(|m| content_text(&m["content"])).collect();
+    let index = rules.split("Enabled private skill index (data): ").nth(1).expect("skill index in rules").lines().next().unwrap().to_owned();
     let index: Vec<Value> = serde_json::from_str(&index).unwrap();
     assert_eq!(index.len(), 1);
-    assert_eq!(
-        index[0]["description"],
-        "Use when reviewing the local test plan [redacted]."
-    );
+    assert_eq!(index[0]["description"], "Use when reviewing the local test plan [redacted].");
 
     // Model-created skills save only after one-use approval; denial and cancel write nothing.
-    let created = SkillInput {
-        name: "created-skill".into(),
-        description: "Use when testing creation.".into(),
-        instructions: "CREATED_BODY".into(),
-    };
-    let count = || {
-        f.store
-            .read(|state| state.bot(&bot).unwrap().skills.as_ref().map_or(0, Vec::len))
-    };
+    let created = SkillInput { name: "created-skill".into(), description: "Use when testing creation.".into(), instructions: "CREATED_BODY".into() };
+    let count = || f.store.read(|state| state.bot(&bot).unwrap().skills.as_ref().map_or(0, Vec::len));
     let baseline = count();
     for decision in ["reject_once", "cancel", "allow_once"] {
-        let mut plan = vec![
-            discover("workspace create_skill"),
-            use_tool("create_skill", json!(created)),
-        ];
+        let mut plan = vec![discover("workspace create_skill"), use_tool("create_skill", json!(created))];
         if decision == "allow_once" {
             // A retry of the same proposal is idempotent; a second distinct skill is refused.
             plan.push(use_tool("create_skill", json!(created)));
-            plan.push(use_tool(
-                "create_skill",
-                json!({"name": "another", "description": "d", "instructions": "i"}),
-            ));
+            plan.push(use_tool("create_skill", json!({"name": "another", "description": "d", "instructions": "i"})));
         }
         plan.push(text("Skill request handled."));
         f.provider.plan(plan);
-        f.runtime
-            .start(&id, &format!("Create a reusable private skill {decision}."))
-            .await
-            .unwrap();
+        f.runtime.start(&id, &format!("Create a reusable private skill {decision}.")).await.unwrap();
         let pending = f.pending(&id).await;
         let permission = pending.run.permission.unwrap();
         assert!(permission.description.contains("CREATED_BODY"));
@@ -1355,34 +874,15 @@ async fn skills(f: &Fixture) {
         if decision == "cancel" {
             f.runtime.cancel(&id).await.unwrap();
         } else {
-            let option = permission
-                .options
-                .iter()
-                .find(|o| o.kind == decision)
-                .unwrap()
-                .id
-                .clone();
-            f.runtime
-                .resolve(&id, &permission.id, &option, false)
-                .await
-                .unwrap();
+            let option = permission.options.iter().find(|o| o.kind == decision).unwrap().id.clone();
+            f.runtime.resolve(&id, &permission.id, &option, false).await.unwrap();
         }
         f.settled(&id).await;
         assert_eq!(count(), baseline + usize::from(decision == "allow_once"));
-        assert_eq!(
-            f.runtime
-                .resolve(&id, &permission.id, &permission.options[0].id, false)
-                .await
-                .unwrap_err()
-                .status,
-            409
-        );
+        assert_eq!(f.runtime.resolve(&id, &permission.id, &permission.options[0].id, false).await.unwrap_err().status, 409);
     }
     let outcomes = tool_outcomes(&f.provider.inference()).join("\n");
-    assert!(
-        outcomes.contains("Only one private skill can be created per model turn."),
-        "{outcomes}"
-    );
+    assert!(outcomes.contains("Only one private skill can be created per model turn."), "{outcomes}");
     assert!(outcomes.contains(r#""existing":true"#), "{outcomes}");
     assert!(outcomes.contains("Skill save was denied or cancelled."));
 }
@@ -1421,11 +921,7 @@ async fn bot_creation(f: &Fixture) {
     assert_eq!(last_text(&completed), "The bot was created.");
 
     f.provider.clear();
-    f.provider.plan(vec![
-        discover("workspace create_bot"),
-        use_tool("create_bot", json!({"name": "Denied"})),
-        text("Not created."),
-    ]);
+    f.provider.plan(vec![discover("workspace create_bot"), use_tool("create_bot", json!({"name": "Denied"})), text("Not created.")]);
     f.runtime.start(&id, "Create another bot").await.unwrap();
     f.decide(&id, "reject_once").await;
     f.completed(&id).await;
@@ -1474,22 +970,14 @@ async fn chat_routines(f: &Fixture) {
     assert!(!paused.enabled && paused.next_run_at.is_none(), "{paused:?}");
 
     f.provider.clear();
-    f.provider.plan(vec![
-        discover("workspace routines"),
-        use_tool("delete_routine", json!({"id": routine.id})),
-        text("삭제하지 않았어요."),
-    ]);
+    f.provider.plan(vec![discover("workspace routines"), use_tool("delete_routine", json!({"id": routine.id})), text("삭제하지 않았어요.")]);
     f.runtime.start(&id, "그 루틴 지워줘").await.unwrap();
     f.decide(&id, "reject_once").await;
     f.completed(&id).await;
     assert_eq!(f.store.read(|s| s.disk().routines.len()), 1, "denied deletion keeps the routine");
 
     f.provider.clear();
-    f.provider.plan(vec![
-        discover("workspace routines"),
-        use_tool("delete_routine", json!({"id": routine.id})),
-        text("삭제했어요."),
-    ]);
+    f.provider.plan(vec![discover("workspace routines"), use_tool("delete_routine", json!({"id": routine.id})), text("삭제했어요.")]);
     f.runtime.start(&id, "이제 정말 지워줘").await.unwrap();
     f.decide(&id, "allow_once").await;
     f.completed(&id).await;
@@ -1540,52 +1028,20 @@ async fn bot_messages(f: &Fixture) {
         use_tool("list_bots", json!({})),
         use_tool("send_message", input.clone()),
         use_tool("send_message", input.clone()),
-        use_tool(
-            "send_message",
-            json!({"toBotId": recipient.id, "text": "A second distinct message is forbidden."}),
-        ),
+        use_tool("send_message", json!({"toBotId": recipient.id, "text": "A second distinct message is forbidden."})),
         text("The message was queued."),
     ]);
-    f.runtime
-        .start(&source, "Send a local bot message.")
-        .await
-        .unwrap();
+    f.runtime.start(&source, "Send a local bot message.").await.unwrap();
     let pending = f.pending(&source).await;
     assert!(f.store.read(|state| state.disk().bot_deliveries.is_empty()));
     let permission = pending.run.permission.clone().unwrap();
-    assert!(
-        permission.description.contains("Recipient")
-            && permission
-                .description
-                .contains("Review this plain chat message.")
-    );
+    assert!(permission.description.contains("Recipient") && permission.description.contains("Review this plain chat message."));
     assert!(permission.paths.is_empty());
-    assert_eq!(
-        permission
-            .options
-            .iter()
-            .map(|o| o.label.as_str())
-            .collect::<Vec<_>>(),
-        ["Send once", "Deny"]
-    );
+    assert_eq!(permission.options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), ["Send once", "Deny"]);
     let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
-    let forbidden = f
-        .runtime
-        .mcp(&pending.run.id, None, ping.clone())
-        .await
-        .unwrap_err();
-    assert_eq!(
-        (forbidden.status, forbidden.message.as_str()),
-        (403, "Invalid workspace broker session.")
-    );
-    assert_eq!(
-        f.runtime
-            .mcp(&pending.run.id, Some("Bearer wrong"), ping)
-            .await
-            .unwrap_err()
-            .status,
-        403
-    );
+    let forbidden = f.runtime.mcp(&pending.run.id, None, ping.clone()).await.unwrap_err();
+    assert_eq!((forbidden.status, forbidden.message.as_str()), (403, "Invalid workspace broker session."));
+    assert_eq!(f.runtime.mcp(&pending.run.id, Some("Bearer wrong"), ping).await.unwrap_err().status, 403);
     f.decide(&source, "allow_once").await;
     let completed = f.completed(&source).await;
     assert_eq!(last_text(&completed), "The message was queued.");
@@ -1595,84 +1051,37 @@ async fn bot_messages(f: &Fixture) {
     assert_eq!(delivery.status, DeliveryStatus::Queued);
     assert_eq!(delivery.source_message_id, completed.messages[1].id);
     let outcomes = tool_outcomes(&f.provider.inference());
-    assert!(
-        outcomes
-            .iter()
-            .any(|t| t.contains(&recipient.id) && t.contains("Recipient"))
-    );
+    assert!(outcomes.iter().any(|t| t.contains(&recipient.id) && t.contains("Recipient")));
     assert!(outcomes.iter().filter(|t| t.contains(&delivery.id)).count() >= 2);
-    assert!(
-        outcomes
-            .iter()
-            .any(|t| t.contains("one distinct bot message"))
-    );
-    assert_eq!(
-        f.runtime
-            .mcp(
-                &pending.run.id,
-                None,
-                json!({"jsonrpc": "2.0", "method": "ping"})
-            )
-            .await
-            .unwrap_err()
-            .status,
-        403
-    );
+    assert!(outcomes.iter().any(|t| t.contains("one distinct bot message")));
+    assert_eq!(f.runtime.mcp(&pending.run.id, None, json!({"jsonrpc": "2.0", "method": "ping"})).await.unwrap_err().status, 403);
 
     // The recipient turn (started by the dispatcher in the app) is chat-only.
     let before = f.provider.inference_len();
     f.provider.plan(vec![
         discover("workspace read_file write_file"),
         use_tool("read_file", json!({"path": "notes.txt"})),
-        use_tool(
-            "write_file",
-            json!({"path": "notes.txt", "content": "must not be saved"}),
-        ),
+        use_tool("write_file", json!({"path": "notes.txt", "content": "must not be saved"})),
         text("Recipient final answer."),
     ]);
-    f.runtime
-        .start(&delivery.recipient_conversation_id, &delivery.text)
-        .await
-        .unwrap();
+    f.runtime.start(&delivery.recipient_conversation_id, &delivery.text).await.unwrap();
     let answered = f.completed(&delivery.recipient_conversation_id).await;
-    assert_eq!(
-        answered.messages[0].source_bot_id.as_deref(),
-        Some(sender.as_str())
-    );
+    assert_eq!(answered.messages[0].source_bot_id.as_deref(), Some(sender.as_str()));
     assert_eq!(answered.messages[0].role, Role::User);
     assert_eq!(answered.run.permission, None);
     assert_eq!(f.notes(), "original\n");
     let recipient_requests = f.provider.inference()[before..].to_vec();
-    assert!(
-        tool_outcomes(&recipient_requests)
-            .iter()
-            .any(|t| t.contains("chat-only"))
-    );
+    assert!(tool_outcomes(&recipient_requests).iter().any(|t| t.contains("chat-only")));
     let wire = serde_json::to_string(&recipient_requests).unwrap();
-    assert!(
-        wire.contains("RECIPIENT_IDENTITY_CANARY")
-            && wire.contains("This is a chat-only message from local bot")
-    );
+    assert!(wire.contains("RECIPIENT_IDENTITY_CANARY") && wire.contains("This is a chat-only message from local bot"));
     let delivered = f.store.read(|state| state.disk().bot_deliveries[0].clone());
-    assert_eq!(
-        delivered.execution_run_id.as_deref(),
-        Some(answered.run.id.as_str())
-    );
+    assert_eq!(delivered.execution_run_id.as_deref(), Some(answered.run.id.as_str()));
     assert_eq!(delivered.status, DeliveryStatus::Completed);
 
     // Denial records nothing.
     let source = f.conversation(&sender).await;
-    f.provider.plan(vec![
-        use_tool(
-            "send_message",
-            json!({"toBotId": recipient.id, "text": "Needs approval."}),
-        ),
-        text("Denied."),
-    ]);
-    f.runtime
-        .start(&source, "Send another message.")
-        .await
-        .unwrap();
+    f.provider.plan(vec![use_tool("send_message", json!({"toBotId": recipient.id, "text": "Needs approval."})), text("Denied.")]);
+    f.runtime.start(&source, "Send another message.").await.unwrap();
     f.decide(&source, "reject_once").await;
     f.completed(&source).await;
     assert_eq!(f.store.read(|state| state.disk().bot_deliveries.len()), 1);
@@ -1682,21 +1091,12 @@ async fn bot_messages(f: &Fixture) {
 async fn restart_continuation(f: &Fixture) {
     let id = f.conversation(&f.bot_id()).await;
     f.provider.plan(vec![text("Remembered FIRST-TURN-SECRET.")]);
-    f.runtime
-        .start(&id, "hello FIRST-TURN-SECRET")
-        .await
-        .unwrap();
+    f.runtime.start(&id, "hello FIRST-TURN-SECRET").await.unwrap();
     let first = f.completed(&id).await;
     f.runtime.shutdown().await;
-    let restarted = Runtime::new(
-        Arc::clone(&f.store),
-        CommandQueue::new(),
-        RuntimeOptions::new(f.root.parent().unwrap().join("engine")),
-    );
+    let restarted = Runtime::new(Arc::clone(&f.store), CommandQueue::new(), RuntimeOptions::new(f.root.parent().unwrap().join("engine")));
     restarted.initialize().await;
-    let router = Router::new()
-        .route("/internal/mcp/{run_id}", post(broker))
-        .with_state(Arc::clone(&restarted));
+    let router = Router::new().route("/internal/mcp/{run_id}", post(broker)).with_state(Arc::clone(&restarted));
     restarted.set_origin(serve(router).await);
     let before = f.provider.inference_len();
     f.provider.plan(vec![text("Recalled.")]);
@@ -1705,8 +1105,7 @@ async fn restart_continuation(f: &Fixture) {
     assert_eq!(recalled.session_id, first.session_id);
     assert_eq!(last_text(&recalled), "Recalled.");
     let request = &f.provider.inference()[before];
-    assert!(messages(request).iter().any(|m| m["role"] == "assistant"
-        && content_text(&m["content"]).contains("Remembered FIRST-TURN-SECRET.")));
+    assert!(messages(request).iter().any(|m| m["role"] == "assistant" && content_text(&m["content"]).contains("Remembered FIRST-TURN-SECRET.")));
     assert_eq!(turn_prompt(request), "RECALL it");
     // Different provider settings restart the shared engine for the next run.
     f.configure("restart-key", true).await;
@@ -1720,72 +1119,33 @@ async fn restart_continuation(f: &Fixture) {
 
 /// Startup failures: no provider, no origin, and the startup deadline.
 async fn startup_errors(base: &Path, engine_root: &Path) {
-    let f = Fixture::new(
-        base,
-        engine_root,
-        "startup",
-        Options {
-            startup: Duration::from_millis(1),
-            ..Options::default()
-        },
-    )
-    .await;
+    let f = Fixture::new(base, engine_root, "startup", Options { startup: Duration::from_millis(1), ..Options::default() }).await;
     let id = f.conversation(&f.bot_id()).await;
     f.runtime.start(&id, "hello").await.unwrap();
     let failed = f.settled(&id).await;
     assert_eq!(failed.run.status, RunStatus::Error);
-    assert!(
-        failed
-            .run
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("startup deadline"),
-        "{:?}",
-        failed.run
-    );
+    assert!(failed.run.error.as_deref().unwrap().contains("startup deadline"), "{:?}", failed.run);
     assert_eq!(failed.run.permission, None);
     assert_eq!(failed.messages[1].text, "");
     f.close().await;
 
     let root = base.join("unconfigured");
-    let store = Store::open(&root.join("data"), system_clock())
-        .await
-        .unwrap();
-    let runtime = Runtime::new(
-        Arc::clone(&store),
-        CommandQueue::new(),
-        RuntimeOptions::new(engine_root),
-    );
+    let store = Store::open(&root.join("data"), system_clock()).await.unwrap();
+    let runtime = Runtime::new(Arc::clone(&store), CommandQueue::new(), RuntimeOptions::new(engine_root));
     let bot = store.read(|state| state.disk().bots[0].id.clone());
-    let id = store
-        .mutate(move |state| state.add_conversation(&bot))
-        .await
-        .unwrap()
-        .id;
+    let id = store.mutate(move |state| state.add_conversation(&bot)).await.unwrap().id;
     // Before `initialize` the store still reports the engine as unavailable.
     let unavailable = store.read(|state| state.runtime().clone());
     assert!(!unavailable.available);
     let error = runtime.start(&id, "hello").await.unwrap_err();
     assert_eq!(error.status, 503);
-    assert_eq!(
-        Some(error.message),
-        unavailable
-            .error
-            .or(Some("Grok Build is unavailable.".into()))
-    );
+    assert_eq!(Some(error.message), unavailable.error.or(Some("Grok Build is unavailable.".into())));
     runtime.initialize().await;
     let error = runtime.start(&id, "hello").await.unwrap_err();
-    assert_eq!(
-        (error.status, error.message.as_str()),
-        (503, "Runtime is not connected to the local server.")
-    );
+    assert_eq!((error.status, error.message.as_str()), (503, "Runtime is not connected to the local server."));
     runtime.set_origin("http://127.0.0.1:9".into());
     let error = runtime.start(&id, "hello").await.unwrap_err();
-    assert_eq!(
-        (error.status, error.message.as_str()),
-        (400, "Configure a provider and model in settings first.")
-    );
+    assert_eq!((error.status, error.message.as_str()), (400, "Configure a provider and model in settings first."));
     assert!(store.read(|state| state.conversation(&id).unwrap().messages.is_empty()));
     runtime.shutdown().await;
     let error = runtime.start(&id, "hello").await.unwrap_err();
@@ -1839,10 +1199,8 @@ async fn permission_rules(f: &Fixture) {
     assert_eq!(f.public().conversations.iter().find(|c| c.id == id).unwrap().messages[1].tools.iter().filter(|t| t.approved_by_rule.is_some()).count(), 1);
 
     // The hash conflict check still applies to auto-allowed writes.
-    f.provider.plan(vec![
-        use_tool("write_file", json!({"path": "notes.txt", "content": "stale overwrite\n", "hash": "0".repeat(64)})),
-        text("Conflict reported."),
-    ]);
+    f.provider
+        .plan(vec![use_tool("write_file", json!({"path": "notes.txt", "content": "stale overwrite\n", "hash": "0".repeat(64)})), text("Conflict reported.")]);
     f.runtime.start(&id, "Stale write").await.unwrap();
     f.completed(&id).await;
     assert_eq!(f.notes(), "written by my rule\n");
@@ -1850,10 +1208,7 @@ async fn permission_rules(f: &Fixture) {
 
     // A bot-specific ask rule beats the all-bots allow rule: the card asks again.
     let ask_here = add(PermissionCategory::FileWrite, PermissionAction::Ask, Some(bot.clone())).await;
-    f.provider.plan(vec![
-        use_tool("write_file", json!({"path": "notes.txt", "content": "needs a card\n"})),
-        text("Asked."),
-    ]);
+    f.provider.plan(vec![use_tool("write_file", json!({"path": "notes.txt", "content": "needs a card\n"})), text("Asked.")]);
     f.runtime.start(&id, "Write again").await.unwrap();
     let permission = f.decide(&id, "reject_once").await;
     assert!(permission.description.contains("needs a card"));
@@ -1865,20 +1220,14 @@ async fn permission_rules(f: &Fixture) {
 
     // Other categories: bot creation allowed by rule, bot messages still ask by default.
     let allow_bots = add(PermissionCategory::BotCreate, PermissionAction::Allow, None).await;
-    f.provider.plan(vec![
-        use_tool("create_bot", json!({"name": "Rule bot", "instructions": "Created by rule."})),
-        text("Created."),
-    ]);
+    f.provider.plan(vec![use_tool("create_bot", json!({"name": "Rule bot", "instructions": "Created by rule."})), text("Created.")]);
     f.runtime.start(&id, "Create a bot").await.unwrap();
     let created = f.completed(&id).await;
     let rule_bot = f.store.read(|s| s.disk().bots.iter().find(|b| b.name == "Rule bot").cloned()).expect("bot created by rule");
     let tool = created.messages.last().unwrap().tools.iter().find(|t| t.title == "Create bot: Rule bot").unwrap();
     assert_eq!(tool.approved_by_rule.as_deref(), Some(allow_bots.id.as_str()));
     let source = f.conversation(&bot).await;
-    f.provider.plan(vec![
-        use_tool("send_message", json!({"toBotId": rule_bot.id, "text": "Asked by default."})),
-        text("Queued after approval."),
-    ]);
+    f.provider.plan(vec![use_tool("send_message", json!({"toBotId": rule_bot.id, "text": "Asked by default."})), text("Queued after approval.")]);
     f.runtime.start(&source, "Message the rule bot").await.unwrap();
     f.decide(&source, "allow_once").await;
     f.completed(&source).await;
@@ -1887,10 +1236,7 @@ async fn permission_rules(f: &Fixture) {
 
     // Safety floor: a recipient conversation always asks, even with allow rules for messages.
     add(PermissionCategory::BotMessage, PermissionAction::Allow, None).await;
-    f.provider.plan(vec![
-        use_tool("send_message", json!({"toBotId": bot, "text": "Recipient reply must ask."})),
-        text("Recipient done."),
-    ]);
+    f.provider.plan(vec![use_tool("send_message", json!({"toBotId": bot, "text": "Recipient reply must ask."})), text("Recipient done.")]);
     f.runtime.start(&delivery.recipient_conversation_id, &delivery.text).await.unwrap();
     let card = f.decide(&delivery.recipient_conversation_id, "reject_once").await;
     assert!(card.description.contains("Recipient reply must ask."));
@@ -1916,10 +1262,7 @@ async fn permission_rules(f: &Fixture) {
     f.store.mutate(|s| s.set_routine_webhook(&routine.id, hash, "-key".into())).await.unwrap();
     let now = f.store.now();
     let claimed = f.store.mutate(|s| s.claim_webhook_routine(&routine.id, key, Some("please write AUTO"), now)).await.unwrap();
-    f.provider.plan(vec![
-        use_tool("write_file", json!({"path": "notes.txt", "content": "webhook write\n"})),
-        text("Webhook asked."),
-    ]);
+    f.provider.plan(vec![use_tool("write_file", json!({"path": "notes.txt", "content": "webhook write\n"})), text("Webhook asked.")]);
     f.runtime.start(&claimed.conversation_id, &claimed.prompt).await.unwrap();
     f.decide(&claimed.conversation_id, "reject_once").await;
     f.completed(&claimed.conversation_id).await;
@@ -1929,10 +1272,7 @@ async fn permission_rules(f: &Fixture) {
     for rule in f.store.read(|s| s.permission_rules().to_vec()) {
         f.store.mutate(|s| s.delete_permission_rule(&rule.id, true)).await.unwrap();
     }
-    f.provider.plan(vec![
-        use_tool("write_file", json!({"path": "notes.txt", "content": "default asks\n"})),
-        text("Default."),
-    ]);
+    f.provider.plan(vec![use_tool("write_file", json!({"path": "notes.txt", "content": "default asks\n"})), text("Default.")]);
     f.runtime.start(&id, "Write by default").await.unwrap();
     f.decide(&id, "allow_once").await;
     f.completed(&id).await;
@@ -1948,10 +1288,7 @@ fn runtime_on_the_in_process_engine() {
     let engine_root = base.join("engine");
     // SAFETY: set before the test runtime and engine threads start.
     unsafe { grok_bot_engine::host::prepare_process_environment(&engine_root) };
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         macro_rules! scenario {
             ($name:literal, $options:expr, $body:ident) => {{
@@ -1968,14 +1305,7 @@ fn runtime_on_the_in_process_engine() {
         scenario!("fingerprint", Options::default(), fingerprint_migration);
         scenario!("provider-failure", Options::default(), provider_failure);
         scenario!("redaction", Options::default(), streamed_redaction);
-        scenario!(
-            "deadlines",
-            Options {
-                idle: Duration::from_millis(400),
-                ..Options::default()
-            },
-            deadlines_and_cancellation
-        );
+        scenario!("deadlines", Options { idle: Duration::from_millis(400), ..Options::default() }, deadlines_and_cancellation);
         scenario!("limits", Options::default(), write_limits_and_model_only);
         scenario!("skills", Options::default(), skills);
         scenario!("bot-messages", Options::default(), bot_messages);

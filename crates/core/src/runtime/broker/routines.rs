@@ -57,7 +57,8 @@ pub(super) fn parse(name: &str, arguments: &Map<String, Value>) -> Option<Broker
                     None => None,
                     Some(_) => Some(uuid(arguments)?),
                 };
-                let schedule: RoutineSchedule = serde_json::from_value(arguments.get("schedule").cloned().ok_or(BrokerError::Invalid)?).map_err(|_| BrokerError::Invalid)?;
+                let schedule: RoutineSchedule =
+                    serde_json::from_value(arguments.get("schedule").cloned().ok_or(BrokerError::Invalid)?).map_err(|_| BrokerError::Invalid)?;
                 let enabled = match arguments.get("enabled") {
                     None => true,
                     Some(value) => value.as_bool().ok_or(BrokerError::Invalid)?,
@@ -120,24 +121,54 @@ impl Runtime {
                 .ok_or_else(|| HttpError::not_found("Routine does not exist for this bot.").into())
         };
         let (action, title_name, summary) = match &call {
-            Call::Save { id: None, name, prompt, schedule, enabled } => ("생성", name.clone(), format!("이름: {name}\n일정: {}\n상태: {}\n\n지시:\n{prompt}", schedule_text(schedule), if *enabled { "사용" } else { "일시 중지" })),
+            Call::Save { id: None, name, prompt, schedule, enabled } => (
+                "생성",
+                name.clone(),
+                format!("이름: {name}\n일정: {}\n상태: {}\n\n지시:\n{prompt}", schedule_text(schedule), if *enabled { "사용" } else { "일시 중지" }),
+            ),
             Call::Save { id: Some(id), name, prompt, schedule, enabled } => {
                 existing(id)?;
-                ("업데이트", name.clone(), format!("이름: {name}\n일정: {}\n상태: {}\n\n지시:\n{prompt}", schedule_text(schedule), if *enabled { "사용" } else { "일시 중지" }))
+                (
+                    "업데이트",
+                    name.clone(),
+                    format!("이름: {name}\n일정: {}\n상태: {}\n\n지시:\n{prompt}", schedule_text(schedule), if *enabled { "사용" } else { "일시 중지" }),
+                )
             }
             Call::SetEnabled { id, enabled } => {
                 let routine = existing(id)?;
-                (if *enabled { "재개" } else { "일시 중지" }, routine.name.clone(), format!("{} 루틴을 {}합니다.\n일정: {}", routine.name, if *enabled { "다시 시작" } else { "일시 중지" }, schedule_text(&routine.schedule)))
+                (
+                    if *enabled { "재개" } else { "일시 중지" },
+                    routine.name.clone(),
+                    format!("{} 루틴을 {}합니다.\n일정: {}", routine.name, if *enabled { "다시 시작" } else { "일시 중지" }, schedule_text(&routine.schedule)),
+                )
             }
             Call::Delete { id } => {
                 let routine = existing(id)?;
-                ("삭제", routine.name.clone(), format!("{} 루틴이 삭제되고 이후 실행이 중지됩니다. 이전 실행 기록과 대화는 유지됩니다.\n일정: {}", routine.name, schedule_text(&routine.schedule)))
+                (
+                    "삭제",
+                    routine.name.clone(),
+                    format!(
+                        "{} 루틴이 삭제되고 이후 실행이 중지됩니다. 이전 실행 기록과 대화는 유지됩니다.\n일정: {}",
+                        routine.name,
+                        schedule_text(&routine.schedule)
+                    ),
+                )
             }
             Call::List => unreachable!(),
         };
         let title = run.redact(&format!("루틴 {action}: {}", truncate_utf16(&title_name, 80)));
         let description = run.redact_all(&format!("{}이(가) 루틴을 저장하도록 허용할까요?\n\n{summary}", run.bot.name));
-        let tool = ToolActivity { id: new_id(), title: title.clone(), kind: "edit".into(), status: ToolStatus::Pending, input: Some(description.clone()), output: None, paths: None, local_only: None, approved_by_rule: None };
+        let tool = ToolActivity {
+            id: new_id(),
+            title: title.clone(),
+            kind: "edit".into(),
+            status: ToolStatus::Pending,
+            input: Some(description.clone()),
+            output: None,
+            paths: None,
+            local_only: None,
+            approved_by_rule: None,
+        };
         let tool_id = tool.id.clone();
         let (allow, _, options) = approval_options("Save routine once", "Deny");
         let permission = PendingPermission { id: new_id(), title, kind: "edit".into(), description, options, paths: Vec::new(), local_only: None };
@@ -158,8 +189,12 @@ impl Runtime {
                             }
                             let bot_id = run.bot.id.clone();
                             match call {
-                                Call::Save { id: None, name, prompt, schedule, enabled } => state.add_routine(RoutineInput { bot_id, name, prompt, schedule, enabled }).map(|r| (Some(r.id), r.name)),
-                                Call::Save { id: Some(id), name, prompt, schedule, enabled } => state.update_routine(&id, RoutineInput { bot_id, name: name.clone(), prompt, schedule, enabled }).map(|()| (Some(id), name)),
+                                Call::Save { id: None, name, prompt, schedule, enabled } => {
+                                    state.add_routine(RoutineInput { bot_id, name, prompt, schedule, enabled }).map(|r| (Some(r.id), r.name))
+                                }
+                                Call::Save { id: Some(id), name, prompt, schedule, enabled } => {
+                                    state.update_routine(&id, RoutineInput { bot_id, name: name.clone(), prompt, schedule, enabled }).map(|()| (Some(id), name))
+                                }
                                 Call::SetEnabled { id, enabled } => {
                                     let name = state.routine(&id)?.name.clone();
                                     state.set_routine_enabled(&id, enabled).map(|()| (Some(id), name))
@@ -178,7 +213,13 @@ impl Runtime {
         match result {
             Ok((id, name)) => {
                 run.flags().routine_changes += 1;
-                let label = match action { "생성" => "생성됨", "업데이트" => "업데이트됨", "삭제" => "삭제됨", "일시 중지" => "일시 중지됨", _ => "재개됨" };
+                let label = match action {
+                    "생성" => "생성됨",
+                    "업데이트" => "업데이트됨",
+                    "삭제" => "삭제됨",
+                    "일시 중지" => "일시 중지됨",
+                    _ => "재개됨",
+                };
                 self.settle_tool(run, &tool_id, ToolStatus::Completed, Some(run.redact(&format!("{label} 루틴: {name}")))).await;
                 let routine = id.and_then(|id| self.store.read(|state| state.disk().routines.iter().find(|r| r.id == id).map(|r| routine_json(run, r))));
                 Ok(json!({ "status": label, "routine": routine, "deleted": routine.is_none() }))

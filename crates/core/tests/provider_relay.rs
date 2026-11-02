@@ -40,7 +40,10 @@ async fn completions(State(provider): State<Provider>, headers: HeaderMap, Json(
     last["usage"] = json!({"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15});
     let first = if main {
         // Image only, in the same shape the real gateway sent: role plus `images`, no `content`.
-        chunk(json!({"role": "assistant", "images": [{"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{PNG_BASE64}")}, "index": 0}]}), Value::Null)
+        chunk(
+            json!({"role": "assistant", "images": [{"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{PNG_BASE64}")}, "index": 0}]}),
+            Value::Null,
+        )
     } else {
         chunk(json!({"role": "assistant", "content": "Chart title"}), Value::Null)
     };
@@ -106,7 +109,8 @@ async fn scenario(root: &Path, engine: &Path) {
     let base_url = start_provider(provider.clone()).await;
     let data = root.join("data");
     let app = TestApp::start(engine, data.clone()).await;
-    let (status, body) = app.api("PUT", "/api/settings", Some(json!({"baseUrl": base_url, "model": "local-test-model", "apiKey": API_KEY, "workspace": ""}))).await;
+    let (status, body) =
+        app.api("PUT", "/api/settings", Some(json!({"baseUrl": base_url, "model": "local-test-model", "apiKey": API_KEY, "workspace": ""}))).await;
     assert_eq!(status, 200, "{body}");
     let (_, state) = app.api("GET", "/api/state", None).await;
     let bot = state["bots"][0]["id"].as_str().unwrap().to_owned();
@@ -118,7 +122,8 @@ async fn scenario(root: &Path, engine: &Path) {
     let done = settled(&app, &conversation).await;
     assert_eq!(done["run"]["status"], "completed", "{done}");
     let text = done["messages"].as_array().unwrap().last().unwrap()["text"].as_str().unwrap().to_owned();
-    let id = text.split("/api/generated-images/").nth(1).and_then(|rest| rest.get(..36)).unwrap_or_else(|| panic!("no generated image link in {text:?}")).to_owned();
+    let id =
+        text.split("/api/generated-images/").nth(1).and_then(|rest| rest.get(..36)).unwrap_or_else(|| panic!("no generated image link in {text:?}")).to_owned();
     assert!(text.contains(&format!("![생성된 이미지](/api/generated-images/{id})")), "{text}");
 
     let (head, bytes) = fetch(&app, &format!("/api/generated-images/{id}")).await;

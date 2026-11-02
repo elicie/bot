@@ -6,19 +6,17 @@
 //! allow, deleting an ask rule) requires a loopback client on the server computer. LAN clients
 //! may view the rules and tighten them (add ask rules, switch to ask, delete allow rules).
 
+use axum::Router;
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, patch};
-use axum::Router;
 use grok_bot_model::{PermissionRuleInput, PermissionRulePatch};
 use serde_json::json;
 
 use crate::http::{ApiResult, Ctx, Empty, JsonBody, Remote, is_local, reply, state_reply, to_value};
 
 pub(crate) fn routes() -> Router<Ctx> {
-    Router::new()
-        .route("/permission-rules", get(list).post(add))
-        .route("/permission-rules/{id}", patch(update).delete(delete))
+    Router::new().route("/permission-rules", get(list).post(add)).route("/permission-rules/{id}", patch(update).delete(delete))
 }
 
 /// `{ rules, canAutoAllow }`: `canAutoAllow` tells the editor whether this client may loosen rules.

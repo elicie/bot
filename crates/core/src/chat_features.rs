@@ -10,13 +10,13 @@
 //! - `GET /api/conversations/:id/attachments/:attachmentId`: the stored bytes, served as an image
 //!   or as `text/plain` under a sandboxing content security policy.
 
+use axum::Router;
 use axum::body::Bytes;
 use axum::extract::rejection::BytesRejection;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::Router;
 use grok_bot_model::{Attachment, AttachmentKind, AttachmentUpload, HttpError};
 use grok_bot_store::attachments::{
     MAX_ATTACHMENT_REQUEST_BYTES, MAX_ATTACHMENTS_TOTAL_BYTES, discard_attachments, prepare_attachments, read_attachment, remove_conversation_files,
@@ -31,10 +31,7 @@ pub(crate) fn routes() -> Router<Ctx> {
         .route("/bots/{id}/unread", post(set_unread))
         .route("/bots/{id}/notify", post(set_notify))
         .route("/bots/{id}", axum::routing::delete(delete_bot))
-        .route(
-            "/conversations/{id}/attachment-messages",
-            post(send_with_attachments).layer(DefaultBodyLimit::max(MAX_ATTACHMENT_REQUEST_BYTES)),
-        )
+        .route("/conversations/{id}/attachment-messages", post(send_with_attachments).layer(DefaultBodyLimit::max(MAX_ATTACHMENT_REQUEST_BYTES)))
         .route("/conversations/{id}/attachments/{attachment_id}", get(attachment))
         .route("/generated-images/{id}", get(generated_image))
 }
@@ -60,7 +57,8 @@ pub(crate) async fn prune_generated_images(store: &std::sync::Arc<grok_bot_store
 /// A model-generated image (`crate::provider_relay`), served like an image attachment.
 async fn generated_image(State(ctx): State<Ctx>, Path(id): Path<String>) -> ApiResult {
     let data_dir = ctx.store.data_dir().to_path_buf();
-    let (bytes, mime) = tokio::task::spawn_blocking(move || grok_bot_store::generated_images::read_generated_image(&data_dir, &id)).await.map_err(|_| failed())??;
+    let (bytes, mime) =
+        tokio::task::spawn_blocking(move || grok_bot_store::generated_images::read_generated_image(&data_dir, &id)).await.map_err(|_| failed())??;
     let mut response = bytes.into_response();
     let headers = response.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
@@ -125,19 +123,11 @@ fn failed() -> ApiError {
     ApiError(HttpError::new(500, "The operation failed. Check that the workspace and data directory are accessible."))
 }
 
-async fn send_with_attachments(
-    State(ctx): State<Ctx>,
-    ConnectInfo(remote): Remote,
-    Path(id): Path<String>,
-    body: Result<Bytes, BytesRejection>,
-) -> ApiResult {
+async fn send_with_attachments(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(id): Path<String>, body: Result<Bytes, BytesRejection>) -> ApiResult {
     let bytes = match body {
         Ok(bytes) => bytes,
         Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
-            return Err(ApiError(HttpError::too_large(format!(
-                "Attachments of one message may total at most {}.",
-                size_label(MAX_ATTACHMENTS_TOTAL_BYTES)
-            ))));
+            return Err(ApiError(HttpError::too_large(format!("Attachments of one message may total at most {}.", size_label(MAX_ATTACHMENTS_TOTAL_BYTES)))));
         }
         Err(_) => return Err(bad_request("Request body must be valid JSON.")),
     };
@@ -191,18 +181,16 @@ async fn send_with_attachments(
 
 /// RFC 5987 `filename*` value.
 fn encoded_filename(name: &str) -> String {
-    name.bytes()
-        .map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
-        .collect()
+    name.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
 async fn attachment(State(ctx): State<Ctx>, Path((id, attachment_id)): Path<(String, String)>) -> ApiResult {
     let meta = ctx
         .store
         .read(|s| {
-            s.conversation(&id).ok().and_then(|conversation| {
-                conversation.messages.iter().flat_map(|m| m.attachments.iter().flatten()).find(|a| a.id == attachment_id).cloned()
-            })
+            s.conversation(&id)
+                .ok()
+                .and_then(|conversation| conversation.messages.iter().flat_map(|m| m.attachments.iter().flatten()).find(|a| a.id == attachment_id).cloned())
         })
         .ok_or_else(|| ApiError(HttpError::not_found("Attachment does not exist.")))?;
     let data_dir = ctx.store.data_dir().to_path_buf();

@@ -32,9 +32,13 @@ async fn http_mcp(State(state): State<Arc<Mutex<HttpFixture>>>, headers: HeaderM
     state.lock().unwrap().authorization.push(authorization);
     let Some(id) = request.get("id").cloned() else { return StatusCode::ACCEPTED.into_response() };
     let result = match request["method"].as_str().unwrap_or_default() {
-        "initialize" => json!({"protocolVersion": request["params"]["protocolVersion"], "capabilities": {"tools": {"listChanged": false}}, "serverInfo": {"name": "http-fixture", "version": "1.0.0"}}),
+        "initialize" => {
+            json!({"protocolVersion": request["params"]["protocolVersion"], "capabilities": {"tools": {"listChanged": false}}, "serverInfo": {"name": "http-fixture", "version": "1.0.0"}})
+        }
         "ping" => json!({}),
-        "tools/list" => json!({"tools": [{"name": "lookup", "description": "Look up a fixture record.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"], "additionalProperties": false}}]}),
+        "tools/list" => {
+            json!({"tools": [{"name": "lookup", "description": "Look up a fixture record.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"], "additionalProperties": false}}]})
+        }
         "tools/call" => {
             state.lock().unwrap().calls.push(request["params"].clone());
             let query = request["params"]["arguments"]["query"].as_str().unwrap_or_default();
@@ -159,7 +163,12 @@ pub(super) async fn custom_mcp_servers(f: &Fixture) {
 
     // A rule allows one server without asking; the other server still asks.
     let rule = {
-        let input = PermissionRuleInput { category: PermissionCategory::McpTool, action: PermissionAction::Allow, bot_id: Some(bot.clone()), server: Some("web".into()) };
+        let input = PermissionRuleInput {
+            category: PermissionCategory::McpTool,
+            action: PermissionAction::Allow,
+            bot_id: Some(bot.clone()),
+            server: Some("web".into()),
+        };
         f.store.mutate(move |s| s.add_permission_rule(input, true)).await.unwrap()
     };
     f.provider.plan(vec![call("web__lookup", json!({"query": "beta"})), call("local__whoami", json!({})), text("Rule applied.")]);

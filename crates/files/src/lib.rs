@@ -26,8 +26,7 @@ const CONFLICT_ERROR: &str = "File changed on disk. Reload it before saving.";
 
 const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY.union(OFlags::DIRECTORY).union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
 const READ_FLAGS: OFlags = OFlags::RDONLY.union(OFlags::NOFOLLOW).union(OFlags::NONBLOCK).union(OFlags::CLOEXEC);
-const CREATE_FLAGS: OFlags =
-    OFlags::WRONLY.union(OFlags::CREATE).union(OFlags::EXCL).union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
+const CREATE_FLAGS: OFlags = OFlags::WRONLY.union(OFlags::CREATE).union(OFlags::EXCL).union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
 
 /// SHA-256 hex digest used for optimistic save conflicts.
 pub fn content_hash(bytes: &[u8]) -> String {
@@ -155,11 +154,7 @@ fn normalize(path: &Path) -> PathBuf {
 
 /// `path.resolve(input)`.
 fn resolve(input: &Path) -> io::Result<PathBuf> {
-    if input.is_absolute() {
-        Ok(normalize(input))
-    } else {
-        Ok(normalize(&std::env::current_dir()?.join(input)))
-    }
+    if input.is_absolute() { Ok(normalize(input)) } else { Ok(normalize(&std::env::current_dir()?.join(input))) }
 }
 
 /// POSIX `path.dirname` and `path.basename` on raw bytes.
@@ -379,9 +374,7 @@ impl WorkspaceFiles {
             });
             Ok(FileListing { path: relative.clone(), entries })
         })();
-        listing.map_err(|failure| {
-            if failure.is_missing() { HttpError::not_found("Directory does not exist.") } else { failure.into_http() }
-        })
+        listing.map_err(|failure| if failure.is_missing() { HttpError::not_found("Directory does not exist.") } else { failure.into_http() })
     }
 
     pub fn read(&self, input: &str) -> HttpResult<FileDocument> {

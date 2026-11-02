@@ -39,15 +39,11 @@ fn content_text(content: &Value) -> String {
 fn sse(model: &str, delta: Value, finish: &str) -> Response {
     let chunk = |delta: Value, reason: Value| json!({"id": "chatcmpl-p0", "object": "chat.completion.chunk", "created": 1, "model": model, "choices": [{"index": 0, "delta": delta, "finish_reason": reason}]});
     let mut body = String::new();
-    for value in [
-        chunk(json!({"role": "assistant"}), Value::Null),
-        chunk(delta, Value::Null),
-        {
-            let mut last = chunk(json!({}), json!(finish));
-            last["usage"] = json!({"prompt_tokens": 100, "completion_tokens": 12, "total_tokens": 112});
-            last
-        },
-    ] {
+    for value in [chunk(json!({"role": "assistant"}), Value::Null), chunk(delta, Value::Null), {
+        let mut last = chunk(json!({}), json!(finish));
+        last["usage"] = json!({"prompt_tokens": 100, "completion_tokens": 12, "total_tokens": 112});
+        last
+    }] {
         body.push_str(&format!("data: {value}\n\n"));
     }
     body.push_str("data: [DONE]\n\n");
@@ -59,14 +55,17 @@ fn text(model: &str, text: &str) -> Response {
 }
 
 fn tool(model: &str, id: usize, name: &str, arguments: Value) -> Response {
-    sse(model, json!({"tool_calls": [{"index": 0, "id": format!("call_p0_{id}"), "type": "function", "function": {"name": name, "arguments": arguments.to_string()}}]}), "tool_calls")
+    sse(
+        model,
+        json!({"tool_calls": [{"index": 0, "id": format!("call_p0_{id}"), "type": "function", "function": {"name": name, "arguments": arguments.to_string()}}]}),
+        "tool_calls",
+    )
 }
 
 async fn completions(State(state): State<Shared>, Json(request): Json<Value>) -> Response {
     let model = request["model"].as_str().unwrap_or_default().to_owned();
     let messages = request["messages"].as_array().cloned().unwrap_or_default();
-    let names: Vec<String> = request["tools"].as_array().into_iter().flatten()
-        .filter_map(|t| t["function"]["name"].as_str().map(str::to_owned)).collect();
+    let names: Vec<String> = request["tools"].as_array().into_iter().flatten().filter_map(|t| t["function"]["name"].as_str().map(str::to_owned)).collect();
     let latest = messages.iter().rposition(|m| m["role"] == "user");
     let user = latest.map(|i| content_text(&messages[i]["content"])).unwrap_or_default();
     let count = {
@@ -82,9 +81,13 @@ async fn completions(State(state): State<Shared>, Json(request): Json<Value>) ->
     if !names.iter().any(|n| n == "search_tool") {
         return text(&model, "P0 title");
     }
-    let after: Vec<String> = latest.map(|i| &messages[i + 1..]).unwrap_or(&[]).iter()
+    let after: Vec<String> = latest
+        .map(|i| &messages[i + 1..])
+        .unwrap_or(&[])
+        .iter()
         .flat_map(|m| m["tool_calls"].as_array().cloned().unwrap_or_default())
-        .filter_map(|c| c["function"]["name"].as_str().map(str::to_owned)).collect();
+        .filter_map(|c| c["function"]["name"].as_str().map(str::to_owned))
+        .collect();
     if user.contains("SLOW") {
         tokio::time::sleep(Duration::from_secs(60)).await;
         return text(&model, "slow finished");
@@ -116,9 +119,13 @@ async fn models() -> Json<Value> {
 async fn mcp(State(state): State<Shared>, Json(request): Json<Value>) -> Response {
     let Some(id) = request.get("id").cloned() else { return StatusCode::ACCEPTED.into_response() };
     let result = match request["method"].as_str().unwrap_or_default() {
-        "initialize" => json!({"protocolVersion": request["params"]["protocolVersion"], "capabilities": {"tools": {"listChanged": false}}, "serverInfo": {"name": "p0-workspace", "version": "1.0.0"}}),
+        "initialize" => {
+            json!({"protocolVersion": request["params"]["protocolVersion"], "capabilities": {"tools": {"listChanged": false}}, "serverInfo": {"name": "p0-workspace", "version": "1.0.0"}})
+        }
         "ping" => json!({}),
-        "tools/list" => json!({"tools": [{"name": "echo", "description": "Echo text back.", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"], "additionalProperties": false}}]}),
+        "tools/list" => {
+            json!({"tools": [{"name": "echo", "description": "Echo text back.", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"], "additionalProperties": false}}]})
+        }
         "tools/call" => {
             state.lock().unwrap().mcp_calls.push(request["params"].clone());
             let said = request["params"]["arguments"]["text"].as_str().unwrap_or_default();
@@ -202,8 +209,7 @@ fn session_request(cwd: &Path, origin: &str) -> acp::NewSessionRequest {
     });
     acp::NewSessionRequest::new(cwd.to_path_buf())
         .mcp_servers(vec![acp::McpServer::Http(
-            acp::McpServerHttp::new("workspace", format!("{origin}/mcp"))
-                .headers(vec![acp::HttpHeader::new("Authorization", "Bearer p0-token")]),
+            acp::McpServerHttp::new("workspace", format!("{origin}/mcp")).headers(vec![acp::HttpHeader::new("Authorization", "Bearer p0-token")]),
         )])
         .meta(meta.as_object().cloned())
 }
@@ -262,7 +268,10 @@ fn in_process_engine_p0() {
         assert!(said.contains("tool-done"), "{said}");
         assert_eq!(calls.len(), 1, "{calls:?}");
         assert_eq!(calls[0]["name"], "echo");
-        let (offered, auxiliary) = { let r = recorded.lock().unwrap(); (r.offered_tools.clone(), r.auxiliary_tools.clone()) };
+        let (offered, auxiliary) = {
+            let r = recorded.lock().unwrap();
+            (r.offered_tools.clone(), r.auxiliary_tools.clone())
+        };
         eprintln!("[p0] B offered tools: main={offered:?} auxiliary={auxiliary:?}");
         assert_eq!(offered.into_iter().collect::<Vec<_>>(), ["search_tool", "use_tool"]);
 
@@ -298,8 +307,13 @@ fn in_process_engine_p0() {
         host.shutdown();
         let (host, events) = EngineHost::start(settings(&root, &origin)).await.expect("engine restarts");
         pump(events, observed.clone());
-        host.load_session(acp::LoadSessionRequest::new(first.clone(), cwd.clone()).mcp_servers(session_request(&cwd, &origin).mcp_servers).meta(session_request(&cwd, &origin).meta))
-            .await.expect("load session");
+        host.load_session(
+            acp::LoadSessionRequest::new(first.clone(), cwd.clone())
+                .mcp_servers(session_request(&cwd, &origin).mcp_servers)
+                .meta(session_request(&cwd, &origin).meta),
+        )
+        .await
+        .expect("load session");
         take_text(&observed, &first); // replayed history
         let response = host.prompt(prompt(&first, "RECALL it")).await.expect("recall");
         assert_eq!(response.stop_reason, acp::StopReason::EndTurn);

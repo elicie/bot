@@ -25,7 +25,12 @@ async fn add_group(State(ctx): State<Ctx>, axum::extract::ConnectInfo(remote): R
     Ok(reply(StatusCode::CREATED, json!({ "group": group, "state": ctx.store.snapshot() }), &remote))
 }
 
-async fn update_group(State(ctx): State<Ctx>, axum::extract::ConnectInfo(remote): Remote, Path(id): Path<String>, JsonBody(input): JsonBody<GroupPatch>) -> ApiResult {
+async fn update_group(
+    State(ctx): State<Ctx>,
+    axum::extract::ConnectInfo(remote): Remote,
+    Path(id): Path<String>,
+    JsonBody(input): JsonBody<GroupPatch>,
+) -> ApiResult {
     if input == GroupPatch::default() {
         return Err(bad_request("Provide a group field to update."));
     }
@@ -36,12 +41,25 @@ async fn update_group(State(ctx): State<Ctx>, axum::extract::ConnectInfo(remote)
 
 async fn delete_group(State(ctx): State<Ctx>, axum::extract::ConnectInfo(remote): Remote, Path(id): Path<String>, JsonBody(_): JsonBody<Empty>) -> ApiResult {
     let store = ctx.store.clone();
-    ctx.queue.run(async move { store.mutate(|s| s.delete_group(&id)).await }).await?;
+    let removed = ctx.queue.run(async move { store.mutate(|s| s.delete_group(&id)).await }).await?;
+    // Attachment blobs and engine sessions of the removed conversations and their threads.
+    let data_dir = ctx.store.data_dir().to_path_buf();
+    let _ = tokio::task::spawn_blocking(move || {
+        for conversation_id in removed {
+            grok_bot_store::attachments::remove_conversation_files(&data_dir, &conversation_id);
+        }
+    })
+    .await;
     crate::chat_features::prune_generated_images(&ctx.store).await;
     Ok(state_reply(&ctx, StatusCode::OK, &remote))
 }
 
-async fn add_group_conversation(State(ctx): State<Ctx>, axum::extract::ConnectInfo(remote): Remote, Path(id): Path<String>, JsonBody(_): JsonBody<Empty>) -> ApiResult {
+async fn add_group_conversation(
+    State(ctx): State<Ctx>,
+    axum::extract::ConnectInfo(remote): Remote,
+    Path(id): Path<String>,
+    JsonBody(_): JsonBody<Empty>,
+) -> ApiResult {
     let store = ctx.store.clone();
     let conversation = ctx.queue.run(async move { store.mutate(|s| s.add_group_conversation(&id)).await }).await?;
     Ok(reply(StatusCode::CREATED, json!({ "conversation": conversation, "state": ctx.store.snapshot() }), &remote))
@@ -53,7 +71,12 @@ struct NewThread {
     message_id: String,
 }
 
-async fn create_thread(State(ctx): State<Ctx>, axum::extract::ConnectInfo(remote): Remote, Path(id): Path<String>, JsonBody(input): JsonBody<NewThread>) -> ApiResult {
+async fn create_thread(
+    State(ctx): State<Ctx>,
+    axum::extract::ConnectInfo(remote): Remote,
+    Path(id): Path<String>,
+    JsonBody(input): JsonBody<NewThread>,
+) -> ApiResult {
     let store = ctx.store.clone();
     let existed = ctx.store.read(|s| s.thread_for(&input.message_id).is_some());
     let conversation = ctx.queue.run(async move { store.mutate(|s| s.create_thread(&id, &input.message_id)).await }).await?;

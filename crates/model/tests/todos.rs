@@ -14,25 +14,16 @@ fn run_todos_are_optional_for_old_state_and_reset_for_new_runs() {
 
 #[test]
 fn todo_items_round_trip_the_public_content_and_status_contract() {
-    for (status, name) in [
-        (TodoStatus::Pending, "pending"),
-        (TodoStatus::InProgress, "in_progress"),
-        (TodoStatus::Completed, "completed"),
-        (TodoStatus::Cancelled, "cancelled"),
-    ] {
-        let todo = TodoItem {
-            content: "한글 checklist".into(),
-            status,
-        };
+    for (status, name) in
+        [(TodoStatus::Pending, "pending"), (TodoStatus::InProgress, "in_progress"), (TodoStatus::Completed, "completed"), (TodoStatus::Cancelled, "cancelled")]
+    {
+        let todo = TodoItem { content: "한글 checklist".into(), status };
         let value = json!({"content": "한글 checklist", "status": name});
         assert_eq!(serde_json::to_value(&todo).unwrap(), value);
         assert_eq!(serde_json::from_value::<TodoItem>(value).unwrap(), todo);
     }
-    for invalid in [
-        json!({"content": "Task", "status": "unknown"}),
-        json!({"content": "Task"}),
-        json!({"content": "Task", "status": "pending", "extra": true}),
-    ] {
+    for invalid in [json!({"content": "Task", "status": "unknown"}), json!({"content": "Task"}), json!({"content": "Task", "status": "pending", "extra": true})]
+    {
         assert!(serde_json::from_value::<TodoItem>(invalid).is_err());
     }
 }

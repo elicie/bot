@@ -78,7 +78,12 @@ async fn knowledge(root: &Path, engine: &Path) {
 async fn templates(root: &Path, engine: &Path) {
     let (app, bot) = start(root, engine, "templates").await;
     app.api("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "name": "Reviewer", "instructions": "Review carefully.", "shape": "heart" }))).await;
-    app.api("POST", &format!("/api/bots/{bot}/skills"), Some(json!({ "name": "review", "description": "Use to review.", "instructions": "Check everything." }))).await;
+    app.api(
+        "POST",
+        &format!("/api/bots/{bot}/skills"),
+        Some(json!({ "name": "review", "description": "Use to review.", "instructions": "Check everything." })),
+    )
+    .await;
     app.api("POST", &format!("/api/bots/{bot}/memories"), Some(json!({ "texts": ["Team uses Rust"] }))).await;
     let (status, template) = app.api("GET", &format!("/api/bots/{bot}/template"), None).await;
     assert_eq!(status, 200, "{template}");

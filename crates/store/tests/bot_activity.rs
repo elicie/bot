@@ -97,7 +97,13 @@ async fn deleting_a_bot_is_refused_for_the_last_bot_active_runs_and_queued_work(
     f.finish(&other).await;
 
     // A queued routine run of the bot.
-    let input = RoutineInput { bot_id: second.clone(), name: "Daily".into(), prompt: "Report".into(), schedule: RoutineSchedule::Interval { minutes: 60 }, enabled: true };
+    let input = RoutineInput {
+        bot_id: second.clone(),
+        name: "Daily".into(),
+        prompt: "Report".into(),
+        schedule: RoutineSchedule::Interval { minutes: 60 },
+        enabled: true,
+    };
     let routine = f.store.mutate(|s| s.add_routine(input)).await.unwrap().id;
     let now = f.now();
     f.store.mutate(|s| s.run_routine(&routine, now)).await.unwrap();
@@ -171,10 +177,8 @@ async fn receive(f: &Fixture, delivery: &BotDelivery, finish: bool) -> Sending {
     f.store
         .mutate(move |s| {
             let conversation = s.conversation_mut(&recipient)?;
-            conversation.messages = vec![
-                Message { source_bot_id: Some(from), ..message(Role::User, &text, &now) },
-                Message { id: a, ..message(Role::Assistant, "Answer", &now) },
-            ];
+            conversation.messages =
+                vec![Message { source_bot_id: Some(from), ..message(Role::User, &text, &now) }, Message { id: a, ..message(Role::Assistant, "Answer", &now) }];
             conversation.run = RunState { id: r, status: RunStatus::Running, started_at: Some(now), ..RunState::idle() };
             Ok(())
         })
@@ -204,7 +208,8 @@ async fn chain(f: &Fixture) -> (String, String, String, BotDelivery, BotDelivery
     f.finish(&y.source).await;
     receive(f, &second, true).await;
     add_conversation(f, &c).await;
-    let input = RoutineInput { bot_id: b.clone(), name: "B routine".into(), prompt: "Run".into(), schedule: RoutineSchedule::Interval { minutes: 30 }, enabled: true };
+    let input =
+        RoutineInput { bot_id: b.clone(), name: "B routine".into(), prompt: "Run".into(), schedule: RoutineSchedule::Interval { minutes: 30 }, enabled: true };
     let routine = f.store.mutate(|s| s.add_routine(input)).await.unwrap().id;
     let now = f.now();
     let run = f.store.mutate(|s| s.run_routine(&routine, now)).await.unwrap();
@@ -312,7 +317,10 @@ fn attachment_uploads_are_validated_against_types_and_limits() {
         (error.status, error.message)
     };
     assert_eq!(error((0..9).map(|i| upload(&format!("{i}.txt"), "text/plain", b"x")).collect()), (400, "Attach at most 8 files to one message.".into()));
-    assert_eq!(error(vec![upload("big.txt", "text/plain", &vec![b'a'; MAX_TEXT_ATTACHMENT_BYTES + 1])]), (413, "\"big.txt\" is too large to attach (maximum 256 KB for text files).".into()));
+    assert_eq!(
+        error(vec![upload("big.txt", "text/plain", &vec![b'a'; MAX_TEXT_ATTACHMENT_BYTES + 1])]),
+        (413, "\"big.txt\" is too large to attach (maximum 256 KB for text files).".into())
+    );
     let mut big_image = PNG.to_vec();
     big_image.resize(MAX_IMAGE_ATTACHMENT_BYTES + 1, 0);
     assert_eq!(error(vec![upload("big.png", "image/png", &big_image)]), (413, "\"big.png\" is too large to attach (maximum 5 MB).".into()));

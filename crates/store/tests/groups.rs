@@ -12,7 +12,12 @@ fn bot_input(name: &str) -> BotInput {
 }
 
 fn group_input(name: &str, members: &[&str]) -> GroupInput {
-    GroupInput { name: name.into(), color: Some("#00c77b".into()), shape: Some(AvatarShape::Cloud), member_bot_ids: members.iter().map(|id| id.to_string()).collect() }
+    GroupInput {
+        name: name.into(),
+        color: Some("#00c77b".into()),
+        shape: Some(AvatarShape::Cloud),
+        member_bot_ids: members.iter().map(|id| id.to_string()).collect(),
+    }
 }
 
 async fn add_bot(f: &Fixture, name: &str) -> String {
@@ -93,7 +98,12 @@ async fn members_and_fields_are_edited_with_idle_and_round_checks() {
     let id = group.id.clone();
     let empty = f.store.mutate(|s| s.update_group(&id, GroupPatch::default())).await.unwrap_err();
     assert_eq!(empty.message, "Provide a group field to update.");
-    let patch = GroupPatch { name: Some("Renamed".into()), member_bot_ids: Some(vec![third.clone(), grok.clone(), second.clone()]), pinned: Some(true), ..GroupPatch::default() };
+    let patch = GroupPatch {
+        name: Some("Renamed".into()),
+        member_bot_ids: Some(vec![third.clone(), grok.clone(), second.clone()]),
+        pinned: Some(true),
+        ..GroupPatch::default()
+    };
     f.store.mutate(|s| s.update_group(&id, patch)).await.unwrap();
     let edited = f.store.read(|s| s.group(&id).unwrap().clone());
     assert_eq!((edited.name.as_str(), edited.pinned), ("Renamed", Some(true)));
@@ -103,7 +113,11 @@ async fn members_and_fields_are_edited_with_idle_and_round_checks() {
     let conversation = f.store.mutate(|s| s.add_group_conversation(&id)).await.unwrap();
     assert_eq!((conversation.bot_id.as_str(), conversation.group_id.as_deref()), (id.as_str(), Some(id.as_str())));
     f.start(&conversation.id).await;
-    let busy = f.store.mutate(|s| s.update_group(&id, GroupPatch { member_bot_ids: Some(vec![grok.clone(), second.clone()]), ..GroupPatch::default() })).await.unwrap_err();
+    let busy = f
+        .store
+        .mutate(|s| s.update_group(&id, GroupPatch { member_bot_ids: Some(vec![grok.clone(), second.clone()]), ..GroupPatch::default() }))
+        .await
+        .unwrap_err();
     assert_eq!(busy.status, 409);
     f.store.mutate(|s| s.update_group(&id, GroupPatch { name: Some("While running".into()), ..GroupPatch::default() })).await.unwrap();
     f.finish(&conversation.id).await;
@@ -119,7 +133,11 @@ async fn members_and_fields_are_edited_with_idle_and_round_checks() {
         .await
         .unwrap();
     assert!(f.store.read(|s| s.group_round_pending(&conversation.id)));
-    let pending = f.store.mutate(|s| s.update_group(&id, GroupPatch { member_bot_ids: Some(vec![grok.clone(), second.clone()]), ..GroupPatch::default() })).await.unwrap_err();
+    let pending = f
+        .store
+        .mutate(|s| s.update_group(&id, GroupPatch { member_bot_ids: Some(vec![grok.clone(), second.clone()]), ..GroupPatch::default() }))
+        .await
+        .unwrap_err();
     assert_eq!((pending.status, pending.message.as_str()), (409, "Wait for the group to finish answering or stop it first."));
     assert_eq!(f.store.mutate(|s| s.delete_group(&id)).await.unwrap_err().status, 409);
 
@@ -168,7 +186,11 @@ async fn deleting_a_group_removes_its_conversations_and_threads_but_keeps_bots()
     f.start(&direct.id).await;
     assert_eq!(f.store.mutate(|s| s.delete_group(&group.id)).await.unwrap_err().status, 409);
     f.finish(&direct.id).await;
-    f.store.mutate(|s| s.delete_group(&group.id)).await.unwrap();
+    let mut removed = f.store.mutate(|s| s.delete_group(&group.id)).await.unwrap();
+    removed.sort();
+    let mut expected = vec![group_conversation.id.clone(), group_thread.id.clone()];
+    expected.sort();
+    assert_eq!(removed, expected, "the removed conversations and threads are reported for file cleanup");
     let ids: Vec<String> = f.store.read(|s| s.disk().conversations.iter().map(|c| c.id.clone()).collect());
     assert!(!ids.contains(&group_conversation.id) && !ids.contains(&group_thread.id));
     assert!(ids.contains(&direct.id) && ids.contains(&direct_thread.id));
@@ -264,7 +286,8 @@ async fn groups_threads_and_rounds_persist_and_dangling_members_are_pruned_on_lo
             let conversation = s.conversation_mut(&round_conversation)?;
             conversation.run.status = RunStatus::Completed;
             conversation.group_round = Some(GroupRound { id: new_id(), user_message_id: round_user, pending_bot_ids: pending, created_at: round_now });
-            conversation.member_sessions = Some(vec![MemberSession { bot_id: grok_session(), session_id: "session-1".into(), session_fingerprint: "f".repeat(64) }]);
+            conversation.member_sessions =
+                Some(vec![MemberSession { bot_id: grok_session(), session_id: "session-1".into(), session_fingerprint: "f".repeat(64) }]);
             Ok(())
         })
         .await

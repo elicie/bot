@@ -24,7 +24,19 @@ const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 const UPSTREAM_IDLE: Duration = Duration::from_secs(12);
 const TUNNEL_IDLE: Duration = Duration::from_secs(30);
 pub const DENIED_BODY: &str = "Network access was denied by the managed computer policy.";
-const HOP_HEADERS: [&str; 11] = ["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade", "authorization", "cookie"];
+const HOP_HEADERS: [&str; 11] = [
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "authorization",
+    "cookie",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProxyConfiguration {
@@ -178,7 +190,9 @@ impl ComputerProxy {
     pub fn configuration(&self) -> HttpResult<ProxyConfiguration> {
         let state = self.state();
         match state.port {
-            Some(port) if !state.stopped => Ok(ProxyConfiguration { server: format!("http://127.0.0.1:{port}"), username: "computer".into(), password: self.credentials.clone() }),
+            Some(port) if !state.stopped => {
+                Ok(ProxyConfiguration { server: format!("http://127.0.0.1:{port}"), username: "computer".into(), password: self.credentials.clone() })
+            }
             _ => Err(stopped_error()),
         }
     }
@@ -272,12 +286,19 @@ impl ComputerProxy {
             return Err(Some(stopped_error()));
         }
         let length = head.header("content-length");
-        if !matches!(head.method.as_str(), "GET" | "HEAD" | "OPTIONS") || head.header("upgrade").is_some() || length.is_some_and(|value| value != b"0") || head.header("transfer-encoding").is_some() {
+        if !matches!(head.method.as_str(), "GET" | "HEAD" | "OPTIONS")
+            || head.header("upgrade").is_some()
+            || length.is_some_and(|value| value != b"0")
+            || head.header("transfer-encoding").is_some()
+        {
             return Err(Some(HttpError::forbidden("Only public read-only browsing is allowed.")));
         }
         if head.method == "GET" && self.probe_url().is_ok_and(|probe| probe == head.target) {
             let body = self.probe_body();
-            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
             let _ = socket.write_all(response.as_bytes()).await;
             let _ = socket.shutdown().await;
             return Ok(());
@@ -327,7 +348,9 @@ impl ComputerProxy {
         let status = response.code.unwrap_or(502);
         let reason_phrase: String = response.reason.unwrap_or("").chars().filter(|c| !c.is_control()).collect();
         let remote: Vec<(String, Vec<u8>)> = response.headers.iter().map(|header| (header.name.to_owned(), header.value.to_vec())).collect();
-        let attachment = remote.iter().any(|(name, value)| name.eq_ignore_ascii_case("content-disposition") && String::from_utf8_lossy(value).to_ascii_lowercase().contains("attachment"));
+        let attachment = remote.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("content-disposition") && String::from_utf8_lossy(value).to_ascii_lowercase().contains("attachment")
+        });
         if attachment {
             drop(upstream);
             respond(socket, 403, reason(403), "", "Downloads are not allowed.").await;

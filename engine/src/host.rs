@@ -57,7 +57,10 @@ pub enum EngineEvent {
     },
     /// An agent extension notification (`method` as sent, e.g. `x.ai/mcp/server_status`), with
     /// its parameters parsed as JSON (`Null` when they do not parse).
-    Extension { method: String, params: serde_json::Value },
+    Extension {
+        method: String,
+        params: serde_json::Value,
+    },
 }
 
 type Job = Box<dyn FnOnce(Rc<acp::ClientSideConnection>) -> LocalBoxFuture<'static, ()> + Send>;
@@ -214,12 +217,7 @@ fn write_private(path: &Path, contents: &str) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let temporary = path.with_extension("tmp");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&temporary)?;
+    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&temporary)?;
     file.write_all(contents.as_bytes())?;
     file.sync_all()?;
     std::fs::rename(temporary, path)?;
@@ -232,17 +230,12 @@ struct AppClient {
 
 #[async_trait::async_trait(?Send)]
 impl acp::Client for AppClient {
-    async fn request_permission(
-        &self,
-        request: acp::RequestPermissionRequest,
-    ) -> acp::Result<acp::RequestPermissionResponse> {
+    async fn request_permission(&self, request: acp::RequestPermissionRequest) -> acp::Result<acp::RequestPermissionResponse> {
         let (respond, decision) = oneshot::channel();
         if self.events.send(EngineEvent::Permission { request, respond }).is_err() {
             return Ok(acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled));
         }
-        Ok(decision.await.unwrap_or_else(|_| {
-            acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled)
-        }))
+        Ok(decision.await.unwrap_or_else(|_| acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled)))
     }
 
     async fn session_notification(&self, notification: acp::SessionNotification) -> acp::Result<()> {
@@ -262,8 +255,7 @@ impl EngineHost {
     /// succeeded. Events are delivered on the returned receiver.
     pub async fn start(settings: EngineSettings) -> Result<(Self, mpsc::UnboundedReceiver<EngineEvent>)> {
         let input = config_toml(&settings);
-        write_private(&settings.grok_home.join("config.toml"), &input)
-            .context("Cannot write the engine configuration")?;
+        write_private(&settings.grok_home.join("config.toml"), &input).context("Cannot write the engine configuration")?;
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (jobs_tx, jobs_rx) = mpsc::unbounded_channel::<Job>();
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -298,11 +290,7 @@ impl EngineHost {
                 let _ = tx.send(job(connection).await);
             })
         });
-        self.jobs
-            .as_ref()
-            .context("The engine is shut down")?
-            .send(job)
-            .map_err(|_| anyhow!("The engine thread is not running"))?;
+        self.jobs.as_ref().context("The engine is shut down")?.send(job).map_err(|_| anyhow!("The engine thread is not running"))?;
         rx.await.map_err(|_| anyhow!("The engine thread stopped before answering"))
     }
 
@@ -314,10 +302,7 @@ impl EngineHost {
         Ok(self.call(move |c| async move { c.load_session(request).await }).await??)
     }
 
-    pub async fn set_session_model(
-        &self,
-        request: acp::SetSessionModelRequest,
-    ) -> Result<acp::SetSessionModelResponse> {
+    pub async fn set_session_model(&self, request: acp::SetSessionModelRequest) -> Result<acp::SetSessionModelResponse> {
         Ok(self.call(move |c| async move { c.set_session_model(request).await }).await??)
     }
 
@@ -326,9 +311,7 @@ impl EngineHost {
     }
 
     pub async fn cancel(&self, session_id: acp::SessionId) -> Result<()> {
-        Ok(self
-            .call(move |c| async move { c.cancel(acp::CancelNotification::new(session_id)).await })
-            .await??)
+        Ok(self.call(move |c| async move { c.cancel(acp::CancelNotification::new(session_id)).await }).await??)
     }
 
     /// Stop the engine thread. In-flight calls fail.
@@ -412,14 +395,9 @@ async fn start_agent(
     xai_grok_shell::agent::app::suppress_otel();
 
     let auth_manager = Arc::new(config.create_auth_manager());
-    let boot = xai_grok_shell::agent::init::resolve_boot_startup_settings(
-        &mut config,
-        cancel,
-        true,
-        auth_manager.current(),
-    )
-    .await
-    .map_err(|error| anyhow!("Engine bootstrap failed: {error}"))?;
+    let boot = xai_grok_shell::agent::init::resolve_boot_startup_settings(&mut config, cancel, true, auth_manager.current())
+        .await
+        .map_err(|error| anyhow!("Engine bootstrap failed: {error}"))?;
     let (gateway_tx, gateway_rx) = mpsc::unbounded_channel();
     let agent = MvpAgent::new(AcpAgentGatewaySender::new(gateway_tx), &config, auth_manager, None, Some(boot))
         .map_err(|error| anyhow!("Engine configuration rejected: {error}"))?;
@@ -428,14 +406,9 @@ async fn start_agent(
     let (client_to_agent, agent_from_client) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);
     let (agent_to_client, client_from_agent) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);
     let agent_incoming = LineBufferedRead::spawn_local(agent_from_client.compat());
-    let (agent_connection, agent_io) = acp::AgentSideConnection::new(
-        Rc::clone(&agent),
-        agent_to_client.compat_write(),
-        agent_incoming,
-        |future| {
-            tokio::task::spawn_local(future);
-        },
-    );
+    let (agent_connection, agent_io) = acp::AgentSideConnection::new(Rc::clone(&agent), agent_to_client.compat_write(), agent_incoming, |future| {
+        tokio::task::spawn_local(future);
+    });
     tokio::task::spawn_local(AcpAgentGatewayReceiver::new(gateway_rx, agent_connection).run());
     tokio::task::spawn_local(async move {
         // Keep the agent alive for the lifetime of its I/O loop.
@@ -444,14 +417,9 @@ async fn start_agent(
     });
 
     let client_incoming = LineBufferedRead::spawn_local(client_from_agent.compat());
-    let (client, client_io) = acp::ClientSideConnection::new(
-        AppClient { events },
-        client_to_agent.compat_write(),
-        client_incoming,
-        |future| {
-            tokio::task::spawn_local(future);
-        },
-    );
+    let (client, client_io) = acp::ClientSideConnection::new(AppClient { events }, client_to_agent.compat_write(), client_incoming, |future| {
+        tokio::task::spawn_local(future);
+    });
     tokio::task::spawn_local(async move {
         let _ = client_io.await;
     });

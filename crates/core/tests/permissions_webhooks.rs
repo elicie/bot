@@ -46,12 +46,8 @@ const LAN: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 2);
 
 /// Same-origin browser JSON request from `source`.
 async fn api(app: &TestApp, source: Ipv4Addr, method: &str, route: &str, body: Option<Value>) -> (u16, Value) {
-    let headers = [
-        ("Host", format!("127.0.0.1:{}", app.port)),
-        ("Origin", app.origin.clone()),
-        ("X-Grok-Bot", "1".into()),
-        ("Content-Type", "application/json".into()),
-    ];
+    let headers =
+        [("Host", format!("127.0.0.1:{}", app.port)), ("Origin", app.origin.clone()), ("X-Grok-Bot", "1".into()), ("Content-Type", "application/json".into())];
     let body = body.map(|b| b.to_string());
     let (status, _, value) = exchange(source, app.port, method, route, &headers, body.as_deref().map(str::as_bytes)).await;
     (status, value)

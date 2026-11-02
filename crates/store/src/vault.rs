@@ -19,8 +19,8 @@ use std::fmt;
 use std::sync::LazyLock;
 
 use grok_bot_model::{
-    DiskState, HttpError, HttpResult, McpPair, McpServerConfig, McpServerRecord, McpTransportKind, PublicMcpServer, PublicSecret, SecretInput,
-    VaultSecret, iso, new_id,
+    DiskState, HttpError, HttpResult, McpPair, McpServerConfig, McpServerRecord, McpTransportKind, PublicMcpServer, PublicSecret, SecretInput, VaultSecret,
+    iso, new_id,
 };
 use regex::Regex;
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
@@ -42,8 +42,10 @@ const MAX_PAIRS: usize = 64;
 const MAX_PAIR_VALUE_CHARS: usize = 8192;
 const MAX_URL_CHARS: usize = 2048;
 
-pub const VAULT_REQUIRES_LOOPBACK: &str = "보관함 시크릿은 서버 컴퓨터의 localhost 연결에서만 추가·교체·삭제할 수 있어요. 이 네트워크 서버에는 사용자 인증이 없습니다.";
-pub const MCP_REQUIRES_LOOPBACK: &str = "사용자 지정 MCP 서버는 서버 컴퓨터의 localhost 연결에서만 만들고, 편집하고, 켤 수 있어요. stdio 서버는 서버 컴퓨터에서 명령을 실행합니다.";
+pub const VAULT_REQUIRES_LOOPBACK: &str =
+    "보관함 시크릿은 서버 컴퓨터의 localhost 연결에서만 추가·교체·삭제할 수 있어요. 이 네트워크 서버에는 사용자 인증이 없습니다.";
+pub const MCP_REQUIRES_LOOPBACK: &str =
+    "사용자 지정 MCP 서버는 서버 컴퓨터의 localhost 연결에서만 만들고, 편집하고, 켤 수 있어요. stdio 서버는 서버 컴퓨터에서 명령을 실행합니다.";
 
 static SECRET_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Z][A-Z0-9_]{0,63}$").unwrap());
 static SERVER_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z0-9][a-z0-9_-]{0,31}$").unwrap());
@@ -424,10 +426,8 @@ pub(crate) fn public_vault(disk: &DiskState) -> (Vec<PublicSecret>, Vec<PublicMc
 /// Every credential a public string must not contain: the provider API key and every vault
 /// secret value, longest first (so a secret that contains another is replaced whole).
 pub(crate) fn redaction_keys(disk: &DiskState) -> Vec<String> {
-    let mut keys: Vec<String> = std::iter::once(disk.settings.api_key.clone())
-        .chain(disk.secrets.iter().map(|secret| secret.value.clone()))
-        .filter(|key| !key.is_empty())
-        .collect();
+    let mut keys: Vec<String> =
+        std::iter::once(disk.settings.api_key.clone()).chain(disk.secrets.iter().map(|secret| secret.value.clone())).filter(|key| !key.is_empty()).collect();
     keys.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
     keys.dedup();
     keys
@@ -484,9 +484,7 @@ fn secret_value(value: &str) -> HttpResult<String> {
     let value = js_trim(value);
     let length = js_len(value);
     if length < MIN_SECRET_CHARS {
-        return Err(bad(format!(
-            "시크릿 값은 {MIN_SECRET_CHARS}자 이상이어야 해요. 짧은 값은 대화와 기록 곳곳에서 가려져 내용을 알아볼 수 없게 됩니다."
-        )));
+        return Err(bad(format!("시크릿 값은 {MIN_SECRET_CHARS}자 이상이어야 해요. 짧은 값은 대화와 기록 곳곳에서 가려져 내용을 알아볼 수 없게 됩니다.")));
     }
     if length > MAX_SECRET_CHARS || control(value) {
         return Err(bad(format!("시크릿 값은 줄바꿈이나 제어 문자 없이 {MAX_SECRET_CHARS}자 이하여야 해요.")));
@@ -589,7 +587,9 @@ impl State {
             .map(|(name, config)| match current.iter().find(|server| server.name == name) {
                 Some(existing) if existing.config == config => existing.clone(),
                 Some(existing) => McpServerRecord { enabled: false, config, updated_at: now.clone(), ..existing.clone() },
-                None => McpServerRecord { id: new_id(), bot_id: bot_id.to_owned(), name, enabled: false, config, created_at: now.clone(), updated_at: now.clone() },
+                None => {
+                    McpServerRecord { id: new_id(), bot_id: bot_id.to_owned(), name, enabled: false, config, created_at: now.clone(), updated_at: now.clone() }
+                }
             })
             .collect();
         if next == current {

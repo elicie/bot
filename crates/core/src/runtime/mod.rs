@@ -29,12 +29,11 @@ use agent_client_protocol as acp;
 use grok_bot_engine::host::{ENGINE_SOURCE_REVISION, ENGINE_VERSION};
 use grok_bot_files::{atomic_private_file, private_directory};
 use grok_bot_model::{
-    Bot, DeliveryStatus, HttpError, HttpResult, Message, PendingPermission, PermissionOption,
-    PrivateSettings, Role, RunState, RunStatus, RuntimeInfo, Skill, TodoItem, TodoStatus, ToolActivity, ToolStatus, iso,
-    new_id,
+    Bot, DeliveryStatus, HttpError, HttpResult, Message, PendingPermission, PermissionOption, PrivateSettings, Role, RunState, RunStatus, RuntimeInfo, Skill,
+    TodoItem, TodoStatus, ToolActivity, ToolStatus, iso, new_id,
 };
-use grok_bot_store::memory::bot_context_fingerprint;
 use grok_bot_store::attachments::PreparedAttachment;
+use grok_bot_store::memory::bot_context_fingerprint;
 use grok_bot_store::skills::{skill_fingerprint, skill_response_text};
 use grok_bot_store::{State, Store};
 use serde_json::{Value, json};
@@ -42,10 +41,7 @@ use tokio::sync::{oneshot, watch};
 
 use crate::queue::CommandQueue;
 use engine::{Engine, EngineManager, ProviderKey};
-use text::{
-    MAX_PUBLIC_TEXT, append_streamed_text, continuation_prompt, conversation_title,
-    literal_engine_prompt, redact, session_fingerprint,
-};
+use text::{MAX_PUBLIC_TEXT, append_streamed_text, continuation_prompt, conversation_title, literal_engine_prompt, redact, session_fingerprint};
 
 #[derive(Clone, Debug)]
 pub struct RuntimeOptions {
@@ -71,8 +67,7 @@ impl RuntimeOptions {
 
 const STARTUP_DEADLINE_ERROR: &str = "Grok Build did not initialize within the startup deadline. Check the engine build and provider settings.";
 const IDLE_DEADLINE_ERROR: &str = "Grok Build exceeded the inference inactivity deadline without session updates. Check the provider and try again.";
-const SAVE_ERROR: &str =
-    "Application state could not be saved. Check the data directory before continuing.";
+const SAVE_ERROR: &str = "Application state could not be saved. Check the data directory before continuing.";
 /// Upper bound for engine bookkeeping that is not part of the user-visible deadlines.
 const ENGINE_SETTLE_LIMIT: Duration = Duration::from_secs(5);
 
@@ -155,9 +150,7 @@ pub(crate) struct Run {
 
 impl Run {
     fn flags(&self) -> MutexGuard<'_, RunFlags> {
-        self.flags
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.flags.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn inactive(&self) -> bool {
@@ -223,11 +216,7 @@ pub(crate) fn random_token() -> String {
 
 fn message_mut<'a>(state: &'a mut State, run: &Run) -> HttpResult<&'a mut Message> {
     let conversation = state.conversation_mut(&run.conversation_id)?;
-    conversation
-        .messages
-        .iter_mut()
-        .find(|message| message.id == run.message_id)
-        .ok_or_else(|| HttpError::new(500, SAVE_ERROR))
+    conversation.messages.iter_mut().find(|message| message.id == run.message_id).ok_or_else(|| HttpError::new(500, SAVE_ERROR))
 }
 
 fn touch(state: &mut State, run: &Run) -> HttpResult<()> {
@@ -287,50 +276,23 @@ fn mentions_computer(probe: &str) -> bool {
 /// cancelled: only broker tools (or, with `custom`, a tool of one of the run's custom MCP servers)
 /// may ask, never for execute/delete/move kinds, and only one-use options are offered (persistent
 /// "always" modes are dropped).
-fn permission_card(
-    key: &[String],
-    request: &acp::RequestPermissionRequest,
-    custom: bool,
-) -> Option<PendingPermission> {
+fn permission_card(key: &[String], request: &acp::RequestPermissionRequest, custom: bool) -> Option<PendingPermission> {
     let call = serde_json::to_value(&request.tool_call).unwrap_or_default();
     let name = call["title"].as_str().unwrap_or_default();
     let lowered = name.to_lowercase();
-    let broker_tool = [
-        "workspace__",
-        "search_tool",
-        "use_tool",
-        "callmcptool",
-        "getmcptools",
-    ]
-    .iter()
-    .any(|n| lowered.contains(n))
-        || custom;
+    let broker_tool = ["workspace__", "search_tool", "use_tool", "callmcptool", "getmcptools"].iter().any(|n| lowered.contains(n)) || custom;
     let kind = call["kind"].as_str().unwrap_or_default();
-    if !broker_tool
-        || ["execute", "delete", "move"]
-            .iter()
-            .any(|k| kind.contains(k))
-    {
+    if !broker_tool || ["execute", "delete", "move"].iter().any(|k| kind.contains(k)) {
         return None;
     }
     let redact_public = |value: &str| redact(key, value, Some(MAX_PUBLIC_TEXT));
     let options: Vec<PermissionOption> = request
         .options
         .iter()
-        .filter(|option| {
-            matches!(
-                option.kind,
-                acp::PermissionOptionKind::AllowOnce | acp::PermissionOptionKind::RejectOnce
-            )
-        })
+        .filter(|option| matches!(option.kind, acp::PermissionOptionKind::AllowOnce | acp::PermissionOptionKind::RejectOnce))
         .map(|option| PermissionOption {
             id: option.option_id.0.to_string(),
-            kind: if option.kind == acp::PermissionOptionKind::AllowOnce {
-                "allow_once"
-            } else {
-                "reject_once"
-            }
-            .into(),
+            kind: if option.kind == acp::PermissionOptionKind::AllowOnce { "allow_once" } else { "reject_once" }.into(),
             label: redact_public(&option.name),
         })
         .collect();
@@ -340,11 +302,7 @@ fn permission_card(
     let raw_input = json_text(call.get("rawInput").unwrap_or(&json!({})));
     Some(PendingPermission {
         id: new_id(),
-        title: redact_public(if name.is_empty() {
-            "Allow workspace tool"
-        } else {
-            name
-        }),
+        title: redact_public(if name.is_empty() { "Allow workspace tool" } else { name }),
         kind: if kind.is_empty() { "other" } else { kind }.into(),
         description: redact_public(&raw_input),
         paths: Vec::new(),
@@ -371,22 +329,13 @@ impl Runtime {
     }
 
     fn arc(&self) -> Arc<Self> {
-        self.this
-            .upgrade()
-            .expect("the runtime is alive while it is used")
+        self.this.upgrade().expect("the runtime is alive while it is used")
     }
 
     /// Record engine availability (`RuntimeInfo`) in the store. The engine is compiled into this
     /// binary, so there is no executable to probe; it starts with the first run.
     pub async fn initialize(&self) {
-        let info = RuntimeInfo {
-            available: true,
-            version: Some(format!(
-                "grok-bot-engine {ENGINE_VERSION} ({})",
-                &ENGINE_SOURCE_REVISION[..12]
-            )),
-            error: None,
-        };
+        let info = RuntimeInfo { available: true, version: Some(format!("grok-bot-engine {ENGINE_VERSION} ({})", &ENGINE_SOURCE_REVISION[..12])), error: None };
         let _ = self
             .store
             .mutate(move |state| {
@@ -402,30 +351,19 @@ impl Runtime {
     }
 
     pub fn set_origin(&self, origin: String) {
-        *self
-            .origin
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = origin;
+        *self.origin.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = origin;
     }
 
     fn runs(&self) -> MutexGuard<'_, Vec<Arc<Run>>> {
-        self.runs
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.runs.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn run_for_conversation(&self, conversation_id: &str) -> Option<Arc<Run>> {
-        self.runs()
-            .iter()
-            .find(|run| run.conversation_id == conversation_id)
-            .cloned()
+        self.runs().iter().find(|run| run.conversation_id == conversation_id).cloned()
     }
 
     fn run_for_session(&self, session_id: &str) -> Option<Arc<Run>> {
-        self.runs()
-            .iter()
-            .find(|run| run.flags().session_id.as_deref() == Some(session_id))
-            .cloned()
+        self.runs().iter().find(|run| run.flags().session_id.as_deref() == Some(session_id)).cloned()
     }
 
     fn run_by_id(&self, run_id: &str) -> Option<Arc<Run>> {
@@ -441,18 +379,12 @@ impl Runtime {
     /// Errors match the Node runtime (409 when busy, 503 engine unavailable, 400 no provider).
     /// In a group conversation the first answering member takes this turn and the others are queued.
     pub async fn start(&self, conversation_id: &str, prompt: &str) -> HttpResult<()> {
-        self.start_with_attachments(conversation_id, prompt, Vec::new())
-            .await
+        self.start_with_attachments(conversation_id, prompt, Vec::new()).await
     }
 
     /// [`Runtime::start`] with user attachments whose blobs the caller already stored. The prompt
     /// may be empty when files are attached.
-    pub async fn start_with_attachments(
-        &self,
-        conversation_id: &str,
-        prompt: &str,
-        attachments: Vec<PreparedAttachment>,
-    ) -> HttpResult<()> {
+    pub async fn start_with_attachments(&self, conversation_id: &str, prompt: &str, attachments: Vec<PreparedAttachment>) -> HttpResult<()> {
         self.start_turn(conversation_id, Some(prompt), attachments).await
     }
 
@@ -461,22 +393,12 @@ impl Runtime {
         self.start_turn(conversation_id, None, Vec::new()).await
     }
 
-    async fn start_turn(
-        &self,
-        conversation_id: &str,
-        prompt: Option<&str>,
-        attachments: Vec<PreparedAttachment>,
-    ) -> HttpResult<()> {
+    async fn start_turn(&self, conversation_id: &str, prompt: Option<&str>, attachments: Vec<PreparedAttachment>) -> HttpResult<()> {
         let closing = self.closing.load(Ordering::SeqCst);
-        let origin = self
-            .origin
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
+        let origin = self.origin.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
         let id = conversation_id.to_owned();
         let requested = prompt.map(str::to_owned);
-        let metas: Vec<grok_bot_model::Attachment> =
-            attachments.iter().map(|a| a.meta.clone()).collect();
+        let metas: Vec<grok_bot_model::Attachment> = attachments.iter().map(|a| a.meta.clone()).collect();
         let (run_id, message_id, settings, plan, extras) = self
             .store
             .mutate(move |state| {
@@ -489,32 +411,22 @@ impl Runtime {
                     return Err(HttpError::unavailable("The server is shutting down."));
                 }
                 if !state.runtime().available {
-                    let error = state
-                        .runtime()
-                        .error
-                        .clone()
-                        .unwrap_or_else(|| "Grok Build is unavailable.".into());
+                    let error = state.runtime().error.clone().unwrap_or_else(|| "Grok Build is unavailable.".into());
                     return Err(HttpError::unavailable(error));
                 }
                 if origin.is_empty() {
-                    return Err(HttpError::unavailable(
-                        "Runtime is not connected to the local server.",
-                    ));
+                    return Err(HttpError::unavailable("Runtime is not connected to the local server."));
                 }
                 let settings = state.settings().clone();
                 if settings.base_url.is_empty() || settings.model.is_empty() {
-                    return Err(HttpError::bad_request(
-                        "Configure a provider and model in settings first.",
-                    ));
+                    return Err(HttpError::bad_request("Configure a provider and model in settings first."));
                 }
                 let plan = turns::plan(state, &id, requested.as_deref())?;
                 let delivery = state
                     .disk()
                     .bot_deliveries
                     .iter()
-                    .find(|d| {
-                        d.recipient_conversation_id == id && d.status == DeliveryStatus::Queued
-                    })
+                    .find(|d| d.recipient_conversation_id == id && d.status == DeliveryStatus::Queued)
                     .map(|d| (d.id.clone(), d.from_bot_id.clone()));
                 let now = iso(state.now());
                 let (run_id, message_id, user_message_id) = (new_id(), new_id(), new_id());
@@ -553,18 +465,9 @@ impl Runtime {
                     };
                 }
                 conversation.updated_at = now.clone();
-                conversation.run = RunState {
-                    id: run_id.clone(),
-                    status: RunStatus::Starting,
-                    started_at: Some(now),
-                    ..RunState::idle()
-                };
+                conversation.run = RunState { id: run_id.clone(), status: RunStatus::Starting, started_at: Some(now), ..RunState::idle() };
                 if let Some((delivery_id, _)) = delivery
-                    && let Some(delivery) = state
-                        .disk_mut()
-                        .bot_deliveries
-                        .iter_mut()
-                        .find(|d| d.id == delivery_id)
+                    && let Some(delivery) = state.disk_mut().bot_deliveries.iter_mut().find(|d| d.id == delivery_id)
                 {
                     delivery.execution_run_id = Some(run_id.clone());
                 }
@@ -602,10 +505,7 @@ impl Runtime {
             extra_rules: plan.rules,
             keys,
             mcp,
-            flags: Mutex::new(RunFlags {
-                skills,
-                ..RunFlags::default()
-            }),
+            flags: Mutex::new(RunFlags { skills, ..RunFlags::default() }),
             activity: tokio::sync::Notify::new(),
             stop: watch::Sender::new(false),
             done: watch::Sender::new(false),
@@ -619,11 +519,7 @@ impl Runtime {
     }
 
     /// Persist `f` against this run's conversation and bump its `updatedAt`.
-    async fn persist<T: Send + 'static>(
-        &self,
-        run: &Arc<Run>,
-        f: impl FnOnce(&mut State, &Run) -> HttpResult<T> + Send + 'static,
-    ) -> HttpResult<T> {
+    async fn persist<T: Send + 'static>(&self, run: &Arc<Run>, f: impl FnOnce(&mut State, &Run) -> HttpResult<T> + Send + 'static) -> HttpResult<T> {
         let run = Arc::clone(run);
         self.store
             .mutate(move |state| {
@@ -636,11 +532,7 @@ impl Runtime {
 
     /// The private session directory, including the fake repository root upstream expects.
     fn configure(&self, run: &Run) -> HttpResult<PathBuf> {
-        let mut home = self
-            .store
-            .data_dir()
-            .join("grok")
-            .join(&run.conversation_id);
+        let mut home = self.store.data_dir().join("grok").join(&run.conversation_id);
         if let Some(speaker) = &run.speaker {
             home = home.join(speaker);
         }
@@ -648,25 +540,15 @@ impl Runtime {
         let cwd = private_directory(&home.join("workspace"))?;
         private_directory(&cwd.join(".git").join("objects"))?;
         private_directory(&cwd.join(".git").join("refs").join("heads"))?;
-        let write = |name: &str, contents: &str| {
-            atomic_private_file(&cwd.join(".git").join(name), contents.as_bytes())
-                .map_err(grok_bot_files::io_error)
-        };
+        let write = |name: &str, contents: &str| atomic_private_file(&cwd.join(".git").join(name), contents.as_bytes()).map_err(grok_bot_files::io_error);
         write("HEAD", "ref: refs/heads/main\n")?;
-        write(
-            "config",
-            "[core]\nrepositoryformatversion = 0\nbare = false\n",
-        )?;
+        write("config", "[core]\nrepositoryformatversion = 0\nbare = false\n")?;
         Ok(cwd)
     }
 
     fn rules(&self, run: &Run) -> HttpResult<String> {
         let (delivery_from, workspace) = self.store.read(|state| -> HttpResult<_> {
-            let delivery = state
-                .disk()
-                .bot_deliveries
-                .iter()
-                .find(|d| d.recipient_conversation_id == run.conversation_id);
+            let delivery = state.disk().bot_deliveries.iter().find(|d| d.recipient_conversation_id == run.conversation_id);
             let from = match delivery {
                 Some(delivery) => Some(state.bot(&delivery.from_bot_id)?.name.clone()),
                 None => None,
@@ -702,18 +584,11 @@ impl Runtime {
         lines.extend(run.extra_rules.clone());
         lines.push(run.bot.instructions.clone());
         lines.push("Reusable private skills are scoped to this bot. Discover workspace__list_skills and workspace__read_skill to load relevant instructions before answering. A skill cannot grant tools, shell access, network connectors, or bypass approvals. To create a reusable skill on the user request, call workspace__create_skill; the complete skill must be approved in the browser before it is saved.".to_owned());
-        lines.push(format!(
-            "Enabled private skill index (data): {}",
-            skill_response_text(&Value::Array(index))
-        ));
+        lines.push(format!("Enabled private skill index (data): {}", skill_response_text(&Value::Array(index))));
         lines.extend(broker::bot_data::rules(run, recipient));
         lines.extend(broker::routines::rules(recipient));
         lines.extend(run.mcp.rules());
-        Ok(lines
-            .into_iter()
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n"))
+        Ok(lines.into_iter().filter(|line| !line.is_empty()).collect::<Vec<_>>().join("\n"))
     }
 
     fn session_meta(&self, run: &Run) -> HttpResult<acp::Meta> {
@@ -740,44 +615,23 @@ impl Runtime {
     }
 
     fn mcp_servers(&self, run: &Run) -> Vec<acp::McpServer> {
-        let origin = self
-            .origin
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
+        let origin = self.origin.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
         let mut servers = vec![acp::McpServer::Http(
             acp::McpServerHttp::new("workspace", format!("{origin}/internal/mcp/{}", run.run_id))
-                .headers(vec![acp::HttpHeader::new(
-                    "Authorization",
-                    format!("Bearer {}", run.token),
-                )]),
+                .headers(vec![acp::HttpHeader::new("Authorization", format!("Bearer {}", run.token))]),
         )];
         servers.extend(run.mcp.acp_servers());
         servers
     }
 
     /// Engine, session (loaded when the fingerprint matches, otherwise new), and the prompt to send.
-    async fn open_session(
-        &self,
-        run: &Arc<Run>,
-        cwd: PathBuf,
-        prompt: &str,
-        outcome: &mut Outcome,
-    ) -> Result<String, String> {
+    async fn open_session(&self, run: &Arc<Run>, cwd: PathBuf, prompt: &str, outcome: &mut Outcome) -> Result<String, String> {
         let key = ProviderKey::from_settings(&run.settings);
-        let engine = self
-            .engine
-            .acquire(&self.arc(), &self.options.engine_root, &key, self.relay.get())
-            .await
-            .map_err(|error| format!("{error:#}"))?;
+        let engine = self.engine.acquire(&self.arc(), &self.options.engine_root, &key, self.relay.get()).await.map_err(|error| format!("{error:#}"))?;
         outcome.engine = Some(engine.clone());
         let (session_id, fingerprint) = self
             .store
-            .read(|state| {
-                state
-                    .conversation(&run.conversation_id)
-                    .map(|c| turns::session_slot(c, run.speaker.as_deref()))
-            })
+            .read(|state| state.conversation(&run.conversation_id).map(|c| turns::session_slot(c, run.speaker.as_deref())))
             .map_err(|error| error.message)?;
         let meta = self.session_meta(run).map_err(|error| error.message)?;
         let servers = self.mcp_servers(run);
@@ -788,25 +642,13 @@ impl Runtime {
                 }
                 run.flags().session_id = Some(session_id.clone());
                 outcome.session_id = Some(session_id.clone());
-                let request = acp::LoadSessionRequest::new(session_id, cwd)
-                    .mcp_servers(servers)
-                    .meta(meta);
-                engine
-                    .host
-                    .load_session(request)
-                    .await
-                    .map_err(|error| error_text(&error))?;
+                let request = acp::LoadSessionRequest::new(session_id, cwd).mcp_servers(servers).meta(meta);
+                engine.host.load_session(request).await.map_err(|error| error_text(&error))?;
                 run.loaded_prompt.clone().unwrap_or_else(|| prompt.to_owned())
             }
             _ => {
-                let request = acp::NewSessionRequest::new(cwd)
-                    .mcp_servers(servers)
-                    .meta(meta);
-                let created = engine
-                    .host
-                    .new_session(request)
-                    .await
-                    .map_err(|error| error_text(&error))?;
+                let request = acp::NewSessionRequest::new(cwd).mcp_servers(servers).meta(meta);
+                let created = engine.host.new_session(request).await.map_err(|error| error_text(&error))?;
                 let session_id = created.session_id.0.to_string();
                 run.flags().session_id = Some(session_id.clone());
                 outcome.session_id = Some(session_id.clone());
@@ -834,11 +676,8 @@ impl Runtime {
             notified.as_mut().enable();
             let deadline = {
                 let flags = run.flags();
-                (flags.prompting
-                    && !flags.stopped
-                    && !flags.finishing
-                    && flags.approvals.is_empty())
-                .then(|| flags.idle_since.unwrap_or_else(Instant::now) + timeout)
+                (flags.prompting && !flags.stopped && !flags.finishing && flags.approvals.is_empty())
+                    .then(|| flags.idle_since.unwrap_or_else(Instant::now) + timeout)
             };
             match deadline {
                 None => notified.await,
@@ -853,12 +692,7 @@ impl Runtime {
         }
     }
 
-    async fn drive(
-        &self,
-        run: &Arc<Run>,
-        prompt: &str,
-        outcome: &mut Outcome,
-    ) -> Result<(), String> {
+    async fn drive(&self, run: &Arc<Run>, prompt: &str, outcome: &mut Outcome) -> Result<(), String> {
         let cwd = self.configure(run).map_err(|error| error.message)?;
         if run.inactive() {
             return Ok(());
@@ -873,8 +707,7 @@ impl Runtime {
         if run.inactive() {
             return Ok(());
         }
-        let (Some(engine), Some(session_id)) = (outcome.engine.clone(), outcome.session_id.clone())
-        else {
+        let (Some(engine), Some(session_id)) = (outcome.engine.clone(), outcome.session_id.clone()) else {
             return Err("Grok Build could not complete the run.".into());
         };
         self.report_mcp_failures(run).await;
@@ -890,12 +723,8 @@ impl Runtime {
         })
         .await
         .map_err(|_| SAVE_ERROR.to_owned())?;
-        let mut blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
-            literal_engine_prompt(&attachments::attachment_prompt(
-                &request_prompt,
-                &run.attachments,
-            )),
-        ))];
+        let mut blocks =
+            vec![acp::ContentBlock::Text(acp::TextContent::new(literal_engine_prompt(&attachments::attachment_prompt(&request_prompt, &run.attachments))))];
         blocks.extend(attachments::image_blocks(&run.attachments));
         let request = acp::PromptRequest::new(session_id.clone(), blocks);
         let host = Arc::clone(&engine.host);
@@ -942,13 +771,8 @@ impl Runtime {
                     Ok(())
                 }
                 other => {
-                    let reason = serde_json::to_value(other)
-                        .ok()
-                        .and_then(|v| v.as_str().map(str::to_owned))
-                        .unwrap_or_default();
-                    Err(format!(
-                        "Grok stopped with {reason}. Send another message to continue."
-                    ))
+                    let reason = serde_json::to_value(other).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
+                    Err(format!("Grok stopped with {reason}. Send another message to continue."))
                 }
             },
             Some(Err(error)) => Err(error_text(&error)),
@@ -970,10 +794,7 @@ impl Runtime {
             }
         })
         .await;
-        let outcome = driven.unwrap_or_else(|_| Outcome {
-            error: Some("Grok Build could not complete the run.".into()),
-            ..Outcome::default()
-        });
+        let outcome = driven.unwrap_or_else(|_| Outcome { error: Some("Grok Build could not complete the run.".into()), ..Outcome::default() });
         self.finish(&run, outcome).await;
     }
 
@@ -995,16 +816,12 @@ impl Runtime {
             let session_id = acp::SessionId::new(session_id.clone());
             let close = engine.host.call(move |connection| async move {
                 use acp::Agent as _;
-                let _ = connection
-                    .close_session(acp::CloseSessionRequest::new(session_id))
-                    .await;
+                let _ = connection.close_session(acp::CloseSessionRequest::new(session_id)).await;
             });
             let _ = tokio::time::timeout(ENGINE_SETTLE_LIMIT, close).await;
         }
         let stopped = run.flags().stopped;
-        let Outcome {
-            error, abandoned, ..
-        } = outcome;
+        let Outcome { error, abandoned, .. } = outcome;
         let result = self
             .persist(run, move |state, run| {
                 let now = iso(state.now());
@@ -1073,10 +890,7 @@ impl Runtime {
         let Ok(update) = serde_json::to_value(&notification.update) else {
             return;
         };
-        let kind = update["sessionUpdate"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
+        let kind = update["sessionUpdate"].as_str().unwrap_or_default().to_owned();
         let result = if let acp::SessionUpdate::Plan(plan) = notification.update {
             // Native successes carry IDs, unlike the full-session Plans emitted after them.
             if run.flags().todos.native {
@@ -1084,13 +898,7 @@ impl Runtime {
             }
             // In pinned 2bdd1d6 only durable Plans carry eventId. The transient turn-end cleanup
             // falsely marks in_progress entries completed for display; never persist that cosmetic state.
-            if notification
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.get("eventId"))
-                .and_then(Value::as_str)
-                .is_none()
-            {
+            if notification.meta.as_ref().and_then(|meta| meta.get("eventId")).and_then(Value::as_str).is_none() {
                 return;
             }
             // ACP-only agents retain the complete durable Plan fallback until a native success.
@@ -1099,12 +907,7 @@ impl Runtime {
                 .entries
                 .into_iter()
                 .map(|entry| {
-                    let cancelled = entry
-                        .meta
-                        .as_ref()
-                        .and_then(|meta| meta.get("cancelled"))
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
+                    let cancelled = entry.meta.as_ref().and_then(|meta| meta.get("cancelled")).and_then(Value::as_bool).unwrap_or(false);
                     TodoItem {
                         content: run.redact(&entry.content),
                         status: if cancelled {
@@ -1127,9 +930,7 @@ impl Runtime {
                         return Ok(());
                     }
                     let conversation = state.conversation(&projected.conversation_id)?;
-                    if conversation.run.id != projected.run_id
-                        || conversation.run.todos.as_ref() == Some(&todos)
-                    {
+                    if conversation.run.id != projected.run_id || conversation.run.todos.as_ref() == Some(&todos) {
                         return Ok(());
                     }
                     state.conversation_mut(&projected.conversation_id)?.run.todos = Some(todos);
@@ -1137,10 +938,7 @@ impl Runtime {
                 })
                 .await
         } else if kind == "agent_message_chunk" && update["content"]["type"] == "text" {
-            let chunk = update["content"]["text"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned();
+            let chunk = update["content"]["text"].as_str().unwrap_or_default().to_owned();
             self.persist(&run, move |state, run| {
                 let mut flags = run.flags();
                 if !flags.accepting_updates || flags.stopped || flags.finishing {
@@ -1205,10 +1003,7 @@ impl Runtime {
                 if let Some(kind) = update["kind"].as_str().filter(|kind| !kind.is_empty()) {
                     tool.kind = kind.to_owned();
                 }
-                if let Some(status) = update
-                    .get("status")
-                    .and_then(|s| serde_json::from_value::<ToolStatus>(s.clone()).ok())
-                {
+                if let Some(status) = update.get("status").and_then(|s| serde_json::from_value::<ToolStatus>(s.clone()).ok()) {
                     tool.status = status;
                 }
                 if let Some(input) = update.get("rawInput") {
@@ -1218,19 +1013,12 @@ impl Runtime {
                     tool.output = Some(run.redact(&json_text(output)));
                 }
                 if let Some(locations) = update["locations"].as_array() {
-                    tool.paths = Some(
-                        locations
-                            .iter()
-                            .map(|l| run.redact(l["path"].as_str().unwrap_or_default()))
-                            .collect(),
-                    );
+                    tool.paths = Some(locations.iter().map(|l| run.redact(l["path"].as_str().unwrap_or_default())).collect());
                 }
                 if let Some(content) = update["content"].as_array() {
                     let texts: Vec<&str> = content
                         .iter()
-                        .filter(|item| {
-                            item["type"] == "content" && item["content"]["type"] == "text"
-                        })
+                        .filter(|item| item["type"] == "content" && item["content"]["type"] == "text")
                         .filter_map(|item| item["content"]["text"].as_str())
                         .collect();
                     if !texts.is_empty() {
@@ -1255,10 +1043,7 @@ impl Runtime {
     }
 
     /// Port of `requestPermission()`: only broker tools may ask, and only for one-use decisions.
-    pub(crate) async fn request_permission(
-        &self,
-        request: acp::RequestPermissionRequest,
-    ) -> acp::RequestPermissionResponse {
+    pub(crate) async fn request_permission(&self, request: acp::RequestPermissionRequest) -> acp::RequestPermissionResponse {
         let Some(run) = self.run_for_session(&request.session_id.0) else {
             return engine::cancelled_permission();
         };
@@ -1272,33 +1057,21 @@ impl Runtime {
             return engine::cancelled_permission();
         };
         match self.approve(&run, permission, None).await {
-            Ok(Some(option_id)) => {
-                acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Selected(
-                    acp::SelectedPermissionOutcome::new(option_id),
-                ))
-            }
+            Ok(Some(option_id)) => acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(option_id))),
             _ => engine::cancelled_permission(),
         }
     }
 
     /// Queue an approval card (and optionally the tool activity it belongs to) and wait for the
     /// user's choice. `None` when the run ended or the approval was settled without a choice.
-    async fn approve(
-        &self,
-        run: &Arc<Run>,
-        permission: PendingPermission,
-        tool: Option<ToolActivity>,
-    ) -> HttpResult<Option<String>> {
+    async fn approve(&self, run: &Arc<Run>, permission: PendingPermission, tool: Option<ToolActivity>) -> HttpResult<Option<String>> {
         let decision = {
             let mut flags = run.flags();
             if flags.stopped || flags.finishing {
                 None
             } else {
                 let (resolve, decision) = oneshot::channel();
-                flags.approvals.push_back(Approval {
-                    permission,
-                    resolve,
-                });
+                flags.approvals.push_back(Approval { permission, resolve });
                 Some(decision)
             }
         };
@@ -1319,44 +1092,23 @@ impl Runtime {
         }
     }
 
-    pub async fn resolve(
-        &self,
-        conversation_id: &str,
-        permission_id: &str,
-        option_id: &str,
-        local_request: bool,
-    ) -> HttpResult<()> {
+    pub async fn resolve(&self, conversation_id: &str, permission_id: &str, option_id: &str, local_request: bool) -> HttpResult<()> {
         self.store.read(|state| state.assert_writable())?;
         let stale = || HttpError::conflict("This approval is no longer pending.");
-        let run = self
-            .run_for_conversation(conversation_id)
-            .ok_or_else(stale)?;
+        let run = self.run_for_conversation(conversation_id).ok_or_else(stale)?;
         let approval = {
             let mut flags = run.flags();
-            let Some(approval) = flags
-                .approvals
-                .front()
-                .filter(|_| !flags.stopped && !flags.finishing)
-            else {
+            let Some(approval) = flags.approvals.front().filter(|_| !flags.stopped && !flags.finishing) else {
                 return Err(stale());
             };
             if approval.permission.id != permission_id {
                 return Err(stale());
             }
             if approval.permission.local_only == Some(true) && !local_request {
-                return Err(HttpError::forbidden(
-                    "Managed browser approval requires a local loopback connection.",
-                ));
+                return Err(HttpError::forbidden("Managed browser approval requires a local loopback connection."));
             }
-            if !approval
-                .permission
-                .options
-                .iter()
-                .any(|option| option.id == option_id)
-            {
-                return Err(HttpError::bad_request(
-                    "Choose one of the displayed approval options.",
-                ));
+            if !approval.permission.options.iter().any(|option| option.id == option_id) {
+                return Err(HttpError::bad_request("Choose one of the displayed approval options."));
             }
             flags.approvals.pop_front().expect("checked above")
         };
@@ -1391,9 +1143,7 @@ impl Runtime {
     /// Cancel an active run and wait for it to settle. No-op for idle conversations (404 if missing).
     pub async fn cancel(&self, conversation_id: &str) -> HttpResult<()> {
         let Some(run) = self.run_for_conversation(conversation_id) else {
-            return self
-                .store
-                .read(|state| state.conversation(conversation_id).map(|_| ()));
+            return self.store.read(|state| state.conversation(conversation_id).map(|_| ()));
         };
         self.request_stop(&run);
         self.stop_run_computer(&run).await;
@@ -1421,39 +1171,15 @@ impl Runtime {
 mod tests {
     use super::*;
 
-    fn request(
-        title: &str,
-        kind: acp::ToolKind,
-        raw_input: Value,
-    ) -> acp::RequestPermissionRequest {
-        let option = |id: &str, name: &str, kind| {
-            acp::PermissionOption::new(id.to_owned(), name.to_owned(), kind)
-        };
+    fn request(title: &str, kind: acp::ToolKind, raw_input: Value) -> acp::RequestPermissionRequest {
+        let option = |id: &str, name: &str, kind| acp::PermissionOption::new(id.to_owned(), name.to_owned(), kind);
         acp::RequestPermissionRequest::new(
             "session",
-            acp::ToolCallUpdate::new(
-                "fixture-tool",
-                acp::ToolCallUpdateFields::new()
-                    .title(title.to_owned())
-                    .kind(kind)
-                    .raw_input(raw_input),
-            ),
+            acp::ToolCallUpdate::new("fixture-tool", acp::ToolCallUpdateFields::new().title(title.to_owned()).kind(kind).raw_input(raw_input)),
             vec![
-                option(
-                    "allow-exact-id",
-                    "Allow once",
-                    acp::PermissionOptionKind::AllowOnce,
-                ),
-                option(
-                    "deny-exact-id",
-                    "Deny",
-                    acp::PermissionOptionKind::RejectOnce,
-                ),
-                option(
-                    "unsafe-persistent",
-                    "Always allow",
-                    acp::PermissionOptionKind::AllowAlways,
-                ),
+                option("allow-exact-id", "Allow once", acp::PermissionOptionKind::AllowOnce),
+                option("deny-exact-id", "Deny", acp::PermissionOptionKind::RejectOnce),
+                option("unsafe-persistent", "Always allow", acp::PermissionOptionKind::AllowAlways),
             ],
         )
     }
@@ -1462,34 +1188,15 @@ mod tests {
     fn permission_requests_keep_one_use_options_for_broker_tools_only() {
         let card = permission_card(
             &["secret".to_owned()],
-            &request(
-                "use_tool",
-                acp::ToolKind::Other,
-                json!({"tool_name": "workspace__read_file", "path": "secret"}),
-            ),
+            &request("use_tool", acp::ToolKind::Other, json!({"tool_name": "workspace__read_file", "path": "secret"})),
             false,
         )
         .unwrap();
-        assert_eq!(
-            card.options
-                .iter()
-                .map(|o| o.id.as_str())
-                .collect::<Vec<_>>(),
-            ["allow-exact-id", "deny-exact-id"]
-        );
-        assert_eq!(
-            card.options
-                .iter()
-                .map(|o| o.kind.as_str())
-                .collect::<Vec<_>>(),
-            ["allow_once", "reject_once"]
-        );
+        assert_eq!(card.options.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(), ["allow-exact-id", "deny-exact-id"]);
+        assert_eq!(card.options.iter().map(|o| o.kind.as_str()).collect::<Vec<_>>(), ["allow_once", "reject_once"]);
         assert_eq!(card.title, "use_tool");
         assert_eq!(card.kind, "other");
-        assert_eq!(
-            card.description,
-            r#"{"tool_name":"workspace__read_file","path":"[redacted]"}"#
-        );
+        assert_eq!(card.description, r#"{"tool_name":"workspace__read_file","path":"[redacted]"}"#);
         assert_eq!(card.local_only, None);
         let keys: Vec<String> = Vec::new();
         assert!(permission_card(&keys, &request("run_terminal_cmd", acp::ToolKind::Other, json!({})), false).is_none());
@@ -1500,16 +1207,7 @@ mod tests {
         assert!(permission_card(&keys, &request("fixture__echo", acp::ToolKind::Other, json!({})), false).is_none());
         assert!(permission_card(&keys, &request("fixture__echo", acp::ToolKind::Other, json!({})), true).is_some());
         assert!(permission_card(&keys, &request("fixture__echo", acp::ToolKind::Execute, json!({})), true).is_none());
-        let computer = permission_card(
-            &keys,
-            &request(
-                "use_tool",
-                acp::ToolKind::Other,
-                json!({"tool_name": "workspace__computer_act"}),
-            ),
-            false,
-        )
-        .unwrap();
+        let computer = permission_card(&keys, &request("use_tool", acp::ToolKind::Other, json!({"tool_name": "workspace__computer_act"})), false).unwrap();
         assert_eq!(computer.local_only, Some(true));
     }
 }

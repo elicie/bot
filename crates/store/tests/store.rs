@@ -133,20 +133,26 @@ async fn run_todos_survive_restart_including_interrupted_and_explicitly_empty_li
     f.set_run(&conversation.id, RunState { id: new_id(), status: RunStatus::Completed, todos: Some(todos.clone()), ..RunState::idle() }).await;
     let restarted = f.reopen().await.unwrap();
     assert_eq!(restarted.snapshot().conversations[0].run.todos.as_ref(), Some(&todos));
-    restarted.mutate(|s| {
-        s.conversation_mut(&conversation.id)?.run.status = RunStatus::Running;
-        Ok(())
-    }).await.unwrap();
+    restarted
+        .mutate(|s| {
+            s.conversation_mut(&conversation.id)?.run.status = RunStatus::Running;
+            Ok(())
+        })
+        .await
+        .unwrap();
     drop(restarted);
     let restarted = f.reopen().await.unwrap();
     let snapshot = restarted.snapshot();
     let run = &snapshot.conversations[0].run;
     assert_eq!(run.status, RunStatus::Interrupted);
     assert_eq!(run.todos.as_ref(), Some(&todos));
-    restarted.mutate(|s| {
-        s.conversation_mut(&conversation.id)?.run.todos = Some(Vec::new());
-        Ok(())
-    }).await.unwrap();
+    restarted
+        .mutate(|s| {
+            s.conversation_mut(&conversation.id)?.run.todos = Some(Vec::new());
+            Ok(())
+        })
+        .await
+        .unwrap();
     drop(restarted);
     let restarted = f.reopen().await.unwrap();
     assert_eq!(restarted.snapshot().conversations[0].run.todos, Some(Vec::new()));

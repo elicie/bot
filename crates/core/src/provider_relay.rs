@@ -79,7 +79,17 @@ fn relay_error(status: StatusCode, message: &str) -> Response {
 fn skipped_request_header(name: &HeaderName) -> bool {
     matches!(
         name.as_str(),
-        "host" | "authorization" | "content-length" | "connection" | "keep-alive" | "transfer-encoding" | "te" | "upgrade" | "proxy-authorization" | "proxy-connection" | "accept-encoding"
+        "host"
+            | "authorization"
+            | "content-length"
+            | "connection"
+            | "keep-alive"
+            | "transfer-encoding"
+            | "te"
+            | "upgrade"
+            | "proxy-authorization"
+            | "proxy-connection"
+            | "accept-encoding"
     )
 }
 
@@ -87,7 +97,14 @@ fn skipped_response_header(name: &HeaderName) -> bool {
     matches!(name.as_str(), "content-length" | "connection" | "keep-alive" | "transfer-encoding" | "content-encoding")
 }
 
-async fn forward(State(relay): State<Arc<Relay>>, method: Method, Path(rest): Path<String>, RawQuery(query): RawQuery, headers: HeaderMap, body: Bytes) -> Response {
+async fn forward(
+    State(relay): State<Arc<Relay>>,
+    method: Method,
+    Path(rest): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let presented = headers.get(header::AUTHORIZATION).and_then(|value| value.to_str().ok()).unwrap_or_default();
     if digest(presented) != relay.token_digest {
         return relay_error(StatusCode::UNAUTHORIZED, "Invalid relay token.");
@@ -210,7 +227,9 @@ fn rewrite_stream(upstream: reqwest::Response, data_dir: PathBuf) -> impl future
         };
         let out = if complete.iter().any(|line| contains(line, IMAGES_MARKER)) {
             let directory = data_dir.clone();
-            tokio::task::spawn_blocking(move || complete.into_iter().flat_map(|line| rewrite_sse_line(line, &directory)).collect::<Vec<u8>>()).await.unwrap_or_default()
+            tokio::task::spawn_blocking(move || complete.into_iter().flat_map(|line| rewrite_sse_line(line, &directory)).collect::<Vec<u8>>())
+                .await
+                .unwrap_or_default()
         } else {
             complete.concat()
         };
@@ -302,7 +321,10 @@ mod tests {
     #[test]
     fn stream_delta_images_become_markdown_content() {
         let root = tempfile::tempdir().unwrap();
-        let line = format!("data: {}\n\n", json!({"choices": [{"index": 0, "delta": {"role": "assistant", "images": [{"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{PNG_B64}")}}]}}]}));
+        let line = format!(
+            "data: {}\n\n",
+            json!({"choices": [{"index": 0, "delta": {"role": "assistant", "images": [{"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{PNG_B64}")}}]}}]})
+        );
         let out = String::from_utf8(rewrite_sse_line(line.into_bytes(), root.path())).unwrap();
         assert!(out.ends_with("\n\n"), "{out}");
         let value: Value = serde_json::from_str(out.trim().strip_prefix("data: ").unwrap()).unwrap();

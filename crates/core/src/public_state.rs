@@ -116,9 +116,7 @@ fn project_value(state: &mut Map<String, Value>) {
 
 #[cfg(test)]
 mod tests {
-    use grok_bot_model::{
-        Conversation, Message, PermissionOption, PublicSettings, Role, RunState, RunStatus, RuntimeInfo, ToolStatus,
-    };
+    use grok_bot_model::{Conversation, Message, PermissionOption, PublicSettings, Role, RunState, RunStatus, RuntimeInfo, ToolStatus};
     use serde_json::json;
 
     use super::*;
