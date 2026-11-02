@@ -107,7 +107,7 @@ try {
     assert.ok(response.ok, `${route}: ${response.status} ${text}`);
     return JSON.parse(text);
   };
-  const state = await api('PUT', '/api/settings', { baseUrl: `http://127.0.0.1:${provider.address().port}/v1`, model: 'release-test-model' });
+  const state = await api('PUT', '/api/settings', { baseUrl: `http://127.0.0.1:${provider.address().port}/v1`, model: 'release-test-model', workspace: '' });
   assert.equal(state.runtime.available, true);
   const { conversation } = await api('POST', '/api/conversations', { botId: state.bots[0].id });
   await api('POST', `/api/conversations/${conversation.id}/messages`, { text: 'Reply to this standalone release smoke test.' });
