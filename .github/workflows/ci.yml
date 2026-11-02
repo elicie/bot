@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   web:
-    name: Web (typecheck, build, Node tests)
+    name: Web (typecheck, build)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -25,10 +25,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: npm test
 
   rust:
-    name: Rust (fmt, tests, clippy, e2e)
+    name: Rust (fmt, tests, clippy, Node tests, e2e)
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -53,6 +52,9 @@ jobs:
       # scripts/cargo.mjs stages a checksum-verified protoc and sets the ripgrep paths.
       - run: npm run test:rust
       - run: node scripts/cargo.mjs clippy --locked --workspace --all-targets -- -D warnings
+      # The Node backend tests drive the real engine binary; it reuses the workspace build above.
+      - run: npm run build:engine
+      - run: npm test
       - run: npm run build
       - run: npm run build:server
       - name: End-to-end tests (Rust backend, system Chrome)
