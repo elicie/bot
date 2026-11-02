@@ -206,6 +206,7 @@ pub struct Runtime {
     options: RuntimeOptions,
     origin: Mutex<String>,
     closing: AtomicBool,
+    maintenance: AtomicBool,
     runs: Mutex<Vec<Arc<Run>>>,
     engine: EngineManager,
     /// Notified whenever a run settles, so the dispatcher can start the next queued turn at once.
@@ -332,6 +333,7 @@ impl Runtime {
             options,
             origin: Mutex::new(String::new()),
             closing: AtomicBool::new(false),
+            maintenance: AtomicBool::new(false),
             runs: Mutex::new(Vec::new()),
             engine: EngineManager::default(),
             settled: tokio::sync::Notify::new(),
@@ -383,6 +385,37 @@ impl Runtime {
         self.runs().iter().find(|run| run.run_id == run_id).cloned()
     }
 
+    /// Whether update maintenance has paused turn admission and the scheduler.
+    pub fn is_paused(&self) -> bool {
+        self.maintenance.load(Ordering::SeqCst)
+    }
+
+    /// Refuse maintenance while a reply is active or still settling. The HTTP caller holds the
+    /// command queue, so accepted starts finish registering before this check. The store lock also
+    /// serializes the latch with direct runtime starts. Durable queued work is left untouched.
+    pub fn pause_if_idle(&self) -> HttpResult<()> {
+        self.store.read(|state| {
+            if self.closing.load(Ordering::SeqCst) {
+                return Err(HttpError::unavailable("The server is shutting down."));
+            }
+            state.assert_idle()?;
+            if !self.runs().is_empty() {
+                return Err(HttpError::conflict(RUN_BUSY));
+            }
+            self.maintenance.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+
+    /// Undo an update preparation that did not stop the server. Shutdown is irreversible.
+    pub fn resume(&self) -> HttpResult<()> {
+        if self.closing.load(Ordering::SeqCst) {
+            return Err(HttpError::unavailable("The server is shutting down."));
+        }
+        self.maintenance.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
     /// Resolves after the next run settles.
     pub async fn settled(&self) {
         self.settled.notified().await;
@@ -414,7 +447,6 @@ impl Runtime {
     }
 
     async fn start_turn(&self, conversation_id: &str, turn: Turn, attachments: Vec<PreparedAttachment>) -> HttpResult<()> {
-        let closing = self.closing.load(Ordering::SeqCst);
         let origin = self.origin.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
         let id = conversation_id.to_owned();
         let metas: Vec<grok_bot_model::Attachment> = attachments.iter().map(|a| a.meta.clone()).collect();
@@ -426,8 +458,11 @@ impl Runtime {
                     return Err(HttpError::conflict(RUN_BUSY));
                 }
                 state.assert_idle()?;
-                if closing {
+                if self.closing.load(Ordering::SeqCst) {
                     return Err(HttpError::unavailable("The server is shutting down."));
+                }
+                if self.is_paused() {
+                    return Err(HttpError::unavailable("The server is paused for update maintenance."));
                 }
                 if !state.runtime().available {
                     let error = state.runtime().error.clone().unwrap_or_else(|| "Grok Build is unavailable.".into());
