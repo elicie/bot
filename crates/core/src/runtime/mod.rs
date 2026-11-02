@@ -783,6 +783,10 @@ impl Runtime {
                 run.fresh_prompt.clone().unwrap_or_else(|| continuation_prompt(&run.keys, &run.history, prompt))
             }
         };
+        // new/load only starts progressive MCP discovery. Do not let the model interpret an
+        // empty partial search as an absent integration. The session ID is already recorded so
+        // finish can close it if this startup wait is cancelled or times out.
+        engine.wait_for_mcp(outcome.session_id.as_deref().ok_or("Missing engine session.")?).await.map_err(|error| error_text(&error))?;
         // Replayed history of a loaded session must not reach the new assistant message.
         engine.drain(ENGINE_SETTLE_LIMIT).await;
         Ok(request_prompt)
