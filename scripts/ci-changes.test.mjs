@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -279,6 +280,21 @@ test('CLI empty and documentation-only changes stay focused without Cargo', () =
 
 test('CLI reports metadata failure on stderr and fails without partial outputs', () => {
   const result = cli([], 'crates/store/src/lib.rs\n');
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /cargo.*ENOENT/);
+});
+
+test('workflow detection preserves selector failure through tee', { skip: process.platform !== 'linux' }, () => {
+  const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  // GitHub's explicit bash shell runs with -e -o pipefail; implicit bash has only -e.
+  assert.match(workflow, /- id: detect\n\s+shell: bash(?:\s+#.*)?\n/);
+  const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
+  const pipeline = `printf 'crates/store/src/lib.rs\\n' | PATH= ${quote(process.execPath)} ${quote(script)} | /usr/bin/tee /dev/null`;
+  const result = spawnSync('/bin/bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', pipeline], {
+    encoding: 'utf8', timeout: 10_000,
+  });
   assert.equal(result.error, undefined);
   assert.equal(result.status, 1);
   assert.equal(result.stdout, '');

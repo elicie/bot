@@ -47,6 +47,7 @@ jobs:
       - name: Test CI selection
         run: node --test scripts/ci-changes.test.mjs
       - id: detect
+        shell: bash # Explicit bash enables pipefail so selector failures cannot hide behind tee.
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           FULL: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
