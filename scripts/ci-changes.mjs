@@ -4,10 +4,10 @@
 //   rust=true|false     rustfmt check (and clippy/tests for `packages`)
 //   packages=...        `-p <crate>` flags including reverse dependents, `--workspace`, or empty
 //   node=...            Node backend tests to run: `all`, a space-separated file list, or empty
-//   specs=...           Playwright spec files that changed, `all`, or empty
+//   specs=...           Playwright spec files that changed, or empty
 //   tools=true|false    CI script tests (independent of the app suites)
 // Usage: git diff --name-only <base>...HEAD | node scripts/ci-changes.mjs
-//        node scripts/ci-changes.mjs --full
+// There is no full-suite mode: every run, including one that edits CI itself, checks only what changed.
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -63,10 +63,8 @@ const affectedPackages = (files, cwd, loadMetadata) => {
   return members.filter(pkg => selected.has(pkg.id)).map(pkg => pkg.name).sort().map(name => `-p ${name}`).join(' ');
 };
 
-export function selectChanges(changedFiles, { full = false, cwd = root, loadMetadata = () => readCargoMetadata(cwd) } = {}) {
+export function selectChanges(changedFiles, { cwd = root, loadMetadata = () => readCargoMetadata(cwd) } = {}) {
   const files = [...new Set(changedFiles.map(file => file.trim()).filter(Boolean))];
-  // Full mode is only for scheduled/manual runs; a PR, including one that edits CI itself, checks only what it changed.
-  if (full) return { web: true, rust: true, packages: '--workspace', node: 'all', specs: 'all', tools: true };
   const under = prefix => files.some(file => file.startsWith(prefix));
   const tools = under('scripts/ci-') || files.includes('.github/workflows/ci.yml');
   const web = under('web/') || under('shared/') || files.some(file => /^(index\.html|vite\.config\.[cm]?[jt]s|tsconfig[^/]*\.json|package(-lock)?\.json)$/.test(file));
@@ -75,7 +73,7 @@ export function selectChanges(changedFiles, { full = false, cwd = root, loadMeta
   const rust = packages !== '' || files.some(file => ['rustfmt.toml', '.rustfmt.toml'].includes(file));
 
   // The Node backend has no per-module test mapping: a backend change runs its whole (fast)
-  // suite, otherwise only the Node test files that changed. Full mode is the only broadening.
+  // suite, otherwise only the Node test files that changed.
   const nodeTests = files.filter(file => /^tests\/[^/]+\.test\.ts$/.test(file));
   const node = under('server/') ? 'all' : nodeTests.join(' ');
   const specs = files.filter(file => /^tests\/[^/]+\.spec\.ts$/.test(file)).join(' ');
@@ -85,10 +83,9 @@ export function selectChanges(changedFiles, { full = false, cwd = root, loadMeta
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const args = process.argv.slice(2);
-    if (args.some(arg => arg !== '--full')) throw new Error('Usage: node scripts/ci-changes.mjs [--full]');
-    const full = args.includes('--full');
-    const files = full ? [] : readFileSync(0, 'utf8').split('\n');
-    for (const [key, value] of Object.entries(selectChanges(files, { full }))) console.log(`${key}=${value}`);
+    if (args.length) throw new Error('Usage: git diff --name-only <base>...HEAD | node scripts/ci-changes.mjs');
+    const files = readFileSync(0, 'utf8').split('\n');
+    for (const [key, value] of Object.entries(selectChanges(files))) console.log(`${key}=${value}`);
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

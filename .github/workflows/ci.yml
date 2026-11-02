@@ -1,19 +1,15 @@
 name: CI
 
-# PRs check affected crates (including reverse dependents) and changed JS/browser tests.
-# Daily and manual runs cover the full suite; see docs/ci.md for scope and diagnostics.
+# PRs and main pushes check only affected crates (including reverse dependents) and changed
+# JS/browser tests. There is no full-suite run; see docs/ci.md for scope and diagnostics.
 # Build jobs use the self-hosted grok-bot runner except for fork PRs.
 
 on:
   push:
     branches: [main]
   pull_request:
-  schedule:
-    - cron: '17 3 * * *' # Daily at 03:17 UTC on the default branch (main).
-  workflow_dispatch:
 
 concurrency:
-  # A main push must not cancel the daily full check.
   group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
@@ -51,16 +47,11 @@ jobs:
         shell: bash # Explicit bash enables pipefail so selector failures cannot hide behind tee.
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-          FULL: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         run: |
-          if [ "$FULL" = true ]; then
-            node scripts/ci-changes.mjs --full | tee -a "$GITHUB_OUTPUT"
-          else
-            # Missing/zero base (e.g. first push): check the last commit, never the full suite.
-            { [ -n "$BASE" ] && git diff --name-only "$BASE"...HEAD > changed.txt; } || git diff --name-only HEAD~1 HEAD > changed.txt
-            cat changed.txt
-            node scripts/ci-changes.mjs < changed.txt | tee -a "$GITHUB_OUTPUT"
-          fi
+          # Missing/zero base (e.g. first push): check the last commit, never the full suite.
+          { [ -n "$BASE" ] && git diff --name-only "$BASE"...HEAD > changed.txt; } || git diff --name-only HEAD~1 HEAD > changed.txt
+          cat changed.txt
+          node scripts/ci-changes.mjs < changed.txt | tee -a "$GITHUB_OUTPUT"
 
   ci-tools:
     name: CI diagnostic regressions
@@ -222,7 +213,7 @@ jobs:
         if: env.NODE_TESTS != ''
         timeout-minutes: 30
         run: node scripts/ci-run.mjs npm run build:engine
-      - name: Node tests (selected or full)
+      - name: Node tests (selected)
         if: env.NODE_TESTS != ''
         timeout-minutes: 30
         run: |
@@ -236,18 +227,13 @@ jobs:
         run: |
           node scripts/ci-run.mjs npm run build
           node scripts/ci-run.mjs npm run build:server
-      - name: End-to-end specs (selected or full, Rust backend, system Chrome)
+      - name: End-to-end specs (changed, Rust backend, system Chrome)
         if: env.SPECS != ''
         timeout-minutes: 30
         env:
           GROK_BOT_BACKEND: rust
           GROK_BOT_SERVER_BIN: ${{ env.CARGO_TARGET_DIR }}/debug/grok-bot
-        run: |
-          if [ "$SPECS" = all ]; then
-            node scripts/ci-run.mjs npx playwright test
-          else
-            node scripts/ci-run.mjs npx playwright test $SPECS
-          fi
+        run: node scripts/ci-run.mjs npx playwright test $SPECS
       - name: Final disk usage
         if: always()
         run: df -h / . /tmp && df -i / . /tmp && du -sh -- "${CARGO_TARGET_DIR:-target}" 2>/dev/null || true
