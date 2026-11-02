@@ -59,6 +59,7 @@ import { BotDeleteDialog, BotMenuExtras } from './BotMenu';
 import { MainBotDialog } from './MainBot';
 import { notificationDeniedText, notificationUnavailableText, requestNotificationPermission, useBotActivity } from './activity';
 import { admitFiles, uploads, type PendingAttachment } from './Attachments';
+import { CanvasButton, CanvasPanel, type CanvasDraftStatus } from './Canvas';
 
 function historyPosition(): number {
   const position: unknown = window.history.state?.grokBotPosition;
@@ -108,6 +109,10 @@ export function App() {
   const [deleting, setDeleting] = useState<Bot | null>(null);
   const [choosingMain, setChoosingMain] = useState<{ botId?: string } | null>(null);
   const reading = useRef(new Set<string>());
+  const [canvasId, setCanvasId] = useState<string | null>(null);
+  const [canvasChat, setCanvasChat] = useState(false);
+  const canvasStatus = useRef<CanvasDraftStatus>({ dirty: false, saving: false });
+  const reportCanvasDraft = useCallback((status: CanvasDraftStatus) => { canvasStatus.current = status; }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -193,9 +198,16 @@ export function App() {
       window.confirm('저장하지 않은 루틴 변경 사항을 버리고 이동할까요?')
     );
   }, []);
+  const confirmCanvasChange = useCallback(() => {
+    if (canvasStatus.current.saving) {
+      dispatch({ type: 'error', error: '캔버스 저장이 끝난 뒤 다시 시도해 주세요.' });
+      return false;
+    }
+    return !canvasStatus.current.dirty || window.confirm('저장하지 않은 캔버스 변경 사항을 버리고 이동할까요?');
+  }, []);
   const confirmNavigation = useCallback(
-    () => confirmSkillsNavigation() && confirmRoutineChange() && confirmFileChange(),
-    [confirmFileChange, confirmRoutineChange],
+    () => confirmSkillsNavigation() && confirmCanvasChange() && confirmRoutineChange() && confirmFileChange(),
+    [confirmFileChange, confirmRoutineChange, confirmCanvasChange],
   );
   useEffect(() => {
     const routeChanged = () => {
@@ -214,6 +226,7 @@ export function App() {
       if (confirmNavigation()) {
         position.current = nextPosition;
         navigationVersion.current++;
+        setCanvasId(null);
         dispatch({ type: 'route', route: next });
         dispatch({ type: 'overlay', overlay: null });
       } else {
@@ -225,7 +238,9 @@ export function App() {
       if (
         isDirty(current.current.files.editor) ||
         routineDraft.current.dirty ||
-        routineDraft.current.saving
+        routineDraft.current.saving ||
+        canvasStatus.current.dirty ||
+        canvasStatus.current.saving
       ) {
         event.preventDefault();
         event.returnValue = '';
@@ -364,6 +379,7 @@ export function App() {
       return true;
     }
     if (!confirmNavigation()) return false;
+    setCanvasId(null);
     navigationVersion.current++;
     writeRoute(route);
     dispatch({ type: 'route', route });
@@ -373,8 +389,9 @@ export function App() {
   };
   const select = (selection: Selection) => navigate({ selection, surface: { kind: 'chat' } });
   const selectCreated = (selection: Selection, expectedVersion: number) => {
-    if (navigationVersion.current !== expectedVersion) return false;
+    if (navigationVersion.current !== expectedVersion || !confirmCanvasChange()) return false;
     navigationVersion.current++;
+    setCanvasId(null);
     writeRoute({ selection, surface: { kind: 'chat' } });
     dispatch({ type: 'select', selection });
     return true;
@@ -541,6 +558,10 @@ export function App() {
     return result === true;
   };
   const toggleComputer = (open: boolean) => {
+    if (open) {
+      if (!confirmCanvasChange()) return;
+      setCanvasId(null);
+    }
     if (!open && !confirmFileChange('파일 탐색기를 닫고 저장하지 않은 변경 사항을 버릴까요?'))
       return;
     dispatch({ type: 'computer', open });
@@ -577,11 +598,50 @@ export function App() {
     else navigate({ selection: { botId: parent.botId, conversationId: parent.id }, surface: { kind: 'chat', ...thread } });
   };
   const shownIds = [surface.kind === 'chat' ? conversation?.id : surface.kind === 'group' ? shownGroupConversation(data, surface)?.id : undefined, threadId];
+  const canvasConversation = data?.conversations.find(item => item.id === canvasId);
+  const canvasVisible = !!canvasConversation && !canvasChat;
+  const closeCanvas = () => { if (confirmCanvasChange()) setCanvasId(null); };
+  const viewCanvasChat = () => { setCanvasChat(true); requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>(canvasConversation?.thread ? '[aria-label="스레드 메시지"]' : '.composer textarea')?.focus()); };
+  const toggleCanvas = async (target?: string) => {
+    if (target && target === canvasId) {
+      if (canvasChat) setCanvasChat(false); else closeCanvas();
+      return;
+    }
+    if (!confirmSkillsNavigation() || !confirmCanvasChange() || !confirmFileChange()) return;
+    dispatch({ type: 'computer', open: false });
+    if (target) { setCanvasId(target); setCanvasChat(false); return; }
+    if (!data || busy || globalRun) return;
+    const version = navigationVersion.current;
+    const groupId = surface.kind === 'group' ? surface.groupId : undefined;
+    const from = groupId ? `group:${groupId}:new` : draftKey(current.current.selection);
+    await command('canvas-conversation', async () => {
+      if (!groupId && !bot) return;
+      const created = await request<{ conversation: Conversation; state: AppState }>(groupId ? `/api/groups/${encodeURIComponent(groupId)}/conversations` : '/api/conversations', { method: 'POST', body: groupId ? {} : { botId: bot!.id } });
+      snapshot(created.state);
+      if (version !== navigationVersion.current) return;
+      const selected = groupId ? navigate({ selection: current.current.selection, surface: { kind: 'group', groupId, conversationId: created.conversation.id } }) : selectCreated({ botId: created.conversation.botId, conversationId: created.conversation.id }, version);
+      if (selected) {
+        const to = groupId ? `group:${groupId}:${created.conversation.id}` : created.conversation.id;
+        dispatch({ type: 'bind-draft', from, to });
+        setPendingFiles(all => ({ ...all, [to]: all[from] ?? [], [from]: [] }));
+        setFileErrors(all => ({ ...all, [to]: all[from] ?? [], [from]: [] }));
+        setCanvasId(created.conversation.id); setCanvasChat(false);
+      }
+    });
+  };
+  const canvasControl = (target?: string) => <CanvasButton open={!!target && target === canvasId && !canvasChat} onClick={() => void toggleCanvas(target)} disabled={!data || busy || (!target && !!globalRun) || !!data.botDeliveries?.some(delivery => delivery.recipientConversationId === target)} />;
+  const prepareCanvasExport = (text: string) => {
+    if (!canvasConversation) return;
+    const key = canvasConversation.thread ? `thread:${canvasConversation.id}` : canvasConversation.groupId ? `group:${canvasConversation.groupId}:${canvasConversation.id}` : canvasConversation.id;
+    const existing = current.current.drafts[key] ?? '';
+    dispatch({ type: 'draft', key, text: existing.trim() ? `${existing}\n\n${text}` : text });
+    viewCanvasChat();
+  };
   const openGroupDialog = (group?: Group) => { dispatch({ type: 'error', error: null }); dispatch({ type: 'sidebar', open: false }); setGroupDialog({ group }); };
 
 
   return (
-    <div className={`app-shell ${state.computerOpen && state.surface.kind !== 'bot-chat' && state.surface.kind !== 'group' ? 'computer-is-open' : ''} ${threadId ? 'thread-is-open' : ''}`}>
+    <div className={`app-shell ${state.computerOpen && !canvasVisible && state.surface.kind !== 'bot-chat' && state.surface.kind !== 'group' ? 'computer-is-open' : ''} ${threadId ? 'thread-is-open' : ''} ${canvasVisible ? 'canvas-is-open' : ''} ${canvasVisible && canvasId === threadId ? 'canvas-for-thread' : ''} ${canvasChat ? 'canvas-show-chat' : ''}`}>
       {state.sidebarOpen && (
         <button
           type="button"
@@ -629,7 +689,7 @@ export function App() {
                 type="button"
                 className="chat-identity"
                 aria-label="봇 편집"
-                onClick={() => { if (state.computerOpen && !confirmFileChange()) return; setDetailsTab('details'); dispatch({ type: 'computer', open: true }); }}
+                onClick={() => { if (!confirmCanvasChange() || (state.computerOpen && !confirmFileChange())) return; setCanvasId(null); setDetailsTab('details'); dispatch({ type: 'computer', open: true }); }}
               >
                 <Avatar color={bot.color} seed={bot.id} shape={bot.shape} size={28} />
                 <span>{bot.name}</span>
@@ -655,6 +715,7 @@ export function App() {
                 >
                   <SquarePen size={17} />
                 </IconButton>
+                {canvasControl(conversation?.id)}
               </>
             )}
             <IconButton
@@ -726,7 +787,7 @@ export function App() {
           <GroupView data={data} surface={state.surface} busy={busy} online={state.connection === 'online'} run={command} onSnapshot={snapshot}
             onRoute={next => navigate({ selection: current.current.selection, surface: next })} onSidebar={() => dispatch({ type: 'sidebar', open: true })}
             onEdit={group => openGroupDialog(group)} onThread={(parent, thread) => navigate({ selection: current.current.selection, surface: { kind: 'group', groupId: parent.groupId ?? parent.botId, conversationId: parent.id, thread } })}
-            draft={key => state.drafts[key] ?? ''} onDraft={(key, text) => dispatch({ type: 'draft', key, text })} onSettings={() => settings('models')} />
+            draft={key => state.drafts[key] ?? ''} onDraft={(key, text) => dispatch({ type: 'draft', key, text })} onSettings={() => settings('models')} canvasControl={canvasControl(shownGroupConversation(data, state.surface)?.id)} />
         ) : data && bot ? (
           <>
             <Transcript
@@ -799,9 +860,11 @@ export function App() {
       </main>
       {data && threadId && (
         <ThreadPanel key={threadId} data={data} threadId={threadId} busy={busy} online={state.connection === 'online'} run={command} onSnapshot={snapshot}
-          onClose={() => openThread()} onSettings={() => settings('models')} />
+          onClose={() => openThread()} onSettings={() => settings('models')} canvasControl={canvasControl(threadId)}
+          draft={state.drafts[`thread:${threadId}`] ?? ''} onDraft={text => dispatch({ type: 'draft', key: `thread:${threadId}`, text })} />
       )}
-      {state.computerOpen && data && bot && state.surface.kind !== 'bot-chat' && state.surface.kind !== 'group' && (
+      {canvasConversation && <CanvasPanel key={`canvas:${canvasConversation.id}`} conversation={canvasConversation} active={canvasVisible} online={state.connection === 'online'} onSnapshot={snapshot} onClose={closeCanvas} onViewChat={viewCanvasChat} onDraftStatus={reportCanvasDraft} onExportRequest={prepareCanvasExport} />}
+      {state.computerOpen && !canvasVisible && data && bot && state.surface.kind !== 'bot-chat' && state.surface.kind !== 'group' && (
         <Details bot={bot} conversation={conversation} data={data} files={state.files} dispatch={dispatch}
           tab={detailsTab} onTab={setDetailsTab} onClose={() => toggleComputer(false)}
           computer={<Computer ownerId={bot.id} canControl={!globalRun} />}

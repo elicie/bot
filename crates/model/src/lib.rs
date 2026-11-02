@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 
 mod bot_data;
 pub use bot_data::*;
+mod canvas;
+pub use canvas::*;
 mod vault;
 pub use vault::*;
 
@@ -375,6 +377,9 @@ pub struct Conversation {
     /// Group conversations: one engine session per member bot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_sessions: Option<Vec<MemberSession>>,
+    /// A document/code canvas scoped to this conversation; absent in older state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas: Option<Canvas>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

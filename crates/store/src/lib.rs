@@ -22,6 +22,7 @@
 pub mod attachments;
 mod bot_activity;
 pub mod bot_messages;
+pub mod canvas;
 mod cron;
 mod disk;
 pub mod generated_images;
@@ -485,6 +486,16 @@ struct Prospect<'a> {
     routine_runs: Vec<&'a RoutineRun>,
     bot_exchanges: Vec<&'a BotExchange>,
     bot_deliveries: Vec<&'a BotDelivery>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    permission_rules: Vec<&'a PermissionRule>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    groups: Vec<&'a Group>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    secrets: Vec<&'a VaultSecret>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    mcp_servers: Vec<&'a McpServerRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    main_bot_id: Option<&'a String>,
 }
 
 fn truthy(value: &Option<String>) -> bool {
@@ -532,6 +543,11 @@ impl State {
             routine_runs: self.disk.routine_runs.iter().collect(),
             bot_exchanges: self.disk.bot_exchanges.iter().collect(),
             bot_deliveries: self.disk.bot_deliveries.iter().collect(),
+            permission_rules: self.disk.permission_rules.iter().collect(),
+            groups: self.disk.groups.iter().collect(),
+            secrets: self.disk.secrets.iter().collect(),
+            mcp_servers: self.disk.mcp_servers.iter().collect(),
+            main_bot_id: self.disk.main_bot_id.as_ref(),
         }
     }
 
@@ -848,6 +864,7 @@ impl State {
             thread: None,
             group_round: None,
             member_sessions: None,
+            canvas: None,
         };
         self.disk_mut().conversations.push(conversation.clone());
         Ok(conversation)
@@ -1039,6 +1056,7 @@ impl State {
             thread: None,
             group_round: None,
             member_sessions: None,
+            canvas: None,
         };
         let run = RoutineRun {
             id: new_id(),
@@ -1261,6 +1279,7 @@ impl State {
             thread: None,
             group_round: None,
             member_sessions: None,
+            canvas: None,
         };
         let exchange = BotExchange {
             id: new_id(),

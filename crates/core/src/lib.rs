@@ -8,6 +8,7 @@
 //! - `http`, `scheduler`, `app`: coordinator — ports of `server/app.ts` and `RoutineScheduler`
 
 pub mod app;
+mod canvas_http;
 pub mod chat_features;
 pub mod computer;
 mod computer_http;

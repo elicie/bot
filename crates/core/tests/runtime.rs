@@ -34,6 +34,9 @@ use custom_mcp::custom_mcp_servers;
 #[path = "runtime_bot_reports/mod.rs"]
 mod bot_reports;
 use bot_reports::{bot_report_failures, bot_reports};
+#[path = "runtime_canvas/mod.rs"]
+mod canvas;
+use canvas::{canvas_edits, canvas_literal_data, canvas_redaction};
 
 // ---------------------------------------------------------------------------------------------
 // Mock OpenAI-compatible provider (port of tests/mock-provider.ts and scriptedFileReply)
@@ -1068,6 +1071,8 @@ async fn bot_messages(f: &Fixture) {
         discover("workspace read_file write_file"),
         use_tool("read_file", json!({"path": "notes.txt"})),
         use_tool("write_file", json!({"path": "notes.txt", "content": "must not be saved"})),
+        use_tool("read_canvas", json!({})),
+        use_tool("replace_canvas_range", json!({"revision": 1, "oldText": "must not read", "replacement": "must not save"})),
         text("Recipient final answer."),
     ]);
     f.runtime.start(&delivery.recipient_conversation_id, &delivery.text).await.unwrap();
@@ -1307,6 +1312,9 @@ fn runtime_on_the_in_process_engine() {
         }
         scenario!("rules-reload", Options::default(), rules_survive_session_reloads);
         scenario!("files", Options::default(), file_approvals_and_sessions);
+        scenario!("canvas", Options::default(), canvas_edits);
+        scenario!("canvas-literal-data", Options::default(), canvas_literal_data);
+        scenario!("canvas-redaction", Options::default(), canvas_redaction);
         scenario!("scripted", Options::default(), scripted_file_reply_flow);
         scenario!("fingerprint", Options::default(), fingerprint_migration);
         scenario!("provider-failure", Options::default(), provider_failure);
