@@ -50,10 +50,11 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           FULL: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         run: |
-          if [ "$FULL" = true ] || [ -z "$BASE" ] || ! git diff --name-only "$BASE"...HEAD > changed.txt; then
-            # Missing/zero base (e.g. first push) must not silently skip affected files.
+          if [ "$FULL" = true ]; then
             node scripts/ci-changes.mjs --full | tee -a "$GITHUB_OUTPUT"
           else
+            # Missing/zero base (e.g. first push): check the last commit, never the full suite.
+            { [ -n "$BASE" ] && git diff --name-only "$BASE"...HEAD > changed.txt; } || git diff --name-only HEAD~1 HEAD > changed.txt
             cat changed.txt
             node scripts/ci-changes.mjs < changed.txt | tee -a "$GITHUB_OUTPUT"
           fi

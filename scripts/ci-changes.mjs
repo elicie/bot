@@ -21,7 +21,6 @@ export const readCargoMetadata = (cwd = root) => JSON.parse(execFileSync('cargo'
 const isCrateFile = file => /^(crates\/|engine\/)/.test(file) || file.endsWith('.rs') || file.endsWith('/Cargo.toml');
 const isRustBuildFile = file => /^(\.cargo\/|rust-toolchain(?:\.toml)?$)/.test(file)
   || ['Cargo.toml', 'Cargo.lock', 'scripts/cargo.mjs', 'scripts/rust-env.mjs', 'scripts/build-engine.mjs'].includes(file);
-const isCiFile = file => file === '.github/workflows/ci.yml' || /^scripts\/ci-(changes|run)[^/]*\.mjs$/.test(file);
 
 const affectedPackages = (files, cwd, loadMetadata) => {
   const crateFiles = files.filter(isCrateFile);
@@ -61,7 +60,8 @@ const affectedPackages = (files, cwd, loadMetadata) => {
 
 export function selectChanges(changedFiles, { full = false, cwd = root, loadMetadata = () => readCargoMetadata(cwd) } = {}) {
   const files = [...new Set(changedFiles.map(file => file.trim()).filter(Boolean))];
-  if (full || files.some(isCiFile)) return { web: true, rust: true, packages: '--workspace', node: 'all', specs: 'all' };
+  // Full mode is only for scheduled/manual runs; a PR, including one that edits CI itself, checks only what it changed.
+  if (full) return { web: true, rust: true, packages: '--workspace', node: 'all', specs: 'all' };
   const under = prefix => files.some(file => file.startsWith(prefix));
   const web = under('web/') || under('shared/') || files.some(file => /^(index\.html|vite\.config\.[cm]?[jt]s|tsconfig[^/]*\.json|package(-lock)?\.json)$/.test(file));
   const packages = files.some(isRustBuildFile) ? '--workspace' : affectedPackages(files, cwd, loadMetadata);

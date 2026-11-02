@@ -20,8 +20,9 @@
   gh workflow run ci.yml --repo elicie/bot --ref main
   ```
 
-- CI workflow/selector/diagnostic changes run the full suite as well. A missing or
-  invalid diff base falls back to full coverage, not just the last commit. Root
+- Pull requests never run the full suite, including PRs that edit the CI workflow,
+  selector or diagnostics; those are exercised by the next daily/manual run. A missing
+  or invalid diff base falls back to the last commit. Root
   Cargo manifests/lockfile and Rust build-environment changes select the workspace;
   a rustfmt-only change still needs just the formatting check.
 - Existing application-PR Node/backend and changed-spec mapping is preserved;

@@ -157,12 +157,12 @@ test('--full selection includes every check and bypasses metadata', () => {
   }
 });
 
-test('CI workflow, selector and runner changes exercise full CI without metadata', () => {
+test('CI workflow, selector and runner changes do not broaden PR checks', () => {
   for (const file of [
     '.github/workflows/ci.yml', 'scripts/ci-changes.mjs', 'scripts/ci-changes.test.mjs',
     'scripts/ci-run.mjs', 'scripts/ci-run.test.mjs',
   ]) {
-    assert.deepEqual(selectChanges([file], noMetadata), full, file);
+    assert.deepEqual(selectChanges([file], noMetadata), empty, file);
   }
 });
 
@@ -199,9 +199,9 @@ test('CLI parses stdin and preserves focused web, Node and spec outputs without 
   });
 });
 
-test('CLI infrastructure changes use the full sentinels without Cargo', () => {
+test('CLI infrastructure changes select nothing beyond the CI script tests', () => {
   assert.deepEqual(outputs(cli([], 'scripts/ci-run.test.mjs\n')), {
-    web: 'true', rust: 'true', packages: '--workspace', node: 'all', specs: 'all',
+    web: 'false', rust: 'false', packages: '', node: '', specs: '',
   });
 });
 
