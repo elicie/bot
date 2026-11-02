@@ -7,9 +7,11 @@ Actual application captures, not mockups. Both sides use a real Rust `grok-bot` 
 
 | Scenario | Before | After |
 | --- | --- | --- |
-| Same desktop settings state | [Before desktop](before-desktop.png) | [After desktop](after-desktop.png) |
-| Same update section | [Before update guidance](before-updates.png) | [After update guidance](after-updates.png) |
+| Same desktop settings state | [Before desktop](<before-desktop.png>) | [After desktop](<after-desktop.png>) |
+| Same update section | [Before update guidance](<before-updates.png>) | [After update guidance](<after-updates.png>) |
 
-Additional After captures verify [390 px](after-390.png) and [320 px](after-320.png) layouts with no page errors or document-level horizontal overflow. The panel retains its existing scroll container so the instructions remain reachable on small screens. The full acceptance suite also exercises the existing mobile settings behavior.
+The [optimized-release recapture](<after-release-desktop.png>) repeats the desktop scenario with only the 181 MiB release executable copied into a new temporary directory, no companion frontend/engine, and no executable on the server's PATH. Chrome rendered the embedded UI with zero page or HTTP errors; its screenshot is byte-identical to the debug After image above.
+
+Additional After captures verify [390 px](<after-390.png>) and [320 px](<after-320.png>) layouts with no page errors or document-level horizontal overflow. The panel retains its existing scroll container so the instructions remain reachable on small screens. The full acceptance suite also exercises the existing mobile settings behavior.
 
 The change is limited to truthful build/recovery guidance; styling and layout are unchanged.

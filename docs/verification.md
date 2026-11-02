@@ -19,24 +19,26 @@ node scripts/verify-release.mjs target/release/grok-bot
 
 `build:release` runs `npm run build` followed by `node scripts/cargo.mjs build --locked --release -p grok-bot-server`. [crates/server/build.rs](<../crates/server/build.rs>) embeds the compiled [dist/](<../dist/>). Release compilation must fail rather than produce a UI-less artifact when the frontend output is absent. Debug builds allow API-only checks with no frontend output, prefer an embedded bundle when available, and otherwise serve `dist/` in the current working directory. An explicit `GROK_BOT_WEB_ROOT` takes precedence and must contain `index.html`.
 
-## P4 evidence to fill
+## P4 verification (2026-11-02)
 
-**Pending:** this documentation change does not record any P4 build, test, release, or live-runtime check as passing. The P4 integration run must replace the pending entries with actual command output, environment, test counts, and artifact/evidence links. The historical results below are not P4 results.
+Environment: Linux x86_64, Node.js 24.18.0, Rust 1.98.0, system Google Chrome. The implementation starts at revision `030794a6c87811e11b2d8dfb223a07e5e209f3a4`; [PR #28](https://github.com/elicie/bot/pull/28) records the final head and CI. The following are actual local checks, distinct from the historical results below. The optimized release and standalone smoke passed; the GitHub Actions run is tracked separately in the PR.
 
 | Check | Command / required evidence | P4 result |
 | --- | --- | --- |
-| Frontend types and tests | `npm run typecheck`; `npm test` | Pending — output and retained test counts |
-| Rust backend and engine | `npm run test:rust` | Pending — workspace output and counts |
-| Default Rust acceptance path | `npm run build && npm run build:server && npm run test:e2e` | Pending — Playwright output and artifacts |
-| Single release artifact | `npm run build:release` | Pending — artifact, build output, and source revision |
-| Independent runtime | `node scripts/verify-release.mjs target/release/grok-bot` | Pending — copied executable in an empty working directory, no Node/npm on runtime PATH, no external frontend/engine; root page, asset, SPA fallback, and API responses |
-| CLI identity and notices | `./target/release/grok-bot --help`; `--version`; `--licenses`; an unknown flag | Pending — expected output, verbatim source-notice comparison, and nonzero invalid-flag status |
-| External assets | Valid and invalid `GROK_BOT_WEB_ROOT` directories | Pending — explicit override wins; missing `index.html` is rejected |
-| Debug without frontend | Debug build/start with no embedded or working-directory frontend | Pending — API-only startup and response |
-| Release without frontend | Direct locked release compilation without frontend output | Pending — actionable build failure |
-| Profile and native dependencies | Root [Cargo.toml](<../Cargo.toml>); `ldd target/release/grok-bot` on the target Linux host | Pending — `opt-level=3`, `debug=0`, `strip="symbols"`, `panic="unwind"`; linked native libraries |
-| Cleanup and retained frontend tests | Scoped source/config review and default CI/e2e path | Pending — no obsolete Node backend, standalone engine packaging, or backend opt-in branches |
-| User-visible build guidance | Same Settings → Updates scenario before/after | Pending — actual-server screenshots, revision, viewport, and scenario evidence |
+| Frontend types and tests | Clean `npm ci`; `npm run typecheck`; `npm test`; `npm run build` | Passed. Both frontend suites retained: 11 tests, no skips. Retained dependency versions unchanged. |
+| Rust backend and engine | `umask 0022; npm run test:rust`; fmt and clippy with `-D warnings` | Passed. All workspace tests, no skips. Encoded reserved-namespace asset regressions and real HTTP disk/embedded precedence also passed on the reviewed source. |
+| Default Rust acceptance path | `npm run build && npm run build:server && npm run test:e2e` | Passed. All 57 Chrome tests / 26 specs, no skips; 2.6 minutes locally. |
+| Single release artifact | `npm run build:release` (also rerun after clean `npm ci`) | Passed. Optimized, stripped Linux x86_64 ELF, approximately 181 MiB. First uncached compilation took 18m20s locally. |
+| Independent runtime | `node scripts/verify-release.mjs target/release/grok-bot` | Passed. Only the executable is copied into a fresh directory; its PATH contains no executables. Embedded HTML/JS/CSS, HEAD, SPA, missing/reserved routes, Host guard and API checks pass; a real engine turn completes against the local mock provider; SIGTERM exits cleanly. |
+| CLI identity and notices | `./target/release/grok-bot --help`; `--version`; `--licenses`; an unknown flag | Passed. Version identifies app 0.1.0 and Grok Build `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8`; invalid flag exits nonzero. All four original notice/license files appear verbatim in the embedded output. |
+| External assets | Valid and invalid `GROK_BOT_WEB_ROOT` directories | Passed. Explicit override wins; missing `index.html` is rejected with an actionable error. |
+| Debug without frontend | Real locked debug compilation with the frontend temporarily moved aside, followed by startup from a fresh empty cwd | Passed. `/api/state` returns 200 and `/` returns 404 with no embedded or cwd frontend. The frontend was restored and normal debug/release builds passed again. |
+| Release without frontend | Real locked release compilation with the frontend temporarily moved aside | Passed. Compilation fails with the actionable `Release builds require dist/index.html` error. Separate build-script checks also covered recursive sorted embedding, rerun directives, and symlink rejection. |
+| Profile and native dependencies | Root [Cargo.toml](<../Cargo.toml>); `file` and `ldd` on the release artifact | Passed. `opt-level=3`, `debug=0`, `strip="symbols"`, `panic="unwind"`; stripped dynamic ELF links libz, libgcc_s, libm, libc and the ELF loader. |
+| Cleanup and retained frontend tests | Source/config review; `node --test scripts/ci-changes.test.mjs`; Cargo metadata | Passed. 13 Node-backend test files removed; both frontend suites retained. Selector 11/11; only workspace executable target is `grok-bot`. No backend selection gates/imports remain in active code/CI. |
+| User-visible build guidance | Same Settings → Updates scenario before/after | Passed. [Actual captures and revision/scenario details](<evidence/issue-21/README.md>), 1040 × 760 dark, plus 390/320 px. No page errors or horizontal overflow; UI-copy detector found no issues. |
+
+The host's inherited `umask 0077` exposed an existing, unrelated file-mode test assumption: saving an explicitly `0640` file produced `0600`, while the test expected `0640`. The full suite passed under CI's standard `umask 0022`; the file implementation and its permission test were not changed by P4. A read-only review also found an encoded API/internal path incorrectly classified as a SPA route; classification now runs after decoding and its regressions pass. No API authorization bypass was found.
 
 The release executable is intended to run from any working directory without the checkout, Node/npm, external frontend assets, or a standalone engine. This is not a static-link, cross-platform, or older-libc compatibility guarantee. Compatible Linux native libraries (including libc and zlib) remain necessary, and managed browsing still needs system Chrome. `panic="unwind"` preserves existing thread/task unwinding; no complete engine panic-recovery check is claimed here.
 

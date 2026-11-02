@@ -89,7 +89,9 @@ try {
   assert.equal((await head.arrayBuffer()).byteLength, 0);
   assert.equal(await (await request('/chat?bot=example')).text(), html);
   assert.equal((await request('/assets/missing.js')).status, 404);
-  assert.equal((await request('/internal/missing')).status, 404);
+  for (const route of ['/internal/missing', '/%69nternal/missing', '/api%2fmissing']) {
+    assert.equal((await request(route)).status, 404, route);
+  }
   // Node's fetch may replace Host; use HTTP directly to exercise the actual wire header.
   const foreignHostStatus = await new Promise((resolve, reject) => {
     const probe = httpRequest(origin, { headers: { Host: `untrusted.example:${port}` } }, response => { response.resume(); resolve(response.statusCode); });

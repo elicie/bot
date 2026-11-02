@@ -21,7 +21,10 @@ npm run dev
 
 ### 배포용 단일 실행 파일
 
+저장소 루트에서 다음 명령을 실행합니다. 개발 서버를 먼저 실행할 필요는 없습니다.
+
 ```sh
+npm ci
 npm run build:release
 ./target/release/grok-bot
 ```
@@ -30,7 +33,7 @@ npm run build:release
 
 결과인 `target/release/grok-bot`을 복사하면 저장소 밖의 어느 작업 디렉터리에서도 실행할 수 있습니다. 실행 시 Node/npm, 별도 프론트엔드 폴더, standalone 엔진이 필요하지 않습니다. 예를 들어 `HOST=0.0.0.0 PORT=7777 /absolute/path/grok-bot`으로 실행합니다. 단일 실행 파일이 정적 링크나 운영체제 간 호환성을 보장하지는 않습니다. 빌드와 호환되는 Linux 네이티브 라이브러리(libc, zlib 등)가 필요하며, 관리형 브라우저 기능에는 시스템 Google Chrome과 동작하는 샌드박스가 필요합니다.
 
-[release 프로필](<Cargo.toml>)은 `opt-level = 3`, `debug = 0`, `strip = "symbols"`, `panic = "unwind"`를 사용합니다. 엔진 스레드의 panic이 프로세스 전체를 즉시 종료하지 않고 unwind할 수 있어야 하므로 `panic = "abort"`로 바꾸지 않습니다. 외부 화면 파일을 쓰려면 `GROK_BOT_WEB_ROOT`를 명시하며 지정한 폴더에는 `index.html`이 있어야 합니다. Debug 빌드는 내장 화면을 우선 사용하고, 없으면 현재 작업 디렉터리의 `dist/`를 사용합니다. 둘 다 없어도 API 전용 검사를 실행할 수 있습니다. 자세한 구조와 P4 검증 대기 항목은 [Rust 전환 문서](<docs/rust-migration.md>)에 있습니다.
+[release 프로필](<Cargo.toml>)은 `opt-level = 3`, `debug = 0`, `strip = "symbols"`, `panic = "unwind"`를 사용합니다. 엔진 스레드의 panic이 프로세스 전체를 즉시 종료하지 않고 unwind할 수 있어야 하므로 `panic = "abort"`로 바꾸지 않습니다. 외부 화면 파일을 쓰려면 `GROK_BOT_WEB_ROOT`를 명시하며 지정한 폴더에는 `index.html`이 있어야 합니다. Debug 빌드는 내장 화면을 우선 사용하고, 없으면 현재 작업 디렉터리의 `dist/`를 사용합니다. 둘 다 없어도 API 전용 검사를 실행할 수 있습니다. 자세한 구조와 P4 검증 기록은 [Rust 전환 문서](<docs/rust-migration.md>)에 있습니다.
 
 ## 모델과 작업 폴더 연결
 
@@ -127,7 +130,7 @@ npm run test:e2e       # Rust 서버 대상 브라우저 테스트
 
 Rust 서버가 기본이자 유일한 백엔드입니다. 별도 백엔드 선택 환경 변수나 Rust 전용 e2e 명령은 사용하지 않습니다. 테스트는 임시 작업 폴더와 로컬 OpenAI 호환 모의 서버를 사용합니다. 실제 내장 엔진을 사용하는 Rust 통합 테스트도 포함하며, API 키나 유료 모델 호출은 필요하지 않습니다.
 
-브라우저 테스트에는 Google Chrome이 필요합니다. 테스트 출력은 `/tmp/grok-bot-playwright-results`에 저장됩니다. P4의 전체 테스트·release·독립 실행 결과는 [검증 기록](<docs/verification.md>)의 대기 항목에 실제 실행 증거를 채워야 합니다.
+브라우저 테스트에는 Google Chrome이 필요합니다. 테스트 출력은 `/tmp/grok-bot-playwright-results`에 저장됩니다. P4의 전체 테스트·release·독립 실행 결과와 확인 범위는 [검증 기록](<docs/verification.md>)에 정리합니다.
 
 ## 구현 범위와 출처
 

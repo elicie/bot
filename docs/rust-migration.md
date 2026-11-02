@@ -1,6 +1,6 @@
 # Rust 백엔드 전환과 배포
 
-작성일: 2026-11-01 · 상태: P0–P3 결과 기록 보존, P4 정리·release 검증 대기
+작성일: 2026-11-01 · 갱신: 2026-11-02 · 상태: P0–P4 로컬 검증 완료, PR의 CI·검토 후 병합
 
 ## 목표와 현재 범위
 
@@ -101,7 +101,7 @@ crates/
 | P1 코어 서버 | axum, store, SSE, settings/bots/conversations, files, MCP 브로커 | `browser.spec.ts`, `conversation-history.spec.ts`, `bot-creation.spec.ts` 통과 |
 | P2 기능 | 루틴, 봇 메시지, 스킬 | `routines*.spec.ts`, `skills.spec.ts` 통과, 해당 단위 테스트 이식 |
 | P3 컴퓨터 | 관리형 Chrome, 프록시, 출처 허용 목록 | `computer.spec.ts` 통과, privacy 테스트 이식 |
-| P4 정리 | 구 Node 백엔드·전용 테스트·별도 엔진 패키징 제거, 내장 프론트엔드 release, 문서 갱신 | 전체 Rust·프론트엔드·e2e 및 독립 release 실행의 실제 결과 기록 (현재 대기) |
+| P4 정리 | 구 Node 백엔드·전용 테스트·별도 엔진 패키징 제거, 내장 프론트엔드 release, 문서 갱신 | 로컬 전체 Rust·프론트엔드·e2e 및 독립 release 실행 통과. PR의 CI·검토 후 병합 |
 | P5 데스크톱 | `crates/desktop` Tauri 앱, loopback 토큰, 앱 데이터 경로 | Tauri 창에서 대화·파일 승인 동작, 웹 버전과 같은 e2e 시나리오 수동 확인 |
 
 초기 설계의 B안은 `LocalSet` 공존이나 다중 세션 실험이 실패할 경우 상주형 엔진 자식 프로세스를 두는 대안이었습니다. 아래 P0 기록에 따라 프로세스 내 라이브러리 호스트를 채택했으며, B안은 현재 실행 경로가 아닙니다.
@@ -123,19 +123,19 @@ npm run build:release
 - 단일 실행 파일은 정적 링크나 운영체제 간 실행 호환성을 보장하지 않습니다. 호환되는 Linux 네이티브 라이브러리(libc, zlib 등)가 필요하며 관리형 탐색에는 시스템 Google Chrome과 동작하는 샌드박스가 필요합니다. Node.js 22.12+는 빌드·프론트엔드 테스트 도구입니다.
 - `grok-bot --help`, `--version`, `--licenses`로 사용법·앱/소스 식별자·내장 원본 고지를 확인합니다. [engine/NOTICE](<../engine/NOTICE>)와 [engine/licenses](<../engine/licenses/>)를 보존하고 실행 파일을 재배포할 때 필요한 라이선스·고지를 제공합니다. 내장 고지는 최종 Rust/npm 의존성 전체의 고지나 MPL 소스 제공 의무까지 검증했다는 뜻이 아닙니다.
 
-### P4 검증 대기 기록
+### P4 검증 기록
 
-현재 실행 명령은 다음과 같습니다. 아래 항목은 성공 기록이 아니라 P4 통합 검증에서 명령 출력과 증거를 채울 자리입니다. `:rust` e2e 별칭이나 백엔드 opt-in 환경 변수는 사용하지 않습니다.
+Linux x86_64, Node.js 24.18.0, Rust 1.98.0과 시스템 Chrome에서 검증합니다. 구현 리비전은 `030794a6c87811e11b2d8dfb223a07e5e209f3a4`이며 최종 head·CI는 [PR #28](https://github.com/elicie/bot/pull/28)에서 확인할 수 있습니다. `:rust` e2e 별칭이나 백엔드 opt-in 환경 변수는 사용하지 않습니다.
 
 | 확인 | 명령 / 증거 | P4 결과 |
 | --- | --- | --- |
-| 프론트엔드 | `npm run typecheck` 및 `npm test` | 대기 — 출력·테스트 수 기입 |
-| Rust workspace | `npm run test:rust` | 대기 — 출력·테스트 수 기입 |
-| 기본 브라우저 경로 | `npm run build && npm run build:server && npm run test:e2e` | 대기 — 출력·브라우저 증거 기입 |
-| Release 빌드 | `npm run build:release` | 대기 — artifact·프로필 확인 기입 |
-| 독립 실행 | `node scripts/verify-release.mjs target/release/grok-bot` | 대기 — 빈 작업 디렉터리·Node 없는 런타임·내장 화면/API 확인 기입 |
-| CLI와 고지 | `./target/release/grok-bot --version`, `--help`, `--licenses` | 대기 — 출력·원문 일치 확인 기입 |
-| 외부 화면 override | `GROK_BOT_WEB_ROOT`의 정상 폴더와 `index.html` 없는 폴더 | 대기 — 정상 제공·잘못된 설정 거절 기입 |
+| 프론트엔드 | 깨끗한 `npm ci`, `npm run typecheck`, `npm test`, `npm run build` | 통과 — 유지한 프론트 테스트 11개, skip 없음 |
+| Rust workspace | `umask 0022; npm run test:rust`, fmt, clippy `-D warnings` | 전체 통과 — 상속된 0077 umask에서 드러난 기존 파일 권한 테스트 가정은 [검증 기록](<verification.md>)에 명시 |
+| 기본 브라우저 경로 | `npm run build && npm run build:server && npm run test:e2e` | 통과 — 실제 Chrome 전체 57개, skip 없음; [동일 조건 Before/After](<evidence/issue-21/README.md>)도 확인 |
+| Release 빌드 | `npm run build:release` | 통과 — 약 181 MiB, 최적화·심볼 제거된 Linux x86_64 ELF, 첫 컴파일 18분 20초 |
+| 독립 실행 | `node scripts/verify-release.mjs target/release/grok-bot` | 통과 — 빈 작업 디렉터리, 실행 파일 없는 PATH, 외부 화면·엔진 없이 내장 자산/HTTP 가드/실제 엔진 응답/SIGTERM 확인 |
+| CLI와 고지 | `./target/release/grok-bot --version`, `--help`, `--licenses` | 통과 — 앱·upstream 식별자, 사용법, 원본 고지 4개 원문 일치, 잘못된 인자 거절 |
+| 외부 화면 override | `GROK_BOT_WEB_ROOT`의 정상 폴더와 `index.html` 없는 폴더 | 통과 — 명시적 override 우선, 잘못된 설정 거절 |
 
 상세 기록과 이전 검증의 범위는 [verification.md](<verification.md>)를 따릅니다. 아래 P0–P3의 명령·수치는 당시 증거를 보존한 것이며 P4 통과를 뜻하지 않습니다.
 
@@ -199,4 +199,4 @@ TS 대비 의도된 차이:
 
 ## 결정과 남은 범위
 
-웹 프론트엔드는 컴파일 시 바이너리에 내장하고 명시적인 `GROK_BOT_WEB_ROOT`만 외부 override로 둡니다. 기존 상태 파일 호환과 P3의 관리형 Chrome 보호 조건은 유지합니다. P4의 실제 전체 테스트·release·독립 실행 결과, 최종 배포 의존성 고지·소스 제공 점검은 위 대기 기록에 남깁니다. Tauri(P5), 동시 실행 정책 확장, 봇별 모델, 다른 운영체제와 오래된 libc 호환성은 이번 단일 Linux 실행 파일 정리와 별개입니다.
+웹 프론트엔드는 컴파일 시 바이너리에 내장하고 명시적인 `GROK_BOT_WEB_ROOT`만 외부 override로 둡니다. 기존 상태 파일 호환과 P3의 관리형 Chrome 보호 조건은 유지합니다. P4의 실제 전체 테스트·release·독립 실행 결과는 위 검증 기록에 남겼습니다. 최종 배포 의존성 전체의 고지·소스 제공 점검은 별도 범위로 남깁니다. Tauri(P5), 동시 실행 정책 확장, 봇별 모델, 다른 운영체제와 오래된 libc 호환성은 이번 단일 Linux 실행 파일 정리와 별개입니다.

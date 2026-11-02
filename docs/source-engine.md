@@ -54,4 +54,4 @@ The upstream notice inventory is not a complete inventory for the final locked R
 
 Current backend/engine tests use `npm run test:rust`; frontend unit tests use `npm test`. Browser acceptance uses `npm run build`, `npm run build:server`, then `npm run test:e2e`, with Rust as the only backend and no opt-in environment flag. Fixtures use disposable state, workspaces, and a local OpenAI-compatible provider; they do not require paid model calls.
 
-P4 full-suite, release-build, standalone-runtime, and notice-output checks remain pending until their command output is recorded in [verification.md](<verification.md>). Earlier engine-subprocess and P0–P3 results are historical evidence, not proof that the P4 artifact or final dependency notices have been verified.
+P4 full-suite, release-build, standalone-runtime, and notice-output results and verification limits are recorded in [verification.md](<verification.md>). Earlier engine-subprocess and P0–P3 results are historical evidence, not proof that the P4 artifact or final dependency notices have been verified.
