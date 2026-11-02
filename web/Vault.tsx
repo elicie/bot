@@ -6,6 +6,7 @@ import type { McpConfigDocument, PublicMcpServer, PublicSecret, SecretInput, Vau
 import { errorText, request } from './api';
 import { type Action, runningConversation } from './state';
 import { ErrorNotice, IconButton, Modal } from './ui';
+import { McpServerForm } from './McpServerForm';
 import './vault.css';
 
 const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
@@ -206,14 +207,14 @@ function McpEditor({ bot, onClose, onSaved }: { bot: Bot; onClose: () => void; o
 export function BotIntegrations({ bot, data, dispatch }: { bot: Bot; data: AppState; dispatch: Dispatch<Action> }) {
   const canEdit = useVaultAccess();
   const prefix = useId();
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState<'form' | 'json' | null>(null);
   const [toggling, setToggling] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const lock = useRef(false);
   const snapshot = (state: AppState) => dispatch({ type: 'snapshot', data: state });
   const secretActions = useSecretActions(snapshot);
-  useEffect(() => { setError(null); setStatus(null); setEditing(false); }, [bot.id]);
+  useEffect(() => { setError(null); setStatus(null); setEditing(null); }, [bot.id]);
   const servers = (data.mcpServers ?? []).filter((server) => server.botId === bot.id);
   const secrets = (data.secrets ?? []).filter((secret) => !secret.botId || secret.botId === bot.id);
   const available = new Set(secrets.map((secret) => secret.name));
@@ -230,7 +231,7 @@ export function BotIntegrations({ bot, data, dispatch }: { bot: Bot; data: AppSt
   };
   return <>
     <section className="details-section vault-section" aria-labelledby={`${prefix}-mcp`}>
-      <header><h3 id={`${prefix}-mcp`}>MCP 서버</h3><button type="button" className="text-button" disabled={!canEdit || running} onClick={() => setEditing(true)}>MCP 서버 JSON</button></header>
+      <header><h3 id={`${prefix}-mcp`}>MCP 서버</h3><button type="button" className="text-button" disabled={!canEdit || running} onClick={() => setEditing('json')}>MCP 서버 JSON</button></header>
       <p className="vault-help">이 Bot을 위한 사용자 지정 MCP 서버를 추가하세요. 도구는 켠 서버만 쓰고, 호출마다 승인을 요청해요.</p>
       {canEdit === false && <p className="vault-help vault-lan-note" role="note">{LAN_NOTE}</p>}
       {servers.length ? <ul className="vault-list" aria-label={`${bot.name}의 MCP 서버`}>
@@ -246,7 +247,7 @@ export function BotIntegrations({ bot, data, dispatch }: { bot: Bot; data: AppSt
           </li>;
         })}
       </ul> : <p className="detail-empty">아직 사용자 지정 MCP 서버가 없어요</p>}
-      {!servers.length && <button type="button" className="small-button" disabled={!canEdit || running} onClick={() => setEditing(true)}><Plus size={13} />사용자 지정 MCP 추가</button>}
+      <button type="button" className="small-button" disabled={!canEdit || running} onClick={() => setEditing('form')}><Plus size={13} />사용자 지정 MCP 추가</button>
       {error && <ErrorNotice onDismiss={() => setError(null)}>{error}</ErrorNotice>}
       {status && <p className="vault-status" role="status">{status}</p>}
     </section>
@@ -258,7 +259,8 @@ export function BotIntegrations({ bot, data, dispatch }: { bot: Bot; data: AppSt
       {secretActions.error && <ErrorNotice onDismiss={() => secretActions.setError(null)}>{secretActions.error}</ErrorNotice>}
       {secretActions.status && <p className="vault-status" role="status">{secretActions.status}</p>}
     </section>
-    {editing && <McpEditor bot={bot} onClose={() => setEditing(false)} onSaved={(state) => { snapshot(state); setEditing(false); setStatus('MCP 서버를 저장했어요. 새로 추가하거나 바꾼 서버는 꺼져 있어요.'); }} />}
+    {editing === 'json' && <McpEditor bot={bot} onClose={() => setEditing(null)} onSaved={(state) => { snapshot(state); setEditing(null); setStatus('MCP 서버를 저장했어요. 새로 추가하거나 바꾼 서버는 꺼져 있어요.'); }} />}
+    {editing === 'form' && <McpServerForm bot={bot} data={data} canEdit={!!canEdit} running={running} onClose={() => setEditing(null)} onState={snapshot} onSaved={(state) => { snapshot(state); setEditing(null); setStatus('MCP 서버를 추가했어요. 목록에서 켜면 다음 대화부터 사용할 수 있어요.'); }} />}
     {secretActions.dialog === 'add' && <SecretForm data={data} botId={bot.id} onClose={() => secretActions.setDialog(null)} onSaved={secretActions.saved} />}
     {secretActions.dialog && typeof secretActions.dialog === 'object' && <SecretForm data={data} replace={secretActions.dialog.replace} onClose={() => secretActions.setDialog(null)} onSaved={secretActions.saved} />}
   </>;

@@ -113,7 +113,7 @@ export function Modal({
       if (event.key !== 'Tab') return;
       const controls = [
         ...dialog.querySelectorAll<HTMLElement>(
-          'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), a[href], [tabindex="0"]',
+          'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex="0"]',
         ),
       ].filter((element) => element.getClientRects().length > 0);
       const first = controls[0];

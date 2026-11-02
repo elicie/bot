@@ -1,5 +1,6 @@
 // Vault secrets ("보관함" / "시크릿") and custom MCP servers ("사용자 지정 MCP").
-// Mirrors `crates/model/src/vault.rs`. Secret values are write-only: no response carries them.
+// Public storage types mirror `crates/model/src/vault.rs`; the probe body is in core/vault_http.rs.
+// Secret values are write-only: no response carries them.
 
 /** A secret's name and scope. `botId` absent: available to every bot. */
 export interface PublicSecret {
@@ -34,4 +35,14 @@ export interface VaultAccess {
 /** `GET /api/bots/:botId/mcp-servers` (loopback only). */
 export interface McpConfigDocument {
   json: string;
+}
+/** `POST /api/bots/:botId/mcp-servers/test` (loopback only, never persists). */
+export interface McpConnectionTestInput {
+  /** Exactly one server in the same JSON format used by configuration storage. */
+  json: string;
+  /** In-memory bot-scoped credentials for testing before a server is saved. */
+  secrets?: SecretInput[];
+}
+export interface McpConnectionTestResult {
+  toolCount: number;
 }

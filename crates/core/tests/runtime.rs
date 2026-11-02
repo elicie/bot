@@ -33,7 +33,7 @@ mod custom_mcp;
 use custom_mcp::custom_mcp_servers;
 #[path = "runtime_bot_reports/mod.rs"]
 mod bot_reports;
-use bot_reports::{bot_report_failures, bot_reports};
+use bot_reports::{bot_report_cancellation, bot_report_failures, bot_reports};
 #[path = "runtime_canvas/mod.rs"]
 mod canvas;
 use canvas::{canvas_edits, canvas_literal_data, canvas_redaction};
@@ -1325,6 +1325,7 @@ fn runtime_on_the_in_process_engine() {
         scenario!("bot-messages", Options::default(), bot_messages);
         scenario!("bot-reports", Options::default(), bot_reports);
         scenario!("bot-report-failures", Options::default(), bot_report_failures);
+        scenario!("bot-report-cancellation", Options::default(), bot_report_cancellation);
         scenario!("bot-creation", Options::default(), bot_creation);
         scenario!("bot-data", Options::default(), bot_memory_and_knowledge);
         scenario!("permission-rules", Options::default(), permission_rules);
