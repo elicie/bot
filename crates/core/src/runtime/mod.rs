@@ -13,6 +13,7 @@
 pub mod attachments;
 mod broker;
 mod custom_mcp;
+pub(crate) use custom_mcp::McpLaunchContext;
 mod engine;
 mod permissions;
 pub mod text;
