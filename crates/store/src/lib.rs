@@ -131,8 +131,18 @@ fn uses_unstarted_report_cancellations(disk: &DiskState) -> bool {
 /// `state.json` only when it does not already use that shape, with private permissions and no
 /// overwrite. A restart never creates a misleading rollback copy of an already-new shape.
 fn backup_before_shape(path: &Path, name: &str, uses_shape: fn(&DiskState) -> bool) -> std::io::Result<()> {
-    let existing = std::fs::read(path)?;
-    let disk = serde_json::from_slice::<DiskState>(&existing)?;
+    let mut source = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
+    let meta = source.metadata()?;
+    if !meta.is_file() || meta.nlink() != 1 || meta.len() > MAX_STATE_BYTES as u64 {
+        return Err(std::io::Error::other("Invalid application state file."));
+    }
+    let mut existing = Vec::new();
+    source.read_to_end(&mut existing)?;
+    let mut disk = serde_json::from_slice::<DiskState>(&existing)?;
+    if !disk::schema_valid(&mut disk) {
+        return Err(std::io::Error::other("Application state does not match the expected schema."));
+    }
+    disk::references_valid(&disk).map_err(std::io::Error::other)?;
     if uses_shape(&disk) {
         return Ok(());
     }
@@ -140,12 +150,18 @@ fn backup_before_shape(path: &Path, name: &str, uses_shape: fn(&DiskState) -> bo
     match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&backup) {
         Ok(file) => {
             let meta = file.metadata()?;
-            if !meta.is_file() || meta.permissions().mode() & 0o077 != 0 || meta.len() > MAX_STATE_BYTES as u64 {
+            if !meta.is_file() || meta.nlink() != 1 || meta.permissions().mode() & 0o077 != 0 || meta.len() > MAX_STATE_BYTES as u64 {
                 return Err(std::io::Error::other("The state backup must be a private regular state file."));
             }
             // A previous crash may have left a truncated copy. Never overwrite it, but do not
             // treat it (or an already-incompatible copy) as a usable rollback backup either.
-            let saved = serde_json::from_reader(file)?;
+            // Parsing JSON alone is insufficient: this must also pass the real store loader's
+            // schema and reference checks before it can make an incompatible write safe.
+            let mut saved = serde_json::from_reader(file)?;
+            if !disk::schema_valid(&mut saved) {
+                return Err(std::io::Error::other("The state backup does not match the expected schema."));
+            }
+            disk::references_valid(&saved).map_err(std::io::Error::other)?;
             if uses_shape(&saved) {
                 return Err(std::io::Error::other("The state backup already uses the incompatible shape."));
             }

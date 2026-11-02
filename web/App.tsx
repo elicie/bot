@@ -705,6 +705,12 @@ export function App() {
             </ErrorNotice>
           </div>
         )}
+        {reportNotice && state.surface.kind === 'chat' && reportNotice.conversationId === conversation?.id && (
+          <div className="connection-banner" role="status" aria-label="보고 취소 결과">
+            <span>{reportNotice.text}</span>
+            <button type="button" onClick={() => setReportNotice(null)}>보고 취소 안내 닫기</button>
+          </div>
+        )}
         {globalRun && !shownIds.includes(globalRun.id) && (
           <div className="other-run">
             <span>다른 대화에서 작업이 실행 중입니다.</span>
@@ -750,7 +756,6 @@ export function App() {
               onBotChat={exchangeId => navigate({ selection: current.current.selection, surface: { kind: 'bot-chat', exchangeId } })}
               onCancelReports={(conversationId, deliveryIds) => void cancelReports(conversationId, deliveryIds)}
               cancelReportsDisabled={busy || state.connection !== 'online'}
-              reportNotice={reportNotice?.conversationId === conversation?.id ? reportNotice?.text : undefined}
               onRoutines={() => navigate({ selection: current.current.selection, surface: { kind: 'routines' } })}
               queuedRoutine={queuedRun}
               modelConfigured={!!data.settings.baseUrl && !!data.settings.model}

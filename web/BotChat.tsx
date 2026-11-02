@@ -51,7 +51,7 @@ export function BotMessageLinks({ message, data, onOpen, onCancelReports, cancel
       {report && <span className="bot-report-summary">
         <span>이어서 답하기</span>
         <span className="bot-exchange-status" data-status={report.status} role={report.status === 'queued' ? 'status' : undefined} aria-live={report.status === 'queued' ? undefined : 'off'} aria-label={`${other?.name ?? 'Bot'} 답변 이어서 답하기 상태`} title={reportLabels[report.status]}>{reportStatus[report.status]}</span>
-        {report.status === 'queued' && onCancelReports && <button type="button" disabled={cancelReportsDisabled} onClick={() => onCancelReports(exchange.sourceConversationId, [delivery.id])} aria-label={`${other?.name ?? 'Bot'} 답변 이어서 답하기 취소`} title="이 보고만 취소합니다. 나중에 도착하는 답변은 취소하지 않습니다.">이 보고 취소</button>}
+        {report.status === 'queued' && onCancelReports && <button type="button" disabled={cancelReportsDisabled} onClick={() => onCancelReports(exchange.sourceConversationId, [delivery.id])} aria-label={`${other?.name ?? 'Bot'} 답변: 이 보고 취소`} title="이 보고만 취소합니다. 나중에 도착하는 답변은 취소하지 않습니다.">이 보고 취소</button>}
       </span>}
     </div>;
   })}</>;

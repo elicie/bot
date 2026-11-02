@@ -705,7 +705,18 @@ async fn cancellation_keeps_an_existing_private_backup_and_does_not_fabricate_on
 
 #[tokio::test]
 async fn a_required_cancellation_backup_failure_leaves_compatible_state_on_disk() {
-    for obstruction in ["directory", "symlink", "public-file", "truncated-file", "incompatible-file"] {
+    for obstruction in [
+        "directory",
+        "symlink",
+        "hard-link",
+        "public-file",
+        "truncated-file",
+        "incompatible-file",
+        "version-two",
+        "version-99",
+        "empty-bots",
+        "dangling-conversation-bot",
+    ] {
         let f = Fixture::new().await;
         let a = f.bot_id();
         let b = add_bot(&f, "B").await;
@@ -716,30 +727,36 @@ async fn a_required_cancellation_backup_failure_leaves_compatible_state_on_disk(
         let before = f.disk_text();
         let backup = f.data_dir.join(grok_bot_store::PRE_UNSTARTED_REPORT_CANCELLATION_BACKUP);
         let outside = f.root.path().join("untouched");
-        std::fs::write(&outside, "do not overwrite").unwrap();
+        std::fs::write(&outside, &before).unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o600)).unwrap();
         match obstruction {
             "directory" => std::fs::create_dir(&backup).unwrap(),
             "symlink" => std::os::unix::fs::symlink(&outside, &backup).unwrap(),
+            "hard-link" => std::fs::hard_link(&outside, &backup).unwrap(),
             _ => {
-                let bytes = if obstruction == "incompatible-file" {
-                    let mut state = f.disk_json();
-                    delivery_json(&mut state, &first.id)["report"] = json!({"status": "cancelled", "finishedAt": f.iso_now()});
-                    serde_json::to_string(&state).unwrap()
-                } else {
-                    "do not overwrite".into()
-                };
+                let mut state = f.disk_json();
+                match obstruction {
+                    "incompatible-file" => delivery_json(&mut state, &first.id)["report"] = json!({"status": "cancelled", "finishedAt": f.iso_now()}),
+                    "version-two" => state["version"] = json!(2),
+                    "version-99" => state["version"] = json!(99),
+                    "empty-bots" => state["bots"] = json!([]),
+                    "dangling-conversation-bot" => state["conversations"][0]["botId"] = json!(new_id()),
+                    _ => {}
+                }
+                let bytes = if obstruction == "truncated-file" { "{\"version\":1,".into() } else { serde_json::to_string(&state).unwrap() };
                 std::fs::write(&backup, bytes).unwrap();
                 let mode = if obstruction == "public-file" { 0o644 } else { 0o600 };
                 std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(mode)).unwrap();
             }
         }
+        let backup_before = (obstruction != "directory").then(|| std::fs::read(&backup).unwrap());
         let error = f.store.mutate(|s| s.cancel_bot_reports(&x.source, std::slice::from_ref(&first.id))).await.unwrap_err();
         assert_eq!(error.status, 500, "{obstruction}");
         assert_eq!(f.disk_text(), before, "failed backup cannot persist an unreadable new shape: {obstruction}");
         assert_eq!(f.store.read(|s| s.assert_writable()).unwrap_err().status, 503);
-        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "do not overwrite");
-        if obstruction == "public-file" {
-            assert_eq!(std::fs::read_to_string(&backup).unwrap(), "do not overwrite");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), before, "{obstruction}");
+        if let Some(backup_before) = backup_before {
+            assert_eq!(std::fs::read(&backup).unwrap(), backup_before, "the invalid backup is never overwritten: {obstruction}");
         }
     }
 }

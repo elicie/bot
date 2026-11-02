@@ -219,7 +219,6 @@ export function Transcript({
   onBotChat,
   onCancelReports,
   cancelReportsDisabled,
-  reportNotice,
   onRoutines,
   speakerFor,
   messageExtras,
@@ -238,7 +237,6 @@ export function Transcript({
   onBotChat?: (id: string) => void;
   onCancelReports?: (conversationId: string, deliveryIds: string[]) => void;
   cancelReportsDisabled?: boolean;
-  reportNotice?: string;
   onRoutines?: () => void;
   /** Group conversations: the member bot that wrote an assistant message. */
   speakerFor?: (message: Message) => Bot | undefined;
@@ -342,7 +340,6 @@ export function Transcript({
               )}
             </div>
           ))}
-          {reportNotice && <p className="run-indicator" role="status">{reportNotice}</p>}
           {queuedRoutine && (
             <p className="run-indicator" role="status">
               <Clock3 size={14} />루틴 실행 대기 중
