@@ -49,6 +49,8 @@ impl Backend {
         let runtime = Runtime::new(store.clone(), queue.clone(), runtime_options);
         let computer = crate::computer::ApplicationComputer::new(store.clone(), crate::computer::ComputerOptions::from_environment())?;
         runtime.set_computer(Arc::new(computer));
+        runtime.set_relay(crate::provider_relay::start(store.clone()).await?);
+        crate::chat_features::prune_generated_images(&store).await;
         runtime.initialize().await;
         let scheduler_options = options.scheduler.unwrap_or(SchedulerOptions { now, ..SchedulerOptions::default() });
         let scheduler = RoutineScheduler::new(store.clone(), runtime.clone(), queue.clone(), scheduler_options);

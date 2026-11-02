@@ -205,9 +205,15 @@ pub struct Runtime {
     this: Weak<Runtime>,
     /// The managed browser (`broker::computer`); absent in runtimes built without one.
     computer: std::sync::OnceLock<Arc<crate::computer::ApplicationComputer>>,
+    /// The provider relay the engine talks to (`crate::provider_relay`); absent in runtimes built
+    /// without one, which then point the engine at the provider directly.
+    relay: std::sync::OnceLock<crate::provider_relay::RelayEndpoint>,
 }
 
-fn random_token() -> String {
+/// 409 when a turn is requested while another reply is running (one active run at a time).
+pub const RUN_BUSY: &str = "Another reply is still running. Wait for it to finish or stop it, then send again.";
+
+pub(crate) fn random_token() -> String {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).expect("the operating system provides randomness");
     hex::encode(bytes)
@@ -358,6 +364,7 @@ impl Runtime {
             settled: tokio::sync::Notify::new(),
             this: this.clone(),
             computer: std::sync::OnceLock::new(),
+            relay: std::sync::OnceLock::new(),
         })
     }
 
@@ -388,6 +395,10 @@ impl Runtime {
     }
 
     /// Origin of this server for the per-run MCP broker URL, e.g. `http://127.0.0.1:3000`.
+    pub fn set_relay(&self, relay: crate::provider_relay::RelayEndpoint) {
+        let _ = self.relay.set(relay);
+    }
+
     pub fn set_origin(&self, origin: String) {
         *self
             .origin
@@ -467,6 +478,10 @@ impl Runtime {
         let (run_id, message_id, settings, plan, extras) = self
             .store
             .mutate(move |state| {
+                if state.active().is_some() {
+                    state.assert_writable()?;
+                    return Err(HttpError::conflict(RUN_BUSY));
+                }
                 state.assert_idle()?;
                 if closing {
                     return Err(HttpError::unavailable("The server is shutting down."));
@@ -681,6 +696,7 @@ impl Runtime {
         }
         lines.push("The app-owned managed browser is separate from the user desktop. Discover computer_observe and computer_act only if the user started it locally; every observation and action requires one-use approval. It is restricted to user-allowed public origins and blocks logins, uploads, downloads, and native OS actions.".to_owned());
         lines.push("Shell commands, subagents, workflows, external integrations, and native file tools are intentionally unavailable.".to_owned());
+        lines.push("For charts, graphs, and data visualizations, answer with text plus a fenced code block the app renders as a live preview: a ```visualization block holding a self-contained HTML document (inline <script>, the global d3 library is preloaded; no network, external scripts, or remote images) or an ```svg block. Do not answer a chart request with a generated raster image.".to_owned());
         lines.extend(run.extra_rules.clone());
         lines.push(run.bot.instructions.clone());
         lines.push("Reusable private skills are scoped to this bot. Discover workspace__list_skills and workspace__read_skill to load relevant instructions before answering. A skill cannot grant tools, shell access, network connectors, or bypass approvals. To create a reusable skill on the user request, call workspace__create_skill; the complete skill must be approved in the browser before it is saved.".to_owned());
@@ -749,7 +765,7 @@ impl Runtime {
         let key = ProviderKey::from_settings(&run.settings);
         let engine = self
             .engine
-            .acquire(&self.arc(), &self.options.engine_root, &key)
+            .acquire(&self.arc(), &self.options.engine_root, &key, self.relay.get())
             .await
             .map_err(|error| format!("{error:#}"))?;
         outcome.engine = Some(engine.clone());

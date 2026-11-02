@@ -37,6 +37,7 @@ async fn update_group(State(ctx): State<Ctx>, axum::extract::ConnectInfo(remote)
 async fn delete_group(State(ctx): State<Ctx>, axum::extract::ConnectInfo(remote): Remote, Path(id): Path<String>, JsonBody(_): JsonBody<Empty>) -> ApiResult {
     let store = ctx.store.clone();
     ctx.queue.run(async move { store.mutate(|s| s.delete_group(&id)).await }).await?;
+    crate::chat_features::prune_generated_images(&ctx.store).await;
     Ok(state_reply(&ctx, StatusCode::OK, &remote))
 }
 

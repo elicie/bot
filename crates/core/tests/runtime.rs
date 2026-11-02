@@ -562,7 +562,7 @@ async fn file_approvals_and_sessions(f: &Fixture) {
         (busy.status, busy.message.as_str()),
         (
             409,
-            "Stop the active run before changing settings, bots, or files."
+            "Another reply is still running. Wait for it to finish or stop it, then send again."
         )
     );
     let pending = f.pending(&id).await;

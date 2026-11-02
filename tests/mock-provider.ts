@@ -15,6 +15,8 @@ export interface MockProviderOptions {
 export interface MockCompletion {
   text?: string;
   tool?: { name: string; arguments: Record<string, unknown> };
+  /** Generated images as `data:` URLs, sent OpenRouter-style in `images` (with no `content` when `text` is unset). */
+  images?: string[];
 }
 
 export async function startMockProvider(options: MockProviderOptions = {}) {
@@ -51,16 +53,17 @@ export async function startMockProvider(options: MockProviderOptions = {}) {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
       const chunk = (delta: unknown, reason: string | null = null) => ({ id, object: 'chat.completion.chunk', created: 1, model: request.model, choices: [{ index: 0, delta, finish_reason: reason }] });
       const send = (value: unknown) => res.write(`data: ${JSON.stringify(value)}\n\n`);
-      send(chunk({ role: 'assistant' }));
+      const images = result.images?.map((url, index) => ({ type: 'image_url', image_url: { url }, index }));
+      send(chunk({ role: 'assistant', ...(images ? { images } : {}) }));
       if (toolCall) send(chunk({ tool_calls: [toolCall] }));
-      else send(chunk({ content: result.text ?? '' }));
+      else if (!images || result.text !== undefined) send(chunk({ content: result.text ?? '' }));
       send({ ...chunk({}, finishReason), usage });
       res.end('data: [DONE]\n\n');
       return;
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     const { index: _index, ...completeTool } = toolCall ?? { index: 0 };
-    res.end(JSON.stringify({ id, object: 'chat.completion', created: 1, model: request.model, choices: [{ index: 0, message: { role: 'assistant', content: result.text ?? null, ...(toolCall ? { tool_calls: [completeTool] } : {}) }, finish_reason: finishReason }], usage }));
+    res.end(JSON.stringify({ id, object: 'chat.completion', created: 1, model: request.model, choices: [{ index: 0, message: { role: 'assistant', content: result.text ?? null, ...(toolCall ? { tool_calls: [completeTool] } : {}), ...(result.images ? { images: result.images.map(url => ({ type: 'image_url', image_url: { url } })) } : {}) }, finish_reason: finishReason }], usage }));
   });
   server.on('connection', socket => {
     sockets.add(socket);

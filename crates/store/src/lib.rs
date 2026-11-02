@@ -24,6 +24,7 @@ mod bot_activity;
 pub mod bot_messages;
 mod cron;
 mod disk;
+pub mod generated_images;
 pub mod knowledge;
 pub mod main_bot;
 pub mod memory;

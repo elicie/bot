@@ -261,7 +261,7 @@ async fn group_order_attribution_and_sessions(h: &Harness) {
     let busy = h.state().conversations.into_iter().find(|c| c.id == conversation).unwrap();
     assert_eq!(busy.group_round.as_ref().unwrap().pending_bot_ids, [beta.clone(), gamma.clone()]);
     let (status, body) = h.send(&conversation, "Interleaved").await;
-    assert_eq!((status, body["error"].as_str()), (409, Some("Stop the active run before changing settings, bots, or files.")));
+    assert_eq!((status, body["error"].as_str()), (409, Some("Another reply is still running. Wait for it to finish or stop it, then send again.")));
     let (status, _) = h.post(&format!("/api/conversations/{conversation}/cancel"), json!({})).await;
     assert_eq!(status, 200);
     h.provider.release.notify_waiters();
