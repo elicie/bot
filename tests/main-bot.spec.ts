@@ -2,8 +2,6 @@ import { test, expect, type Page } from '@playwright/test';
 import { startTestApp } from './app-fixture';
 import type { AppState } from '../shared/types';
 
-test.skip(process.env.GROK_BOT_BACKEND !== 'rust', 'The main bot is implemented by the Rust server.');
-
 const snapshot = (page: Page): Promise<AppState> => page.evaluate(async () => (await fetch('/api/state')).json());
 
 async function api<T>(page: Page, method: string, path: string, body?: unknown): Promise<T> {

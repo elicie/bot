@@ -39,8 +39,9 @@ pub struct HttpContext {
     /// Bound port, set once the listener is open; Host must name this port.
     pub port: AtomicU16,
     pub closing: AtomicBool,
-    /// Built frontend (`dist/`). `None` serves the API only.
+    /// Explicit frontend directory override, or the debug build's `dist/` fallback.
     pub web_root: Option<PathBuf>,
+    pub embedded_web: Option<crate::web::EmbeddedWeb>,
     /// Bounded disposable probes, tracked independently of the app command queue for shutdown.
     pub(crate) mcp_tests: crate::mcp_probe::Probes,
     /// Flips to `true` after final state flush; open SSE streams can then finish.
@@ -270,7 +271,10 @@ pub fn router(ctx: Ctx) -> Router {
                 }));
             app.fallback_service(files)
         }
-        None => app.fallback(|| async { StatusCode::NOT_FOUND }),
+        None => match ctx.embedded_web {
+            Some(assets) => app.fallback(move |request: Request| async move { crate::web::embedded_response(request, assets) }),
+            None => app.fallback(|| async { StatusCode::NOT_FOUND }),
+        },
     };
     app.layer(middleware::from_fn_with_state(ctx.clone(), guard)).layer(axum::extract::DefaultBodyLimit::max(MAX_JSON_BYTES)).with_state(ctx)
 }

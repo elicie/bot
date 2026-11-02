@@ -38,5 +38,8 @@ debug = 0
 incremental = false
 
 [profile.release]
+opt-level = 3
 debug = 0
-strip = "debuginfo"
+strip = "symbols"
+# Keep engine/task panics unwindable; abort would take down the entire HTTP server.
+panic = "unwind"

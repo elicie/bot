@@ -24,4 +24,5 @@ pub mod queue;
 pub mod runtime;
 pub mod scheduler;
 mod vault_http;
+pub mod web;
 pub mod webhooks;

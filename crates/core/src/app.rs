@@ -19,7 +19,9 @@ pub struct BackendOptions {
     pub data_dir: PathBuf,
     /// Engine root prepared with `grok_bot_engine::host::prepare_process_environment`.
     pub engine_root: PathBuf,
+    /// Explicit on-disk frontend override. Takes precedence over embedded files.
     pub web_root: Option<PathBuf>,
+    pub embedded_web: Option<crate::web::EmbeddedWeb>,
     /// Extra Host names accepted besides `localhost`, `127.0.0.1`, `[::1]`.
     pub allowed_hosts: Vec<String>,
     pub now: Option<Clock>,
@@ -64,6 +66,7 @@ impl Backend {
             closing: AtomicBool::new(false),
             web_root: options.web_root,
             mcp_tests: crate::mcp_probe::Probes::default(),
+            embedded_web: options.embedded_web,
             stopping: tokio::sync::watch::Sender::new(false),
         });
         Ok(Self { store, runtime, scheduler, queue, context })
