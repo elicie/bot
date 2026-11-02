@@ -146,6 +146,12 @@ pub struct Message {
     /// Files the user attached to this message (metadata; contents live in private blobs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<Attachment>>,
+    /// Hidden user input of an automatic follow-up ("report") turn: the bot deliveries whose
+    /// results it carries. Its text is app-written conversation data, not something the user typed;
+    /// the chat hides it and marks the reply that follows instead. Empty once the reported
+    /// deliveries were deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_delivery_ids: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,6 +213,49 @@ pub enum DeliveryStatus {
     Interrupted,
 }
 
+/// Progress of the automatic follow-up turn that reports a finished delivery back to its sender.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportStatus {
+    /// Waiting for the sender's conversation (and the app) to be idle.
+    Queued,
+    /// The follow-up turn (`run_id`) is running in the sender's conversation.
+    Running,
+    Completed,
+    Cancelled,
+    Error,
+    Interrupted,
+    /// Not reported: the chain already used its follow-up turns.
+    Skipped,
+}
+
+impl ReportStatus {
+    pub fn is_terminal(self) -> bool {
+        !matches!(self, Self::Queued | Self::Running)
+    }
+}
+
+/// The follow-up ("report") turn of a delivery: after the recipient finished, the sender bot gets
+/// one automatic turn in its original conversation with the recipient's result as data.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeliveryReport {
+    pub status: ReportStatus,
+    /// The sender conversation's run that reported this delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl DeliveryReport {
+    pub fn queued() -> Self {
+        Self { status: ReportStatus::Queued, run_id: None, finished_at: None, error: None }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BotDelivery {
@@ -232,6 +281,11 @@ pub struct BotDelivery {
     pub finished_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The follow-up turn reporting this delivery's result to the sender. Absent for deliveries
+    /// that are not reported (sent from recipient, group, thread, or routine conversations, or
+    /// finished before reports existed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<DeliveryReport>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

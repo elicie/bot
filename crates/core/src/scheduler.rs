@@ -9,6 +9,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use grok_bot_model::{Clock, DeliveryStatus, HttpError, HttpResult, RoutineRun, RunStatus};
 use grok_bot_store::Store;
+use grok_bot_store::bot_messages::queued_reports;
 
 use crate::queue::CommandQueue;
 use crate::runtime::Runtime;
@@ -52,6 +53,11 @@ enum Work {
     },
     /// The next member turn of a group round.
     Group {
+        conversation_id: String,
+    },
+    /// The follow-up turn reporting finished deliveries to their sender conversation (all of its
+    /// queued reports in one turn).
+    Report {
         conversation_id: String,
     },
 }
@@ -191,6 +197,7 @@ impl RoutineScheduler {
         let started = match &work {
             Work::Routine { conversation_id, prompt, .. } | Work::Delivery { conversation_id, prompt, .. } => self.runtime.start(conversation_id, prompt).await,
             Work::Group { conversation_id } => self.runtime.start_group_turn(conversation_id).await,
+            Work::Report { conversation_id } => self.runtime.start_report(conversation_id).await,
         };
         if let Err(error) = started {
             self.store.read(|s| s.assert_writable())?;
@@ -211,6 +218,12 @@ impl RoutineScheduler {
                         error.message
                     };
                     self.store.mutate(|s| s.fail_group_round(&conversation_id, &message)).await?;
+                }
+                Work::Report { conversation_id } => {
+                    // Not retried: the reports end with the error and the conversation is unchanged.
+                    let message =
+                        if error.status == 500 { "The follow-up turn could not start. Check runtime and provider settings.".to_owned() } else { error.message };
+                    self.store.mutate(|s| s.fail_bot_reports(&conversation_id, &message, now)).await?;
                 }
             }
         }
@@ -247,6 +260,11 @@ impl RoutineScheduler {
                 .chain(disk.conversations.iter().filter(|c| !c.run.status.is_active()).filter_map(|c| {
                     let round = c.group_round.as_ref().filter(|round| !round.pending_bot_ids.is_empty())?;
                     Some((parse(&round.created_at), position(&c.id), Work::Group { conversation_id: c.id.clone() }))
+                }))
+                // A report is queued when its delivery finished; the oldest one orders the turn.
+                .chain(disk.conversations.iter().filter(|c| !c.run.status.is_active()).filter_map(|c| {
+                    let oldest = queued_reports(&disk.bot_deliveries, &c.id).first()?.finished_at.clone().unwrap_or_default();
+                    Some((parse(&oldest), position(&c.id), Work::Report { conversation_id: c.id.clone() }))
                 }))
                 .collect();
             work.sort_by_key(|(created, position, _)| (*created, *position));

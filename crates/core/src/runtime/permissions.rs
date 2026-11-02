@@ -6,6 +6,7 @@
 //! - Local-only (managed computer) approvals always ask and stay loopback-only.
 //! - Bot-delivery recipient conversations always ask: their prompt is another bot's message.
 //! - Webhook-triggered routine runs always ask: their prompt can carry external payload data.
+//! - Report (follow-up) turns always ask: their input is another bot's answer.
 //! - The callers' own checks (file hashes and size limits, delivery hop limits, recipient
 //!   restrictions, one-per-turn limits) run before this function and are unchanged.
 //!
@@ -23,19 +24,24 @@ impl Runtime {
     /// The category policy for this run: `Some(rule_id)` when a rule allows the action without
     /// asking and no safety floor applies.
     fn auto_approval(&self, run: &Run, category: PermissionCategory, permission: &PendingPermission) -> Option<String> {
-        if permission.local_only == Some(true) {
+        if permission.local_only == Some(true) || self.rules_suspended(run) {
             return None;
         }
-        self.store.read(|state| {
-            let recipient = state.disk().bot_deliveries.iter().any(|delivery| delivery.recipient_conversation_id == run.conversation_id);
-            if recipient || state.is_webhook_conversation(&run.conversation_id) {
-                return None;
-            }
-            match state.permission_policy(category, &run.bot.id) {
-                PermissionPolicy::Allow { rule_id } => Some(rule_id),
-                PermissionPolicy::Ask => None,
-            }
+        self.store.read(|state| match state.permission_policy(category, &run.bot.id) {
+            PermissionPolicy::Allow { rule_id } => Some(rule_id),
+            PermissionPolicy::Ask => None,
         })
+    }
+
+    /// The safety floor for runs whose prompt is not the user's own message: bot-delivery recipient
+    /// turns, webhook-triggered routine runs, and report turns (another bot's answer as data).
+    /// Permission rules never auto-approve their actions.
+    pub(crate) fn rules_suspended(&self, run: &Run) -> bool {
+        !run.report_deliveries.is_empty()
+            || self.store.read(|state| {
+                state.disk().bot_deliveries.iter().any(|delivery| delivery.recipient_conversation_id == run.conversation_id)
+                    || state.is_webhook_conversation(&run.conversation_id)
+            })
     }
 
     /// Approve a model-initiated action of `category`. When the user's rules allow it, the tool

@@ -24,6 +24,8 @@ export interface Message {
   /** Group conversations: the member bot that wrote this assistant message. */
   speakerBotId?: string;
   attachments?: Attachment[];
+  /** Hidden input of an automatic follow-up turn: the bot deliveries whose results it reports (empty once they were deleted). Never shown as text. */
+  reportDeliveryIds?: string[];
 }
 /** A user attachment; its bytes are served by `GET /api/conversations/:id/attachments/:attachmentId`. */
 export interface Attachment {
@@ -63,6 +65,15 @@ export interface BotDelivery {
   requestId?: string;
   executionRunId?: string;
   startedAt?: string;
+  finishedAt?: string;
+  error?: string;
+  /** The follow-up turn that reports this delivery's result to the sender conversation. */
+  report?: DeliveryReport;
+}
+export type ReportStatus = 'queued' | 'running' | 'completed' | 'cancelled' | 'error' | 'interrupted' | 'skipped';
+export interface DeliveryReport {
+  status: ReportStatus;
+  runId?: string;
   finishedAt?: string;
   error?: string;
 }

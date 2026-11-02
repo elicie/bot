@@ -50,7 +50,7 @@ use serde::Serialize;
 use tokio::sync::{broadcast, oneshot};
 
 use crate::bot_messages::{
-    MAX_BOT_DELIVERIES, MAX_BOT_HOPS, MAX_BOT_MESSAGE_BYTES, MAX_BOT_REPLY_CHARACTERS, find_existing_bot_delivery, reconcile_bot_deliveries,
+    MAX_BOT_DELIVERIES, MAX_BOT_HOPS, MAX_BOT_MESSAGE_BYTES, MAX_BOT_REPLY_CHARACTERS, chain_parent, find_existing_bot_delivery, reconcile_bot_deliveries,
     validate_bot_message_input,
 };
 use crate::schedule::{latest_routine_time, next_routine_time, validate_routine_input};
@@ -101,9 +101,50 @@ enum Job {
         bytes: Vec<u8>,
         runtime: RuntimeInfo,
         routine_scheduling_error: Option<String>,
+        /// The bytes contain bot report fields, which binaries without reports cannot load.
+        reports: bool,
         done: Option<oneshot::Sender<bool>>,
     },
     Flush(oneshot::Sender<()>),
+}
+
+/// One-time copy of a `state.json` from before bot reports, kept next to it.
+pub const PRE_REPORTS_BACKUP: &str = "state.json.pre-bot-reports.bak";
+
+fn uses_reports(disk: &DiskState) -> bool {
+    disk.bot_deliveries.iter().any(|delivery| delivery.report.is_some())
+        || disk.conversations.iter().flat_map(|conversation| &conversation.messages).any(|message| message.report_delivery_ids.is_some())
+}
+
+/// Before the first write with report fields: copy the existing `state.json` (when it has none) to
+/// [`PRE_REPORTS_BACKUP`] with private permissions, never replacing an existing backup. The copy
+/// lets the user go back to a binary without bot reports (`deny_unknown_fields` rejects the new
+/// fields). Failures are reported and do not block the write.
+fn backup_before_reports(path: &Path) {
+    let backup = path.with_file_name(PRE_REPORTS_BACKUP);
+    if std::fs::symlink_metadata(&backup).is_ok() {
+        return;
+    }
+    let Ok(existing) = std::fs::read(path) else { return };
+    if serde_json::from_slice::<DiskState>(&existing).is_ok_and(|disk| uses_reports(&disk)) {
+        return;
+    }
+    let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&backup) {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!("Could not keep a backup of state.json before bot reports: {error}");
+            return;
+        }
+    };
+    let written = {
+        use std::io::Write as _;
+        file.write_all(&existing).and_then(|()| file.sync_all())
+    };
+    if let Err(error) = written {
+        // Only the file created above is removed; a partial copy is not a backup.
+        let _ = std::fs::remove_file(&backup);
+        eprintln!("Could not keep a backup of state.json before bot reports: {error}");
+    }
 }
 
 /// `Store.snapshot()`: the public state with the API key removed and redacted.
@@ -170,12 +211,17 @@ pub struct Store {
 }
 
 fn writer_loop(shared: Arc<Shared>, path: PathBuf, jobs: mpsc::Receiver<Job>) {
+    let mut backed_up = false;
     for job in jobs {
         match job {
             Job::Flush(done) => {
                 let _ = done.send(());
             }
-            Job::Write { bytes, runtime, routine_scheduling_error, done } => {
+            Job::Write { bytes, runtime, routine_scheduling_error, reports, done } => {
+                if reports && !backed_up {
+                    backup_before_reports(&path);
+                    backed_up = true;
+                }
                 let done = |ok: bool| {
                     if let Some(done) = done {
                         let _ = done.send(ok);
@@ -553,10 +599,17 @@ impl State {
                 });
             }
         }
-        reconcile_bot_deliveries(bot_deliveries, bot_exchanges, conversations, now);
+        let routine_conversations: HashSet<&str> = routine_runs.iter().map(|run| run.conversation_id.as_str()).collect();
+        reconcile_bot_deliveries(bot_deliveries, bot_exchanges, conversations, &routine_conversations, now);
         self.disk.revision += 1;
         let bytes = serde_json::to_vec(&self.disk).unwrap_or_default();
-        Job::Write { bytes, runtime: self.runtime.clone(), routine_scheduling_error: self.routine_scheduling_error.clone(), done: None }
+        Job::Write {
+            bytes,
+            runtime: self.runtime.clone(),
+            routine_scheduling_error: self.routine_scheduling_error.clone(),
+            reports: uses_reports(&self.disk),
+            done: None,
+        }
     }
 
     fn snapshot(&self) -> AppState {
@@ -1185,7 +1238,9 @@ impl State {
         if recipient.id == source.bot_id {
             return Err(HttpError::bad_request("Choose another bot as the recipient."));
         }
-        let parent = self.disk.bot_deliveries.iter().find(|delivery| delivery.recipient_conversation_id == source.id);
+        // A recipient conversation continues its delivery; the answer of a report turn continues the
+        // reported delivery (so report turns cannot restart a chain at hop 1).
+        let parent = chain_parent(&self.disk.bot_deliveries, source, source_message_id);
         let hop = parent.map_or(0, |parent| parent.hop) + 1;
         if hop > MAX_BOT_HOPS {
             return Err(HttpError::conflict("Bot message chains are limited to four hops."));
@@ -1233,6 +1288,7 @@ impl State {
             started_at: None,
             finished_at: None,
             error: None,
+            report: None,
         };
         let source_index = self.disk.conversations.iter().position(|conversation| conversation.id == conversation_id).ok_or_else(internal)?;
         // Measure with the source message linked to the exchange, then undo on rejection.

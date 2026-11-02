@@ -1,15 +1,26 @@
 //! Bot-to-bot delivery data rules. Port of `server/bot-messages.ts`. CONTRACT (store agent).
+//!
+//! Follow-up ("report") turns: when a delivery sent from a plain 1:1 conversation finishes, its
+//! `report` becomes queued and the dispatcher later runs one automatic turn of the sender bot in
+//! that conversation with the recipient's result as data (`Message::report_delivery_ids` marks the
+//! hidden input). Only one level is reported: deliveries sent from recipient, group, thread, or
+//! routine conversations are not, and a chain gets at most [`MAX_BOT_REPORTS_PER_CHAIN`] reports.
+//! A message the sender writes in the report turn continues the reported delivery's chain
+//! ([`chain_parent`]), so report turns cannot reset the hop count.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use grok_bot_model::{
-    BotDelivery, BotExchange, BotExchangeMessage, BotMessageInput, Conversation, DeliveryStatus, HttpError, HttpResult, Role, RunStatus, iso,
+    BotDelivery, BotExchange, BotExchangeMessage, BotMessageInput, Conversation, DeliveryReport, DeliveryStatus, HttpError, HttpResult, ReportStatus, Role,
+    RunStatus, iso,
 };
 
 use crate::validate::{Issues, is_timestamp, is_uuid, js_len, js_slice, js_trim};
 
 pub const MAX_BOT_HOPS: u32 = 4;
+/// Follow-up turns per delivery chain; later deliveries of the chain are delivered but not reported.
+pub const MAX_BOT_REPORTS_PER_CHAIN: usize = 2;
 pub const MAX_BOT_DELIVERIES: usize = 10000;
 pub const MAX_BOT_MESSAGE_BYTES: usize = 160 * 1024;
 pub const MAX_BOT_REPLY_CHARACTERS: usize = 200000;
@@ -62,6 +73,65 @@ pub fn find_existing_bot_delivery<'a>(deliveries: &'a [BotDelivery], source_mess
     Err(HttpError::conflict("A run may send only one distinct bot message. Repeating the same request returns its existing receipt."))
 }
 
+/// The delivery a message sent from `source_message_id` in `conversation` continues: the delivery
+/// that created `conversation` (a recipient conversation), or, for the answer of a report turn, the
+/// reported delivery with the highest hop. `None` starts a new chain.
+pub fn chain_parent<'a>(deliveries: &'a [BotDelivery], conversation: &Conversation, source_message_id: &str) -> Option<&'a BotDelivery> {
+    if let Some(parent) = deliveries.iter().find(|delivery| delivery.recipient_conversation_id == conversation.id) {
+        return Some(parent);
+    }
+    let index = conversation.messages.iter().position(|message| message.id == source_message_id)?;
+    let ids = conversation.messages.get(index.checked_sub(1)?)?.report_delivery_ids.as_deref()?;
+    ids.iter().filter_map(|id| deliveries.iter().find(|delivery| delivery.id == *id)).fold(None, |best: Option<&BotDelivery>, delivery| match best {
+        Some(best) if best.hop >= delivery.hop => Some(best),
+        _ => Some(delivery),
+    })
+}
+
+/// Results of deliveries sent from `conversation` are reported back to it: a plain 1:1 conversation,
+/// not a recipient, group, thread, or routine conversation.
+pub fn reports_to(deliveries: &[BotDelivery], conversation: &Conversation, routine_conversation_ids: &HashSet<&str>) -> bool {
+    conversation.group_id.is_none()
+        && conversation.thread.is_none()
+        && !routine_conversation_ids.contains(conversation.id.as_str())
+        && !deliveries.iter().any(|delivery| delivery.recipient_conversation_id == conversation.id)
+}
+
+fn report_run_status(status: ReportStatus) -> Option<RunStatus> {
+    match status {
+        ReportStatus::Completed => Some(RunStatus::Completed),
+        ReportStatus::Cancelled => Some(RunStatus::Cancelled),
+        ReportStatus::Error => Some(RunStatus::Error),
+        ReportStatus::Interrupted => Some(RunStatus::Interrupted),
+        ReportStatus::Queued | ReportStatus::Running | ReportStatus::Skipped => None,
+    }
+}
+
+fn report_status(status: RunStatus) -> Option<ReportStatus> {
+    match status {
+        RunStatus::Completed => Some(ReportStatus::Completed),
+        RunStatus::Cancelled => Some(ReportStatus::Cancelled),
+        RunStatus::Error => Some(ReportStatus::Error),
+        RunStatus::Interrupted => Some(ReportStatus::Interrupted),
+        _ => None,
+    }
+}
+
+/// Persisted report fields (`deliveryReportSchema`).
+fn report_valid(report: &DeliveryReport) -> bool {
+    report.run_id.as_deref().is_none_or(is_uuid)
+        && optional_timestamp(&report.finished_at)
+        && report.error.as_deref().is_none_or(|error| js_len(error) <= 1000)
+        && match report.status {
+            ReportStatus::Queued => report.run_id.is_none() && report.finished_at.is_none() && report.error.is_none(),
+            ReportStatus::Running => report.run_id.is_some() && report.finished_at.is_none() && report.error.is_none(),
+            ReportStatus::Skipped => report.run_id.is_none() && report.finished_at.is_some(),
+            // An error without a run: the follow-up turn could not start.
+            ReportStatus::Error => report.finished_at.is_some(),
+            ReportStatus::Completed | ReportStatus::Cancelled | ReportStatus::Interrupted => report.run_id.is_some() && report.finished_at.is_some(),
+        }
+}
+
 fn optional_timestamp(value: &Option<String>) -> bool {
     value.as_deref().is_none_or(is_timestamp)
 }
@@ -107,7 +177,9 @@ pub(crate) fn delivery_valid(delivery: &mut BotDelivery) -> bool {
         && delivery.execution_run_id.as_deref().is_none_or(is_uuid)
         && optional_timestamp(&delivery.started_at)
         && optional_timestamp(&delivery.finished_at)
-        && delivery.error.as_deref().is_none_or(|error| js_len(error) <= 1000);
+        && delivery.error.as_deref().is_none_or(|error| js_len(error) <= 1000)
+        // Only finished deliveries are reported.
+        && delivery.report.as_ref().is_none_or(|report| report_valid(report) && !matches!(delivery.status, DeliveryStatus::Queued | DeliveryStatus::Running));
     if !fields || delivery.from_bot_id == delivery.to_bot_id || delivery.text.len() > MAX_BOT_MESSAGE_BYTES {
         return false;
     }
@@ -146,9 +218,18 @@ fn run_status_name(status: DeliveryStatus) -> Option<RunStatus> {
 }
 
 /// Project recipient conversation runs onto queued/running deliveries and copy the recipient's
-/// final answer into the exchange when the delivery completes.
-pub fn reconcile_bot_deliveries(deliveries: &mut [BotDelivery], exchanges: &mut [BotExchange], conversations: &[Conversation], now: DateTime<Utc>) {
-    for delivery in deliveries.iter_mut() {
+/// final answer into the exchange when the delivery completes. A delivery that finishes now queues
+/// its report when its source conversation is reported to (skipped once the chain used its
+/// reports), and running reports follow the sender conversation's report run.
+pub fn reconcile_bot_deliveries(
+    deliveries: &mut [BotDelivery],
+    exchanges: &mut [BotExchange],
+    conversations: &[Conversation],
+    routine_conversation_ids: &HashSet<&str>,
+    now: DateTime<Utc>,
+) {
+    let mut finished = Vec::new();
+    for (index, delivery) in deliveries.iter_mut().enumerate() {
         if !matches!(delivery.status, DeliveryStatus::Queued | DeliveryStatus::Running) {
             continue;
         }
@@ -173,6 +254,7 @@ pub fn reconcile_bot_deliveries(deliveries: &mut [BotDelivery], exchanges: &mut 
         if let Some(error) = execution.error.as_ref().filter(|value| !value.is_empty()) {
             delivery.error = Some(js_slice(error, 1000).to_owned());
         }
+        finished.push(index);
         if status != DeliveryStatus::Completed {
             continue;
         }
@@ -189,6 +271,68 @@ pub fn reconcile_bot_deliveries(deliveries: &mut [BotDelivery], exchanges: &mut 
             });
             exchange.updated_at = finished_at;
         }
+    }
+    for index in finished {
+        let delivery = &deliveries[index];
+        let Some(source) = conversations.iter().find(|item| item.id == delivery.source_conversation_id) else { continue };
+        if delivery.report.is_some() || !reports_to(deliveries, source, routine_conversation_ids) {
+            continue;
+        }
+        let used = deliveries
+            .iter()
+            .filter(|item| item.chain_id == delivery.chain_id && item.report.as_ref().is_some_and(|report| report.status != ReportStatus::Skipped))
+            .count();
+        let report = if used >= MAX_BOT_REPORTS_PER_CHAIN {
+            DeliveryReport { status: ReportStatus::Skipped, finished_at: delivery.finished_at.clone(), ..DeliveryReport::queued() }
+        } else {
+            DeliveryReport::queued()
+        };
+        deliveries[index].report = Some(report);
+    }
+    for delivery in deliveries.iter_mut() {
+        let Some(report) = delivery.report.as_mut().filter(|report| report.status == ReportStatus::Running) else { continue };
+        let Some(source) = conversations.iter().find(|item| item.id == delivery.source_conversation_id) else { continue };
+        let Some(status) = report_status(source.run.status).filter(|_| report.run_id.as_deref() == Some(source.run.id.as_str())) else { continue };
+        report.status = status;
+        report.finished_at = Some(source.run.finished_at.clone().unwrap_or_else(|| iso(now)));
+        report.error =
+            source.run.error.as_deref().filter(|error| !error.is_empty() && status != ReportStatus::Completed).map(|error| js_slice(error, 1000).to_owned());
+    }
+}
+
+/// Queued reports of `conversation_id`, oldest first (FIFO by the time the delivery finished).
+pub fn queued_reports<'a>(deliveries: &'a [BotDelivery], conversation_id: &str) -> Vec<&'a BotDelivery> {
+    let mut queued: Vec<&BotDelivery> = deliveries
+        .iter()
+        .filter(|delivery| {
+            delivery.source_conversation_id == conversation_id && delivery.report.as_ref().is_some_and(|report| report.status == ReportStatus::Queued)
+        })
+        .collect();
+    queued.sort_by_key(|delivery| delivery.finished_at.as_deref().and_then(crate::validate::parse_ms).unwrap_or(i64::MAX));
+    queued
+}
+
+/// A delivery's report agrees with its source conversation: only reportable sources, and a report
+/// with a run has exactly one hidden report message there (running: the conversation's active run).
+fn report_references_valid(
+    deliveries: &[BotDelivery],
+    delivery: &BotDelivery,
+    report: &DeliveryReport,
+    source: &Conversation,
+    routine_conversation_ids: &HashSet<&str>,
+) -> bool {
+    if !reports_to(deliveries, source, routine_conversation_ids) {
+        return false;
+    }
+    let messages = source.messages.iter().filter(|message| message.report_delivery_ids.as_ref().is_some_and(|ids| ids.contains(&delivery.id))).count();
+    let Some(run_id) = report.run_id.as_deref() else { return messages == 0 };
+    if messages != 1 {
+        return false;
+    }
+    match report.status {
+        ReportStatus::Running => source.run.id == run_id && source.run.status.is_active(),
+        // The latest run of the conversation, when it is still the report run, ended the same way.
+        status => source.run.id != run_id || report_run_status(status) == Some(source.run.status),
     }
 }
 
@@ -209,12 +353,16 @@ pub fn valid_bot_message_references(
         let source = conversations.iter().find(|item| item.id == delivery.source_conversation_id);
         let source_message = source.and_then(|source| source.messages.iter().find(|message| message.id == delivery.source_message_id));
         let recipient = conversations.iter().find(|item| item.id == delivery.recipient_conversation_id);
-        let parent = deliveries.iter().find(|item| item.recipient_conversation_id == delivery.source_conversation_id);
         let (Some(exchange), Some(source), Some(source_message), Some(recipient)) = (exchange, source, source_message, recipient) else { return false };
-        let chained = match parent {
-            Some(parent) => delivery.chain_id == parent.chain_id && delivery.hop == parent.hop + 1,
+        let chained = match chain_parent(deliveries, source, &source_message.id) {
+            Some(parent) => parent.id != delivery.id && delivery.chain_id == parent.chain_id && delivery.hop == parent.hop + 1,
             None => delivery.chain_id == delivery.id && delivery.hop == 1,
         };
+        if let Some(report) = &delivery.report
+            && !report_references_valid(deliveries, delivery, report, source, routine_conversation_ids)
+        {
+            return false;
+        }
         if source_message.role != Role::Assistant
             || !bot_ids.contains(delivery.from_bot_id.as_str())
             || !bot_ids.contains(delivery.to_bot_id.as_str())
@@ -278,8 +426,37 @@ pub fn valid_bot_message_references(
     if exchanges.iter().any(|exchange| !exchange_ids.contains(exchange.id.as_str())) {
         return false;
     }
+    let mut reports: HashMap<&str, usize> = HashMap::new();
+    for delivery in deliveries {
+        if delivery.report.as_ref().is_some_and(|report| report.status != ReportStatus::Skipped) {
+            *reports.entry(delivery.chain_id.as_str()).or_default() += 1;
+        }
+    }
+    if reports.values().any(|count| *count > MAX_BOT_REPORTS_PER_CHAIN) {
+        return false;
+    }
+    let mut reported = HashSet::new();
     conversations.iter().all(|conversation| {
         conversation.messages.iter().enumerate().all(|(index, message)| {
+            if let Some(ids) = message.report_delivery_ids.as_deref() {
+                let next = conversation.messages.get(index + 1);
+                if message.role != Role::User
+                    || truthy(&message.source_bot_id)
+                    || message.attachments.is_some()
+                    || message.bot_exchange_ids.is_some()
+                    || next.is_none_or(|next| next.role != Role::Assistant)
+                    || !ids.iter().all(|id| {
+                        reported.insert(id.as_str())
+                            && deliveries.iter().any(|delivery| {
+                                delivery.id == *id
+                                    && delivery.source_conversation_id == conversation.id
+                                    && delivery.report.as_ref().is_some_and(|report| report.run_id.is_some())
+                            })
+                    })
+                {
+                    return false;
+                }
+            }
             if let Some(source_bot_id) = message.source_bot_id.as_deref().filter(|id| !id.is_empty())
                 && !(index == 0
                     && deliveries.iter().any(|delivery| delivery.recipient_conversation_id == conversation.id && delivery.from_bot_id == source_bot_id))
@@ -295,4 +472,33 @@ pub fn valid_bot_message_references(
                 })
         })
     })
+}
+
+impl crate::State {
+    /// IDs of conversations that routines run in (webhook runs included).
+    pub fn routine_conversation_ids(&self) -> HashSet<&str> {
+        self.disk.routine_runs.iter().map(|run| run.conversation_id.as_str()).collect()
+    }
+
+    /// Results of deliveries sent from this conversation are reported back to it ([`reports_to`]).
+    pub fn reports_to_conversation(&self, conversation_id: &str) -> bool {
+        self.conversation(conversation_id).is_ok_and(|conversation| reports_to(&self.disk.bot_deliveries, conversation, &self.routine_conversation_ids()))
+    }
+
+    /// The follow-up turn of `conversation_id` could not start: its queued reports end with
+    /// `error` and are not retried.
+    pub fn fail_bot_reports(&mut self, conversation_id: &str, error: &str, now: DateTime<Utc>) -> HttpResult<()> {
+        self.assert_writable()?;
+        let ids: HashSet<String> = queued_reports(&self.disk.bot_deliveries, conversation_id).iter().map(|delivery| delivery.id.clone()).collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let error = js_slice(&self.redact(error), 1000).to_owned();
+        let finished_at = iso(now);
+        for delivery in self.disk_mut().bot_deliveries.iter_mut().filter(|delivery| ids.contains(&delivery.id)) {
+            delivery.report =
+                Some(DeliveryReport { status: ReportStatus::Error, run_id: None, finished_at: Some(finished_at.clone()), error: Some(error.clone()) });
+        }
+        Ok(())
+    }
 }
