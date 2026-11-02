@@ -12,25 +12,25 @@
       "parent": "running"
     },
     {
-      "elapsedSeconds": 12,
+      "elapsedSeconds": 13,
       "parent": "awaiting_permission"
     },
     {
-      "elapsedSeconds": 12,
+      "elapsedSeconds": 14,
       "parent": "running",
       "workers": [
         "queued"
       ]
     },
     {
-      "elapsedSeconds": 21,
+      "elapsedSeconds": 20,
       "parent": "awaiting_permission",
       "workers": [
         "queued"
       ]
     },
     {
-      "elapsedSeconds": 21,
+      "elapsedSeconds": 20,
       "parent": "running",
       "workers": [
         "queued",
@@ -38,7 +38,7 @@
       ]
     },
     {
-      "elapsedSeconds": 27,
+      "elapsedSeconds": 26,
       "parent": "awaiting_permission",
       "workers": [
         "queued",
@@ -46,7 +46,7 @@
       ]
     },
     {
-      "elapsedSeconds": 28,
+      "elapsedSeconds": 26,
       "parent": "running",
       "workers": [
         "queued",
@@ -55,7 +55,7 @@
       ]
     },
     {
-      "elapsedSeconds": 34,
+      "elapsedSeconds": 32,
       "parent": "completed",
       "workers": [
         "running",
@@ -67,7 +67,7 @@
       "capturedActive": true
     },
     {
-      "elapsedSeconds": 38,
+      "elapsedSeconds": 36,
       "parent": "completed",
       "workers": [
         "completed",
@@ -76,7 +76,7 @@
       ]
     },
     {
-      "elapsedSeconds": 42,
+      "elapsedSeconds": 39,
       "parent": "completed",
       "workers": [
         "completed",
@@ -85,7 +85,7 @@
       ]
     },
     {
-      "elapsedSeconds": 47,
+      "elapsedSeconds": 45,
       "parent": "running",
       "workers": [
         "completed",
@@ -95,7 +95,7 @@
       "report": "running"
     },
     {
-      "elapsedSeconds": 54,
+      "elapsedSeconds": 52,
       "parent": "completed",
       "workers": [
         "completed",
@@ -109,23 +109,23 @@
   "visibleUserMessages": 1,
   "workers": [
     {
-      "task": "비교 연습용 가상 자료만 사용하여 서울을 한국어 한 줄로 요약하세요. 제공 자료: 서울 기온 18°C, 강수 확률 20%. 외부 정보 조회나 파일 접근 없이 이 자료만 사용하세요. 실제 날씨로 표현하지 말고 도시명, 기온, 강수 확률을 포함하세요.",
+      "task": "비교 연습용 자료의 서울만 맡아 한국어 한 줄로 요약하세요. 제공 자료: 서울 기온 18°C, 강수 확률 20%. 실제 날씨가 아닌 연습 자료입니다. 외부 정보나 도구 조회 없이 이 자료만 사용하고, 도시명·기온·강수 확률을 모두 포함하세요.",
       "status": "completed",
-      "answer": "비교 연습용 가상 자료: 서울의 기온은 18°C, 강수 확률은 20%입니다."
+      "answer": "연습 자료 기준 서울의 기온은 18°C, 강수 확률은 20%입니다."
     },
     {
-      "task": "비교 연습용 가상 자료만 사용하여 부산을 한국어 한 줄로 요약하세요. 제공 자료: 부산 기온 22°C, 강수 확률 40%. 외부 정보 조회나 파일 접근 없이 이 자료만 사용하세요. 실제 날씨로 표현하지 말고 도시명, 기온, 강수 확률을 포함하세요.",
+      "task": "비교 연습용 자료의 부산만 맡아 한국어 한 줄로 요약하세요. 제공 자료: 부산 기온 22°C, 강수 확률 40%. 실제 날씨가 아닌 연습 자료입니다. 외부 정보나 도구 조회 없이 이 자료만 사용하고, 도시명·기온·강수 확률을 모두 포함하세요.",
       "status": "completed",
-      "answer": "비교 연습용 가상 자료: 부산의 기온은 22°C, 강수 확률은 40%입니다."
+      "answer": "연습 자료: 부산 기온 22°C, 강수 확률 40%."
     },
     {
-      "task": "비교 연습용 가상 자료만 사용하여 제주를 한국어 한 줄로 요약하세요. 제공 자료: 제주 기온 24°C, 강수 확률 60%. 외부 정보 조회나 파일 접근 없이 이 자료만 사용하세요. 실제 날씨로 표현하지 말고 도시명, 기온, 강수 확률을 포함하세요.",
+      "task": "비교 연습용 자료의 제주만 맡아 한국어 한 줄로 요약하세요. 제공 자료: 제주 기온 24°C, 강수 확률 60%. 실제 날씨가 아닌 연습 자료입니다. 외부 정보나 도구 조회 없이 이 자료만 사용하고, 도시명·기온·강수 확률을 모두 포함하세요.",
       "status": "completed",
-      "answer": "비교 연습용 가상 자료: 제주, 기온 24°C, 강수 확률 60%."
+      "answer": "연습 자료: 제주 기온 24°C, 강수 확률 60%."
     }
   ],
   "reportStatus": "completed",
-  "reportAnswer": "하위 worker 3개가 모두 한 줄 요약을 완료했습니다. 제공하신 **비교 연습용 자료**를 모아 정리하면 다음과 같습니다.\n\n| 도시 | 기온 | 강수 확률 |\n|---|---:|---:|\n| 서울 | 18°C | 20% |\n| 부산 | 22°C | 40% |\n| 제주 | 24°C | 60% |\n\n- **가장 따뜻한 도시:** 제주 — 24°C\n- **비 가능성이 가장 낮은 도시:** 서울 — 강수 확률 20%\n\n외부 정보 조회 없이 제공된 자료만으로 비교했습니다.",
+  "reportAnswer": "하위 worker 3개가 각 도시의 한 줄 요약을 모두 완료했습니다. 제공하신 **비교 연습용 자료**를 종합한 결과입니다.\n\n| 도시 | 기온 | 강수 확률 |\n|---|---:|---:|\n| 서울 | 18°C | 20% |\n| 부산 | 22°C | 40% |\n| 제주 | 24°C | 60% |\n\n- **가장 따뜻한 도시:** 제주 — 24°C\n- **비 가능성이 가장 낮은 도시:** 서울 — 강수 확률 20%",
   "browserErrors": [],
   "canonicalStateUnchanged": true
 }

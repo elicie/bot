@@ -4,8 +4,8 @@ Every image here is an actual Chrome capture of the application, not a mockup. C
 
 ## Matched Before / After
 
-- **Before source:** `95ffc464e8d55c1a315fddb31101fadb9c9c5b7b`, the clean merged PR #9 baseline, with its actual compiled Rust backend and built frontend.
-- **After source:** `096d50bcdd44dddf4b6e7dfce59ce7d8d564c0dd` (the following commit adds only this evidence).
+- **Before source:** `3c111316bc4ba4b1d540c4b9e4e218be868b1df1`, current merged main including PR #24, built in a clean detached worktree (Rust server and frontend).
+- **After source:** `c965bdd5cb3a4eeec09d81bec37482dadffca667` (the following commit refreshes evidence only).
 - Same scenario: send `제공한 예시 기온 자료를 서울·부산·제주로 나눠 확인하고, 세 도시의 결과를 모아 비교해 줘.` A scripted provider discovers `workspace spawn_worker` and attempts three distinct tasks. Hold the next parent inference so both captures show the parent still running immediately after those attempts.
 - The old engine/app really rejects the nonexistent tool. The changed app asks for each new task's one-use approval, queues three hidden workers and renders their progress. No worker is allowed to start while the parent is held.
 - Same browser locale `ko-KR`, timezone `Asia/Seoul`, dark theme, explicit blob avatar and viewport: 1040 × 760 desktop / 390 × 844 mobile. The after view scrolls to the added progress panel as chat content grows.
@@ -31,18 +31,18 @@ The final worker implementation was exercised with actual `gpt-6.1-sol`. The pro
 - [Actual model's grouped answer after reload](real-model-completed.png).
 - [Sanitized observations and output](real-model.json): three approvals, three completed tasks, one completed report, one public conversation, one visible user message, zero page errors, and the canonical user state unchanged during the smoke run.
 
-No extra worker-specific instructions were added to the fixture Bot. This is one qualitative end-to-end check, not a reliability benchmark or a claim of external weather access.
+No extra worker-specific instructions were added to the fixture Bot. [Ordinary-question regression](ordinary-questions.json) separately exercises a greeting, multiplication and loaded-session follow-up without mentioning delegation or automatically approving anything: all three answered directly, with zero worker batches or approval requests. These are qualitative end-to-end checks, not a reliability benchmark or a claim of external weather access.
 
 ## Verification record
 
 - Frontend strict TypeScript and production build: passed.
 - Rust formatting and strict clippy for model/store/core: passed.
-- Model/store: 114 tests passed, plus the 12 worker tests rechecked after lint-only rewrites.
-- Core: 67 tests passed, including all existing and new real-engine runtime scenarios.
-- Node regression: 106 passed with `--test-concurrency=1`. The initial parallel run hit the existing routine byte-capacity test's 10-second wait; that isolated test and the complete serial suite then passed without changing it.
+- Model/store: 125 tests passed, including 21 worker/retention/authorization/invariant scenarios.
+- Core: 96 tests passed (85 unit and 11 integration binaries), including signal-first cancellation on failed writes, conditional catalogs, guarded actual-engine cache cleanup, #24 queued-report cancellation and the existing real-engine scenarios. The workspace-pinning/legacy-no-file scenario was then added and the runtime integration binary passed again.
+- Rebased frontend state selectors: 5 passed. The original implementation's full Node regression passed 106 tests with `--test-concurrency=1`; its initial parallel run hit the existing byte-capacity test's wait, and the isolated/serial reruns passed without modifying that test.
 - New worker Chrome suite: 5 passed (1040/390/320 px, Stop, denial).
-- Existing report/group/thread/checklist Chrome regression: 8 passed.
-- Independent correctness and interface reviews: findings fixed and reviewed; source review has no open actionable findings. A Stop/report-completion race was fixed with a persisted-state reopen regression. A long-task compactness issue was fixed and verified with the 61-line browser scenario.
+- Rebased existing report/group/thread Chrome regression: 7 passed, including both desktop/mobile #24 queued-report cancellation scenarios.
+- Human review corrections add optional/scoped worker guidance, terminal history retention, signal-first cancellation on storage failure, approval-time workspace binding, pre-write ownership validation, queued-only input unlocking and one visible invocation row per worker. Tests cover these boundaries; source/interface independent review is recorded in the PR after the final revision is fixed. The earlier Stop/report-completion and long-task compactness regressions remain covered.
 - The scripted comparisons and actual-model smoke each reported zero page errors. Mechanical interface detector reported no findings.
 
 Source-level details and limitations are in [the worker lifecycle note](../../worker-delegation.md).
