@@ -221,6 +221,74 @@ async fn server_versions_advance_for_fixed_or_backwards_clocks_and_preserve_no_o
 }
 
 #[tokio::test]
+async fn mcp_drafts_resolve_scopes_and_ephemeral_secrets_without_mutating_the_store() {
+    let f = Fixture::new().await;
+    let bot = f.bot_id();
+    let other = f.store.mutate(|s| s.add_bot(BotInput { name: "Other".into(), color: None, instructions: None, shape: None, pinned: None })).await.unwrap().id;
+    for (name, value, scope) in [
+        ("API_TOKEN", "global-token-value", None),
+        ("API_TOKEN", "target-token-value", Some(bot.as_str())),
+        ("GLOBAL_TOKEN", "global-fallback-value", None),
+        ("GLOBAL_TOKEN", "other-bot-value", Some(other.as_str())),
+        ("DIRECT_TOKEN", "global-direct-value", None),
+    ] {
+        let input = secret(name, value, scope);
+        f.store.mutate(move |s| s.add_secret(input, true)).await.unwrap();
+    }
+    let document = json!({"draft": {"url": "https://example.com/mcp", "headers": {
+        "A": "Bearer ${secret:API_TOKEN}", "B": "${secret:GLOBAL_TOKEN}", "C": "${secret:DIRECT_TOKEN}", "D": "${secret:NEW_TOKEN}"
+    }}})
+    .to_string();
+    let ephemeral = [secret(" DIRECT_TOKEN ", " direct-draft-value \n", None), secret("NEW_TOKEN", "new-draft-value", Some(&bot))];
+    let disk = f.disk_text();
+    let snapshot = serde_json::to_value(f.store.snapshot()).unwrap();
+    let mut events = f.store.subscribe();
+    let resolved = f.store.read(|s| s.resolve_mcp_draft(&bot, &document, &ephemeral, true)).unwrap();
+    let McpServerConfig::Http { headers, .. } = resolved.config else { panic!("HTTP draft") };
+    assert_eq!(
+        headers.iter().map(|pair| pair.value.as_str()).collect::<Vec<_>>(),
+        ["Bearer target-token-value", "global-fallback-value", "direct-draft-value", "new-draft-value"]
+    );
+    assert_eq!(f.disk_text(), disk);
+    assert_eq!(serde_json::to_value(f.store.snapshot()).unwrap(), snapshot);
+    assert!(events.try_recv().is_err(), "a draft emits no state event");
+    assert!(f.store.read(|s| s.mcp_servers_for(&bot).next().is_none()));
+
+    // Same validation as the vault, target scope only, no replacing existing scoped values.
+    for (inputs, status) in [
+        (vec![secret("lower", VALUE, None)], 400),
+        (vec![secret("TOKEN", "short", None)], 400),
+        (vec![secret("TOKEN", "line one\nline two", None)], 400),
+        (vec![secret("TOKEN", &"x".repeat(8193), None)], 400),
+        (vec![secret("TOKEN", VALUE, Some(&other))], 400),
+        (vec![secret("TOKEN", VALUE, Some("not-a-bot"))], 400),
+        (vec![secret(" TOKEN ", VALUE, None), secret("TOKEN", VALUE, Some(&bot))], 400),
+        (vec![secret("API_TOKEN", VALUE, None)], 409),
+        (vec![secret("API_TOKEN", VALUE, Some(&bot))], 409),
+    ] {
+        assert_eq!(f.store.read(|s| s.resolve_mcp_draft(&bot, &document, &inputs, true)).unwrap_err().status, status);
+    }
+    for document in [
+        "{",
+        "{}",
+        r#"{"a":{"url":"http://x"},"b":{"url":"http://x"}}"#,
+        r#"{"a":{"url":"http://x"},"a":{"url":"http://x"}}"#,
+        r#"{"a":{"url":"http://x","headers":{"X":"${secret:MISSING}"}}}"#,
+    ] {
+        let error = f.store.read(|s| s.resolve_mcp_draft(&bot, document, &[], true)).unwrap_err();
+        assert_eq!(error.status, 400);
+    }
+    assert_eq!(f.store.read(|s| s.resolve_mcp_draft(&bot, "{", &[], false)).unwrap_err().status, 403, "loopback before parsing");
+    assert_eq!(f.store.read(|s| s.resolve_mcp_draft(&new_id(), &document, &ephemeral, true)).unwrap_err().status, 404);
+    assert_eq!(f.disk_text(), disk);
+
+    // The same idle policy as saving configuration, even though probing is read-only.
+    let conversation = f.store.mutate(|s| s.add_conversation(&bot)).await.unwrap().id;
+    f.start(&conversation).await;
+    assert_eq!(f.store.read(|s| s.resolve_mcp_draft(&bot, &document, &ephemeral, true)).unwrap_err().status, 409);
+}
+
+#[tokio::test]
 async fn bot_deletion_removes_its_secrets_and_servers() {
     let f = Fixture::new().await;
     let other = f.store.mutate(|s| s.add_bot(BotInput { name: "Other".into(), color: None, instructions: None, shape: None, pinned: None })).await.unwrap().id;

@@ -178,6 +178,62 @@ pub(super) async fn bot_reports(f: &Fixture) {
     dispatcher.close().await;
 }
 
+/// Cancelling a queued report wins before dispatch in the shared command queue: no follow-up
+/// message, run, or provider request is created, including after reopening the store and runtime.
+pub(super) async fn bot_report_cancellation(f: &Fixture) {
+    f.configure("", false).await;
+    let queue = CommandQueue::new();
+    let options = SchedulerOptions { now: system_clock(), poll_interval: Duration::from_secs(3600), auto_start: false };
+    let dispatcher = RoutineScheduler::new(Arc::clone(&f.store), Arc::clone(&f.runtime), queue.clone(), options.clone());
+    let sender = f.bot_id();
+    let recipient = recipient_bot(f).await;
+    let source = f.conversation(&sender).await;
+    let pending = send_from_user(f, &source, &recipient, "Answer without a follow-up.", true).await;
+    deliver(f, &dispatcher, &pending, text("The recipient answer stays in the exchange.")).await;
+    assert_eq!(delivery(f, &pending.id).report.unwrap().status, ReportStatus::Queued);
+    let before = f.get(&source);
+    let requests = f.provider.inference_len();
+
+    let (cancelled, dispatched) = tokio::join!(biased;
+        queue.run(async { f.store.mutate(|s| s.cancel_bot_reports(&source)).await }),
+        dispatcher.tick(),
+    );
+    cancelled.unwrap();
+    dispatched.unwrap();
+    dispatcher.tick().await.unwrap();
+    assert_eq!(f.get(&source), before, "cancellation allocates no run or hidden report input");
+    assert_eq!(f.provider.inference_len(), requests, "the cancelled follow-up never reaches the provider");
+    assert_eq!(f.runtime.start_report(&source).await.unwrap_err().status, 409, "a cancelled report cannot be started directly either");
+    let report = delivery(f, &pending.id).report.unwrap();
+    assert_eq!((report.status, report.run_id.as_deref(), report.error.as_deref()), (ReportStatus::Cancelled, None, None));
+    assert!(report.finished_at.is_some());
+    dispatcher.close().await;
+    f.runtime.shutdown().await;
+
+    let reopened = grok_bot_store::Store::open(&f.root.join("data"), system_clock()).await.unwrap();
+    let queue = CommandQueue::new();
+    let runtime = grok_bot_core::runtime::Runtime::new(
+        Arc::clone(&reopened),
+        queue.clone(),
+        grok_bot_core::runtime::RuntimeOptions::new(f.root.parent().unwrap().join("engine")),
+    );
+    runtime.initialize().await;
+    runtime.set_origin(f.origin.clone());
+    let dispatcher = RoutineScheduler::new(Arc::clone(&reopened), Arc::clone(&runtime), queue, options);
+    dispatcher.tick().await.unwrap();
+    dispatcher.tick().await.unwrap();
+    assert_eq!(runtime.start_report(&source).await.unwrap_err().status, 409);
+    reopened.read(|s| {
+        assert_eq!(s.conversation(&source).unwrap(), &before);
+        assert_eq!(s.disk().bot_deliveries.iter().find(|d| d.id == pending.id).unwrap().report.as_ref(), Some(&report));
+        assert!(queued_reports(&s.disk().bot_deliveries, &source).is_empty());
+        assert!(s.active().is_none());
+    });
+    assert_eq!(f.provider.inference_len(), requests, "restart does not execute the cancelled report");
+    dispatcher.close().await;
+    runtime.shutdown().await;
+}
+
 /// A failed recipient is reported as an error, Stop cancels a report turn for good, a report turn
 /// that cannot start is not retried, and a user turn that started first is not merged with it.
 pub(super) async fn bot_report_failures(f: &Fixture) {

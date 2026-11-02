@@ -227,6 +227,7 @@ pub enum ReportStatus {
     /// The follow-up turn (`run_id`) is running in the sender's conversation.
     Running,
     Completed,
+    /// Cancelled while queued (no run), or by stopping its running follow-up turn.
     Cancelled,
     Error,
     Interrupted,
@@ -246,7 +247,8 @@ impl ReportStatus {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeliveryReport {
     pub status: ReportStatus,
-    /// The sender conversation's run that reported this delivery.
+    /// The sender conversation's run that reported this delivery; absent if cancelled or failed
+    /// before the follow-up could start (also absent while queued or skipped).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

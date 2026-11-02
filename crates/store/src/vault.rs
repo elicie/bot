@@ -395,6 +395,34 @@ impl fmt::Debug for ResolvedMcpServer {
     }
 }
 
+/// Resolve references without changing the configuration or vault. Both runtime startup and the
+/// draft probe use this pure resolver, with their own scope-aware lookup.
+pub fn resolve_mcp_config<'a>(config: &McpServerConfig, lookup: impl Fn(&str) -> Option<&'a str>) -> Result<McpServerConfig, String> {
+    let resolve = |pairs: &[McpPair]| -> Result<Vec<McpPair>, String> {
+        pairs
+            .iter()
+            .map(|pair| {
+                let mut missing = None;
+                let value = SECRET_REF.replace_all(&pair.value, |capture: &regex::Captures<'_>| match lookup(&capture[1]) {
+                    Some(value) => value.to_owned(),
+                    None => {
+                        missing.get_or_insert_with(|| capture[1].to_owned());
+                        String::new()
+                    }
+                });
+                match missing {
+                    Some(name) => Err(format!("보관함에 {name} 시크릿이 없어요. 보관함에 추가한 뒤 다시 시도하세요.")),
+                    None => Ok(McpPair { name: pair.name.clone(), value: value.into_owned() }),
+                }
+            })
+            .collect()
+    };
+    match config {
+        McpServerConfig::Stdio { command, args, env } => resolve(env).map(|env| McpServerConfig::Stdio { command: command.clone(), args: args.clone(), env }),
+        McpServerConfig::Http { url, headers } => resolve(headers).map(|headers| McpServerConfig::Http { url: url.clone(), headers }),
+    }
+}
+
 /// An enabled server that could not be prepared (a referenced secret is missing).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct McpStartupFailure {
@@ -480,6 +508,17 @@ pub(crate) fn references_valid(disk: &DiskState) -> bool {
 // ---------------------------------------------------------------------------------------------
 // State methods
 
+fn secret_name(name: &str) -> HttpResult<String> {
+    let name = js_trim(name);
+    if name.is_empty() {
+        return Err(bad("환경 변수 이름을 입력해 주세요"));
+    }
+    if !secret_name_valid(name) {
+        return Err(bad("문자로 시작하는 대문자 환경 변수 이름(A-Z, 0-9, _)을 사용해 주세요"));
+    }
+    Ok(name.to_owned())
+}
+
 fn secret_value(value: &str) -> HttpResult<String> {
     let value = js_trim(value);
     let length = js_len(value);
@@ -519,13 +558,7 @@ impl State {
 
     /// "새 시크릿 추가". Loopback only.
     pub fn add_secret(&mut self, input: SecretInput, local: bool) -> HttpResult<PublicSecret> {
-        let name = js_trim(&input.name).to_owned();
-        if name.is_empty() {
-            return Err(bad("환경 변수 이름을 입력해 주세요"));
-        }
-        if !secret_name_valid(&name) {
-            return Err(bad("문자로 시작하는 대문자 환경 변수 이름(A-Z, 0-9, _)을 사용해 주세요"));
-        }
+        let name = secret_name(&input.name)?;
         if let Some(bot_id) = input.bot_id.as_deref()
             && !is_uuid(bot_id)
         {
@@ -658,6 +691,50 @@ impl State {
         Some(hex::encode(Sha256::digest(input.as_bytes())))
     }
 
+    /// Prepare exactly one unsaved server for a loopback-only connection test. The supplied
+    /// secrets are ephemeral, target-bot scoped even when `botId` is omitted, and cannot replace
+    /// an existing target-scoped secret. Nothing is written, enabled, or broadcast.
+    pub fn resolve_mcp_draft(&self, bot_id: &str, json: &str, secrets: &[SecretInput], local: bool) -> HttpResult<ResolvedMcpServer> {
+        require_local(local, MCP_REQUIRES_LOOPBACK)?;
+        self.assert_idle()?;
+        self.bot(bot_id)?;
+        // Parser diagnostics may contain literal credentials from the draft (e.g. unknown keys).
+        let mut parsed = parse_mcp_json(json).map_err(|error| HttpError::new(error.status, "MCP 구성 오류: 올바른 MCP 서버 JSON을 입력해 주세요."))?;
+        if parsed.len() != 1 {
+            return Err(bad("MCP 구성 오류: 연결 테스트에는 서버를 정확히 하나만 넣어 주세요."));
+        }
+        if secrets.len() > MAX_SECRETS {
+            return Err(bad("MCP 시크릿 오류: 테스트 시크릿이 너무 많아요."));
+        }
+        let mut ephemeral = BTreeMap::new();
+        for input in secrets {
+            if input.bot_id.as_deref().is_some_and(|scope| scope != bot_id) {
+                return Err(bad("MCP 시크릿 오류: 현재 Bot의 시크릿만 테스트할 수 있어요."));
+            }
+            let name = secret_name(&input.name)?;
+            let value = secret_value(&input.value)?;
+            if self.disk.secrets.iter().any(|secret| secret.name == name && secret.bot_id.as_deref() == Some(bot_id)) {
+                return Err(HttpError::conflict("MCP 시크릿 오류: 현재 Bot에 같은 이름의 시크릿이 이미 있어요."));
+            }
+            if ephemeral.insert(name, value).is_some() {
+                return Err(bad("MCP 시크릿 오류: 테스트 시크릿 이름이 중복되었어요."));
+            }
+        }
+        let lookup = |name: &str| {
+            self.disk
+                .secrets
+                .iter()
+                .find(|secret| secret.name == name && secret.bot_id.as_deref() == Some(bot_id))
+                .map(|secret| secret.value.as_str())
+                .or_else(|| ephemeral.get(name).map(String::as_str))
+                .or_else(|| self.disk.secrets.iter().find(|secret| secret.name == name && secret.bot_id.is_none()).map(|secret| secret.value.as_str()))
+        };
+        let (name, config) = parsed.pop().expect("exactly one validated server");
+        let config =
+            resolve_mcp_config(&config, lookup).map_err(|_| bad("MCP 시크릿 오류: 참조한 시크릿이 없어요. 보관함 또는 테스트 시크릿을 확인해 주세요."))?;
+        Ok(ResolvedMcpServer { name, config })
+    }
+
     /// The bot's enabled servers for a session start, with `${secret:NAME}` resolved (the bot's own
     /// secret first, then an all-bots secret). A server with a missing secret is skipped and
     /// reported instead.
@@ -666,34 +743,10 @@ impl State {
             let scoped = self.disk.secrets.iter().find(|secret| secret.name == name && secret.bot_id.as_deref() == Some(bot_id));
             scoped.or_else(|| self.disk.secrets.iter().find(|secret| secret.name == name && secret.bot_id.is_none())).map(|secret| secret.value.as_str())
         };
-        let resolve = |pairs: &[McpPair]| -> Result<Vec<McpPair>, String> {
-            pairs
-                .iter()
-                .map(|pair| {
-                    let mut missing = None;
-                    let value = SECRET_REF.replace_all(&pair.value, |capture: &regex::Captures<'_>| match lookup(&capture[1]) {
-                        Some(value) => value.to_owned(),
-                        None => {
-                            missing.get_or_insert_with(|| capture[1].to_owned());
-                            String::new()
-                        }
-                    });
-                    match missing {
-                        Some(name) => Err(format!("보관함에 {name} 시크릿이 없어요. 보관함에 추가한 뒤 다시 시도하세요.")),
-                        None => Ok(McpPair { name: pair.name.clone(), value: value.into_owned() }),
-                    }
-                })
-                .collect()
-        };
         let mut servers = Vec::new();
         let mut failures = Vec::new();
         for server in self.mcp_servers_for(bot_id).filter(|server| server.enabled) {
-            let config = match &server.config {
-                McpServerConfig::Stdio { command, args, env } => {
-                    resolve(env).map(|env| McpServerConfig::Stdio { command: command.clone(), args: args.clone(), env })
-                }
-                McpServerConfig::Http { url, headers } => resolve(headers).map(|headers| McpServerConfig::Http { url: url.clone(), headers }),
-            };
+            let config = resolve_mcp_config(&server.config, lookup);
             match config {
                 Ok(config) => servers.push(ResolvedMcpServer { name: server.name.clone(), config }),
                 Err(message) => failures.push(McpStartupFailure { name: server.name.clone(), message }),

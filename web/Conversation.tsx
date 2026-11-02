@@ -219,6 +219,8 @@ export function Transcript({
   onPermission,
   data,
   onBotChat,
+  onCancelReports,
+  cancelReportsDisabled,
   onRoutines,
   speakerFor,
   messageExtras,
@@ -235,6 +237,8 @@ export function Transcript({
   onPermission: (optionId: string) => void;
   data?: AppState;
   onBotChat?: (id: string) => void;
+  onCancelReports?: (conversationId: string) => void;
+  cancelReportsDisabled?: boolean;
   onRoutines?: () => void;
   /** Group conversations: the member bot that wrote an assistant message. */
   speakerFor?: (message: Message) => Bot | undefined;
@@ -331,7 +335,7 @@ export function Transcript({
                     <TodoList key={`${conversationId}-${conversation.run.id}`} todos={conversation.run.todos} running={!!running} />
                   )}
                   <MessageView message={message} bot={speakerFor?.(message) ?? bot} conversationId={conversation?.id} named={!!speakerFor} />
-                  {data && onBotChat && <BotMessageLinks message={message} data={data} onOpen={onBotChat} />}
+                  {data && onBotChat && <BotMessageLinks message={message} data={data} onOpen={onBotChat} onCancelReports={onCancelReports} cancelReportsDisabled={cancelReportsDisabled} />}
                   {onRoutines && <RoutineLinks message={message} onOpen={onRoutines} />}
                   {messageExtras?.(message)}
                 </>
