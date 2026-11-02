@@ -97,5 +97,3 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
     }
   });
 }
-
-// CI runner check (temporary, reverted before merge)
