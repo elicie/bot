@@ -25,7 +25,7 @@ import type {
 } from '../shared/types';
 import { activeRun, pendingBotWork, runLabels } from './state';
 import { Avatar, ErrorNotice, IconButton } from './ui';
-import { BotMessageLinks, BotReportMarker } from './BotChat';
+import { BotMessageLinks, BotReportMarker, BotRequestBanner } from './BotChat';
 import { RichMarkdown } from './RichMarkdown';
 import { TodoList } from './TodoList';
 import { AttachButton, AttachmentTray, DropOverlay, MessageAttachments, useFileDrop, type ComposerAttachments } from './Attachments';
@@ -304,6 +304,7 @@ export function Transcript({
           {messages.length > 0 && (
             <div className="conversation-label">{conversation?.title || '새 대화'}</div>
           )}
+          {data && conversation && <BotRequestBanner conversationId={conversation.id} data={data} onOpen={onBotChat} />}
           {messages.length === 0 && (
             <div className="conversation-empty">
               <Avatar size={54} color={bot.color} seed={bot.id} shape={bot.shape} />
@@ -430,6 +431,7 @@ export function Composer({
   attachments,
   placeholder,
   label = '메시지',
+  readOnly = false,
 }: {
   botName: string;
   value: string;
@@ -448,9 +450,11 @@ export function Composer({
   attachments?: ComposerAttachments;
   placeholder?: string;
   label?: string;
+  /** Nothing can be typed here at all (a recipient's dedicated bot-message conversation). */
+  readOnly?: boolean;
 }) {
   const textarea = useRef<HTMLTextAreaElement>(null);
-  const attachable = !!attachments && !disabled && !busy && !running;
+  const attachable = !!attachments && !disabled && !readOnly && !busy && !running;
   const drop = useFileDrop(attachable, (files) => attachments?.add(files));
   const hasFiles = !!attachments?.items.length;
   useLayoutEffect(() => {
@@ -479,6 +483,7 @@ export function Composer({
           ref={textarea}
           rows={1}
           aria-label={label}
+          disabled={readOnly}
           placeholder={placeholder ?? `${botName}에게 메시지 보내기`}
           value={value}
           onChange={(event) => onChange(event.target.value)}

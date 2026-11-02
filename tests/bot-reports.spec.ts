@@ -82,7 +82,28 @@ test('a finished bot delivery is reported back in a follow-up reply with a marke
     const pair = page.getByRole('log', { name: '봇 간 대화 메시지', exact: true });
     await expect(pair).toContainText('REVIEW_VERDICT_CANARY: the plan is approved.');
     await expect(pair).toContainText('보낸 Bot이 이 답변을 받아 이어서 답했습니다.');
+
+    // A finished delivery still links to the recipient's own conversation, which says who asked
+    // and cannot be typed into; the recipient's history marks it as a request from that bot.
+    const sender = state.bots.find(bot => bot.id === state.botDeliveries![0].fromBotId)!.name;
+    await pair.getByRole('button', { name: 'Reviewer의 실행 대화 보기', exact: true }).click();
+    const recipientLog = page.getByRole('log', { name: '대화 메시지', exact: true });
+    const request = recipientLog.getByRole('note', { name: '다른 Bot의 요청', exact: true });
+    await expect(request).toContainText(`${sender}의 요청으로 열린 대화입니다.`);
+    await expect(recipientLog).toContainText('REVIEW_VERDICT_CANARY: the plan is approved.');
+    await expect(page.getByLabel('메시지', { exact: true })).toBeDisabled();
+    await expect(page.getByLabel('메시지', { exact: true })).toHaveAttribute('placeholder', '다른 Bot의 요청으로 열린 대화라 여기서는 보낼 수 없습니다');
+    await page.getByRole('button', { name: '대화 기록', exact: true }).click();
+    const history = page.getByRole('dialog', { name: '대화 기록', exact: true });
+    await expect(history.locator('.history-request')).toHaveText(`${sender}의 요청`);
+    await history.getByRole('button', { name: '대화 기록 닫기', exact: true }).click();
+    await request.getByRole('button', { name: 'Bot 대화 보기', exact: true }).click();
+    await expect(pair).toContainText('REVIEW_VERDICT_CANARY: the plan is approved.');
     await page.getByRole('button', { name: '채팅 닫기', exact: true }).click();
+    // Back on the sender's own conversation: no request banner there.
+    await page.getByRole('complementary', { name: '봇 목록', exact: true }).getByRole('button', { name: new RegExp(`^${sender}`) }).first().click();
+    await expect(page.getByRole('log', { name: '대화 메시지', exact: true })).toContainText('Reviewer approved the plan, so we can go ahead.');
+    await expect(page.getByRole('note', { name: '다른 Bot의 요청', exact: true })).toHaveCount(0);
     await page.reload();
     await expect(page.getByRole('log', { name: '대화 메시지', exact: true }).getByRole('note', { name: '이어서 답한 Bot 답변', exact: true })).toBeVisible();
     expect(stage).toBe(5);
