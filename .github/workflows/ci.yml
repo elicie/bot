@@ -36,6 +36,7 @@ jobs:
       packages: ${{ steps.detect.outputs.packages }}
       node: ${{ steps.detect.outputs.node }}
       specs: ${{ steps.detect.outputs.specs }}
+      tools: ${{ steps.detect.outputs.tools }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,8 +44,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: Test CI selection and diagnostics
-        run: node --test scripts/ci-*.test.mjs
+      - name: Test CI selection
+        run: node --test scripts/ci-changes.test.mjs
       - id: detect
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -58,6 +59,19 @@ jobs:
             cat changed.txt
             node scripts/ci-changes.mjs < changed.txt | tee -a "$GITHUB_OUTPUT"
           fi
+
+  ci-tools:
+    name: CI diagnostic regressions
+    needs: changes
+    if: needs.changes.outputs.tools == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node --test scripts/ci-run.test.mjs
 
   web:
     name: Web (typecheck, build)
@@ -116,7 +130,12 @@ jobs:
         if: needs.changes.outputs.packages != ''
         env:
           EXACT_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
-        run: echo "Rust lint cache exact match = $EXACT_HIT (see restore/save logs for fallback hits and uploads)" | tee -a "$GITHUB_STEP_SUMMARY"
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
+            echo "Rust lint uses persistent target: $CARGO_TARGET_DIR (no Actions cache upload)" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Rust lint cache exact match = $EXACT_HIT (see restore/save logs for fallback hits and uploads)" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Install ripgrep (bundled into the engine build)
         if: needs.changes.outputs.packages != '' && runner.environment == 'github-hosted'
         run: sudo apt-get update && sudo apt-get install -y ripgrep
@@ -128,7 +147,7 @@ jobs:
         run: node scripts/ci-run.mjs node scripts/cargo.mjs clippy --locked $PACKAGES --all-targets -- -D warnings
       - name: Final disk usage
         if: always()
-        run: df -h / && df -i / && du -sh target 2>/dev/null || true
+        run: df -h / . /tmp && df -i / . /tmp && du -sh -- "${CARGO_TARGET_DIR:-target}" 2>/dev/null || true
 
   test:
     name: Tests (affected crates, Node tests, specs)
@@ -166,7 +185,12 @@ jobs:
       - name: Rust cache status
         env:
           EXACT_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
-        run: echo "Rust test cache exact match = $EXACT_HIT (see restore/save logs for fallback hits and uploads)" | tee -a "$GITHUB_STEP_SUMMARY"
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
+            echo "Rust test uses persistent target: $CARGO_TARGET_DIR (no Actions cache upload)" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Rust test cache exact match = $EXACT_HIT (see restore/save logs for fallback hits and uploads)" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: actions/setup-node@v4
         with:
           node-version: 24

@@ -7,8 +7,8 @@ import { readCargoMetadata, selectChanges } from './ci-changes.mjs';
 
 const script = fileURLToPath(new URL('./ci-changes.mjs', import.meta.url));
 const cwd = path.resolve('synthetic-workspace');
-const empty = { web: false, rust: false, packages: '', node: '', specs: '' };
-const full = { web: true, rust: true, packages: '--workspace', node: 'all', specs: 'all' };
+const empty = { web: false, rust: false, packages: '', node: '', specs: '', tools: false };
+const full = { web: true, rust: true, packages: '--workspace', node: 'all', specs: 'all', tools: true };
 const noMetadata = { loadMetadata: () => assert.fail('metadata must remain lazy') };
 const dependency = (dir, fields = {}) => ({ name: path.basename(dir), path: path.join(cwd, dir), ...fields });
 const member = (name, dir, dependencies = []) => ({
@@ -151,16 +151,76 @@ test('empty and documentation-only changes need no jobs or metadata', () => {
   }
 });
 
+test('crate-root README and core/engine Markdown docs need no jobs or metadata', () => {
+  const files = [
+    'crates/store/README', 'crates/model/README.md', 'crates/core/readme.markdown', 'engine/README.md',
+    'crates/core/docs/architecture.md', 'crates/core/docs/design/runtime.markdown',
+    'engine/docs/usage.md', 'engine/docs/design/README.MD',
+  ];
+  for (const file of files) assert.deepEqual(selectChanges([file], noMetadata), empty, file);
+  assert.deepEqual(selectChanges(files, noMetadata), empty);
+});
+
+test('crate fixtures and non-documentation assets still select reverse dependents', () => {
+  const cases = [
+    ['crates/store/tests/fixtures/daily-golden.json', '-p core -p server -p store'],
+    ['crates/store/tests/fixtures/README.md', '-p core -p server -p store'],
+    ['crates/core/src/prompt.md', '-p core -p server'],
+    ['crates/core/tests/fixtures/docs/input.md', '-p core -p server'],
+    ['crates/core/assets/schema.json', '-p core -p server'],
+    ['crates/core/docs/example.json', '-p core -p server'],
+    ['crates/core/docs/example.rs', '-p core -p server'],
+    ['engine/src/prompt.markdown', '-p core -p engine -p server'],
+    ['engine/tests/fixtures/README.md', '-p core -p engine -p server'],
+    ['engine/config.toml', '-p core -p engine -p server'],
+  ];
+  for (const [file, packages] of cases) {
+    assert.deepEqual(select([file]), { ...empty, rust: true, packages }, file);
+  }
+});
+
+test('mixed crate docs and Rust changes keep focused reverse-dependent selection', () => {
+  const docs = ['crates/core/README.md', 'crates/core/docs/runtime.md', 'engine/docs/usage.md'];
+  for (const [file, packages] of [
+    ['crates/store/src/lib.rs', '-p core -p server -p store'],
+    ['crates/core/src/lib.rs', '-p core -p server'],
+    ['engine/src/lib.rs', '-p core -p engine -p server'],
+  ]) {
+    assert.deepEqual(select([...docs, file]), { ...empty, rust: true, packages }, file);
+  }
+});
+
 test('--full selection includes every check and bypasses metadata', () => {
   for (const files of [[], ['README.md'], ['crates/deleted/src/lib.rs']]) {
     assert.deepEqual(selectChanges(files, { ...noMetadata, full: true }), full);
   }
 });
 
-test('CI workflow, selector and runner changes do not broaden PR checks', () => {
+test('CI workflow, selector and runner changes select only tools, not app suites', () => {
   for (const file of [
     '.github/workflows/ci.yml', 'scripts/ci-changes.mjs', 'scripts/ci-changes.test.mjs',
-    'scripts/ci-run.mjs', 'scripts/ci-run.test.mjs',
+    'scripts/ci-run.mjs', 'scripts/ci-run.test.mjs', 'scripts/ci-future.mjs',
+  ]) {
+    assert.deepEqual(selectChanges([file], noMetadata), { ...empty, tools: true }, file);
+  }
+});
+
+test('tools selection stays independent from mixed focused app and Rust checks', () => {
+  const files = ['web/App.tsx', 'crates/store/src/lib.rs', 'tests/one.test.ts', 'tests/ui.spec.ts'];
+  assert.deepEqual(select(files), {
+    ...empty, web: true, rust: true, packages: '-p core -p server -p store',
+    node: 'tests/one.test.ts', specs: 'tests/ui.spec.ts',
+  });
+  for (const file of ['scripts/ci-run.mjs', '.github/workflows/ci.yml']) {
+    assert.deepEqual(select([...files, file]), { ...select(files), tools: true }, file);
+  }
+});
+
+test('unrelated scripts, workflows and lookalike paths do not select tools', () => {
+  for (const file of [
+    'scripts/unrelated.mjs', 'scripts/ci.mjs', 'scripts/nested/ci-run.mjs',
+    '.github/workflows/other.yml', '.github/workflows/ci.yaml', '.github/workflows/ci.yml.bak',
+    'docs/scripts/ci-run.mjs', 'docs/.github/workflows/ci.yml',
   ]) {
     assert.deepEqual(selectChanges([file], noMetadata), empty, file);
   }
@@ -189,20 +249,32 @@ test('otherwise selects only changed top-level Node tests and Playwright specs',
   });
 });
 
-test('CLI --full preserves the exact five output keys and all sentinels without Cargo', () => {
-  assert.deepEqual(outputs(cli(['--full'])), { web: 'true', rust: 'true', packages: '--workspace', node: 'all', specs: 'all' });
+test('CLI --full preserves the five app outputs and adds tools without Cargo', () => {
+  assert.deepEqual(outputs(cli(['--full'])), {
+    web: 'true', rust: 'true', packages: '--workspace', node: 'all', specs: 'all', tools: 'true',
+  });
 });
 
 test('CLI parses stdin and preserves focused web, Node and spec outputs without Cargo', () => {
   assert.deepEqual(outputs(cli([], 'shared/protocol.ts\r\n tests/one.test.ts \n\ntests/ui.spec.ts\n')), {
-    web: 'true', rust: 'false', packages: '', node: 'tests/one.test.ts', specs: 'tests/ui.spec.ts',
+    web: 'true', rust: 'false', packages: '', node: 'tests/one.test.ts', specs: 'tests/ui.spec.ts', tools: 'false',
   });
 });
 
 test('CLI infrastructure changes select nothing beyond the CI script tests', () => {
-  assert.deepEqual(outputs(cli([], 'scripts/ci-run.test.mjs\n')), {
-    web: 'false', rust: 'false', packages: '', node: '', specs: '',
-  });
+  for (const file of ['scripts/ci-run.test.mjs', '.github/workflows/ci.yml']) {
+    assert.deepEqual(outputs(cli([], `${file}\n`)), {
+      web: 'false', rust: 'false', packages: '', node: '', specs: '', tools: 'true',
+    });
+  }
+});
+
+test('CLI empty and documentation-only changes stay focused without Cargo', () => {
+  for (const input of ['', 'README.md\n', 'crates/core/README.md\ncrates/core/docs/runtime.md\nengine/docs/usage.md\n']) {
+    assert.deepEqual(outputs(cli([], input)), {
+      web: 'false', rust: 'false', packages: '', node: '', specs: '', tools: 'false',
+    });
+  }
 });
 
 test('CLI reports metadata failure on stderr and fails without partial outputs', () => {

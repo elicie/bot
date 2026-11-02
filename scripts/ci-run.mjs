@@ -6,6 +6,7 @@ import { constants } from 'node:os';
 
 const [command, ...args] = process.argv.slice(2);
 const intervalMs = Number(process.env.CI_RESOURCE_INTERVAL_MS ?? 60_000);
+const targetDirectory = process.env.CARGO_TARGET_DIR || 'target';
 if (!command || !Number.isSafeInteger(intervalMs) || intervalMs <= 0 || intervalMs > 2_147_483_647) {
   console.error('Usage: node scripts/ci-run.mjs <command> [args...] (CI_RESOURCE_INTERVAL_MS must be 1..2147483647)');
   process.exit(2);
@@ -46,7 +47,7 @@ async function snapshot(phase) {
     inspect('free', ['-m']),
     // Command names only: process arguments and environment can contain secrets.
     inspect('ps', ['-eo', 'pid,ppid,stat,etime,%cpu,%mem,rss,comm', '--sort=-rss'], 16),
-    access('target').then(() => inspect('du', ['-sh', 'target']), () => {}),
+    access(targetDirectory).then(() => inspect('du', ['-sh', '--', targetDirectory]), () => {}),
     ...['/sys/fs/cgroup/memory.current', '/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory.events', '/proc/pressure/memory', '/proc/pressure/io'].map(async file => {
       try { console.log(`${file}:\n${(await readFile(file, 'utf8')).trimEnd()}`); } catch { /* Not available on every runner. */ }
     }),
@@ -54,43 +55,87 @@ async function snapshot(phase) {
 }
 
 await snapshot('before command');
-// A separate process group lets cancellation reach cargo/test subprocesses as well.
+// POSIX detachment is only for an OWNED process group, never daemonization: keep
+// the child referenced and explicitly clean up the group on every completion.
+// Without this isolation, a negative-pid signal could reach the runner's group.
 const grouped = process.platform !== 'win32';
-const child = spawn(command, args, { stdio: 'inherit', detached: grouped });
-console.log(`[ci-resources] command started: pid=${child.pid ?? 'unavailable'}`);
+let child;
+let ownedGroup;
 let probing;
-const timer = setInterval(() => {
-  if (!probing) probing = snapshot('heartbeat').finally(() => { probing = undefined; });
-}, intervalMs);
+let timer;
 let finished = false;
 let killTimer;
+let cleanup;
+let resolveCleanup;
 let cancelledBy;
 
-function groupAlive() {
-  if (!grouped || !child.pid) return false;
-  try { process.kill(-child.pid, 0); return true; }
-  catch (error) { return error.code !== 'ESRCH'; }
-}
-
-function forward(signal) {
-  console.log(`[ci-resources] received ${signal}; forwarding to command`);
-  if (!child.pid) return;
-  try {
-    if (grouped) process.kill(-child.pid, signal);
-    else child.kill(signal);
-  } catch (error) {
-    if (error.code !== 'ESRCH') console.error(error.message);
+function commandAlive() {
+  if (!grouped) return Boolean(child?.pid && child.exitCode === null && child.signalCode === null);
+  if (!ownedGroup) return false;
+  try { process.kill(-ownedGroup, 0); return true; }
+  catch (error) {
+    // Retire ownership once the group disappears; never signal a later reused id.
+    if (error.code === 'ESRCH') ownedGroup = undefined;
+    return error.code !== 'ESRCH';
   }
 }
+
+function signalCommand(signal, reportErrors = true) {
+  try {
+    if (grouped) {
+      if (ownedGroup) process.kill(-ownedGroup, signal);
+    } else child?.kill(signal);
+  } catch (error) {
+    if (error.code === 'ESRCH') ownedGroup = undefined;
+    else if (reportErrors) console.error(`[ci-resources] command signal failed: ${error.code ?? 'unknown'}`);
+  }
+}
+
+function completeCleanup() {
+  clearTimeout(killTimer);
+  killTimer = undefined;
+  resolveCleanup?.();
+  resolveCleanup = undefined;
+}
+
+function cleanupCommand(signal = 'SIGTERM') {
+  if (!commandAlive()) {
+    completeCleanup();
+    return cleanup ?? Promise.resolve();
+  }
+  if (!cleanup) {
+    cleanup = new Promise(resolve => { resolveCleanup = resolve; });
+    console.log(`[ci-resources] cleaning up command ${grouped ? 'process group' : 'process'} with ${signal}`);
+    signalCommand(signal);
+    // This stays referenced even if the direct child exits before its descendants.
+    killTimer = setTimeout(() => {
+      if (commandAlive()) {
+        console.log('[ci-resources] escalating command cleanup to SIGKILL');
+        signalCommand('SIGKILL');
+      }
+      completeCleanup();
+    }, 5_000);
+  }
+  return cleanup;
+}
+
+process.once('exit', () => {
+  if (!commandAlive()) return;
+  // process.exit()/uncaught failures cannot await the normal five-second grace
+  // period. This synchronous last chance must not intentionally leave daemons.
+  // SIGKILL of this wrapper or host loss cannot execute any exit handler.
+  signalCommand('SIGTERM', false);
+  signalCommand('SIGKILL', false);
+});
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
     cancelledBy ??= signal;
     process.exitCode = 128 + constants.signals[cancelledBy];
-    if (!finished || groupAlive()) {
-      forward(signal);
-      // Keep this timer referenced if descendants survive the direct child's exit.
-      killTimer ??= setTimeout(() => forward('SIGKILL'), 5_000);
+    if (!finished || commandAlive()) {
+      console.log(`[ci-resources] received ${signal}; forwarding to command`);
+      if (cleanup) signalCommand(signal);
+      void cleanupCommand(signal);
     }
   });
 }
@@ -99,18 +144,38 @@ async function finish(code, signal, error) {
   if (finished) return;
   finished = true;
   clearInterval(timer);
-  if (!groupAlive()) clearTimeout(killTimer);
   if (error) console.error(`[ci-resources] command could not start: ${error.message}`);
   console.log(`[ci-resources] command finished: exit=${code ?? 'none'} signal=${signal ?? 'none'}`);
-  await probing;
-  await snapshot('after command');
   const status = () => (cancelledBy ?? signal) ? 128 + (constants.signals[cancelledBy ?? signal] ?? 1) : error ? 1 : code ?? 1;
-  if (status() !== 0 && !cancelledBy) {
-    // Hosted Linux usually permits this; diagnostics must not replace the command's exit status.
-    await inspect('sudo', ['-n', 'dmesg', '--ctime', '--level=err,warn'], -80);
-  }
   process.exitCode = status();
+  // Start teardown immediately on exit/error, including a successful command
+  // which left descendants behind. Diagnostics run within the grace period.
+  const cleaning = cleanupCommand(cancelledBy ?? 'SIGTERM');
+  try {
+    await probing;
+    await snapshot('after command');
+    if (status() !== 0 && !cancelledBy) {
+      // Diagnostics must not replace the command's exit status.
+      await inspect('sudo', ['-n', 'dmesg', '--ctime', '--level=err,warn'], -80);
+    }
+  } catch {
+    console.error('[ci-resources] resource diagnostics unavailable');
+  } finally {
+    if (!commandAlive()) completeCleanup();
+    await cleaning;
+    process.exitCode = status();
+  }
 }
 
-child.once('error', error => finish(1, undefined, error));
-child.once('close', (code, signal) => finish(code, signal));
+try {
+  child = spawn(command, args, { stdio: 'inherit', detached: grouped });
+  if (grouped && Number.isSafeInteger(child.pid) && child.pid > 1 && child.pid !== process.pid) ownedGroup = child.pid;
+  console.log(`[ci-resources] command started: pid=${child.pid ?? 'unavailable'}`);
+  timer = setInterval(() => {
+    if (!probing) probing = snapshot('heartbeat').finally(() => { probing = undefined; });
+  }, intervalMs);
+  child.once('error', error => finish(1, undefined, error));
+  child.once('exit', (code, signal) => finish(code, signal));
+} catch (error) {
+  await finish(1, undefined, error);
+}

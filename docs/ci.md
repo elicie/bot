@@ -20,11 +20,17 @@
   gh workflow run ci.yml --repo elicie/bot --ref main
   ```
 
-- Pull requests never run the full suite, including PRs that edit the CI workflow,
-  selector or diagnostics; those are exercised by the next daily/manual run. A missing
-  or invalid diff base falls back to the last commit. Root
-  Cargo manifests/lockfile and Rust build-environment changes select the workspace;
-  a rustfmt-only change still needs just the formatting check.
+- Pull requests never run the full application suite, including PRs that edit the
+  CI workflow, selector or diagnostics. A missing or invalid diff base falls back
+  to the last commit. Root Cargo manifests/lockfile and Rust build-environment
+  changes select the Rust workspace; a rustfmt-only change needs just formatting.
+- Detect runs only deterministic selector regressions. Timing-sensitive diagnostic
+  process tests have a separate `CI diagnostic regressions` job, selected only for
+  CI workflow/helper changes and daily/manual runs, so an ordinary application PR
+  does not depend on process-lifecycle timing checks.
+- Conventional crate-root READMEs and Markdown under a crate's `docs/` tree do not
+  select Rust jobs by themselves. Source/test fixtures and other assets remain
+  conservative inputs, including Markdown outside those documentation locations.
 - Existing application-PR Node/backend and changed-spec mapping is preserved;
   reverse-dependency expansion concerns Rust crates. The daily full run is the
   safety net for cross-cutting JS/browser behavior, not a claim that selective
@@ -45,9 +51,13 @@ It emits a snapshot before, after, and every 60 seconds during the command:
 
 Diagnostics run asynchronously with bounded output and two-second probe timeouts;
 slow probes do not block cancellation or replace the command's exit status.
-Cancellation is forwarded to the command's process group and escalates after five
-seconds if descendants survive, even when the direct command has exited. Engine
-compilation is a separate step from Node tests, so the UI identifies which phase
+Cancellation is forwarded to an owned command process group. The wrapper keeps
+that group referenced and cleans it up on normal completion too, escalating after
+five seconds if descendants survive a successful direct-child exit. A synchronous
+exit guard also attempts cleanup after explicit wrapper exit or uncaught failure;
+it never signals the runner's own group. Forced wrapper SIGKILL/host loss cannot
+run cleanup, and a descendant that deliberately creates a new session can escape
+the group. Engine compilation is separate from Node tests, identifying which phase
 is actually stalled. Existing per-test and job/step time limits remain in place.
 
 The snapshots are in the Actions job log, including while a command is silent;
@@ -83,19 +93,27 @@ failure from a suspected cause; see [issue #13](https://github.com/elicie/bot/is
   job-log download for job 125071642871 also returned HTTP 404 / BlobNotFound.
   There are no contemporaneous disk, memory or process readings
   to establish disk exhaustion, OOM, a test/child-process hang or host failure.
+- The later [PR #26 run 41396847165](https://github.com/elicie/bot/actions/runs/41396847165)
+  again recorded Node tests in progress, then concurrency cancellation. Both log
+  retrieval methods still returned missing archives after completion, so the
+  underlying cause remains unknown. A local run of all 105 Node tests passed in
+  14.34 seconds; that does not establish hosted-runner health.
 - The latest successful selective jobs instead show 91–92 GiB free and an
   11–12 GiB target directory. This does **not** establish earlier disk conditions.
 - [A separate failed Rust job](https://github.com/elicie/bot/actions/runs/41381640432/job/125073517683)
   failed a Chrome race assertion expecting HTTP 409; it did not reach Node tests.
   That assertion failure is not evidence of disk exhaustion.
 
-### Rust cache: saves confirmed, hits must be checked separately
+### Rust cache: saves and reuse verified separately
 
-`Swatinem/rust-cache` already includes the job ID in its default key, separating
-`lint` from `test`. No cache-key collision was established, so defaults are kept.
-A successful restore *step* does not prove a hit. Each Rust job now reports its
-**exact-match** output in the job summary; inspect restore/save logs for matched
-fallback keys and actual uploads. An npm cache hit is not a Rust cache hit.
+[PR #32](https://github.com/elicie/bot/pull/32) moved same-repository build jobs to
+the self-hosted `grok-bot` runner, using its pinned Rust toolchain and persistent
+`CARGO_TARGET_DIR`. They do not upload an Actions Rust/npm cache. Fork PRs still
+use hosted runners and `Swatinem/rust-cache`; the default key includes the job ID,
+separating `lint` from `test`. No cache-key collision was established, so those
+defaults are kept. Job summaries distinguish persistent targets from Actions
+**exact-match** results; restore/save logs show fallback keys and actual uploads.
+An npm cache hit is not a Rust cache hit.
 
 Confirmed historical uploads:
 
@@ -113,8 +131,9 @@ both `lint` and `test` logged their exact Rust cache keys, successful restoratio
 and `cache-hit=true`, confirming that main's saved caches are reusable by a new
 PR. That run stopped on an existing integration-test disk-scan race (observing an
 atomic state-file replacement before completion), not on a resource failure.
-The test now flushes pending writes before asserting the unchanged secret-file
-allowlist; it does not ignore temporary files or weaken the assertion.
+The fixture synchronization fix is isolated in [PR #36](https://github.com/elicie/bot/pull/36),
+not this CI change. It flushes pending writes before asserting the unchanged
+secret-file allowlist; it does not ignore temporary files or weaken the assertion.
 
 ### Timing target
 
