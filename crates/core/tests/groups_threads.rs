@@ -15,6 +15,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use common::{TestApp, run};
 use grok_bot_model::{AppState, Conversation, RunStatus};
+use grok_bot_store::attachments::base64_encode;
 use serde_json::{Value, json};
 
 #[derive(Default)]
@@ -273,12 +274,47 @@ async fn group_order_attribution_and_sessions(h: &Harness) {
     assert_eq!(h.provider.requests().iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["Alpha"]);
     h.provider.state.lock().unwrap().hold = None;
 
-    // Members cannot be changed under a running group; deleting keeps the bots.
+    // Attachments in the group conversation, in a thread of it, and in an unrelated conversation.
+    let blob = |conversation: &str, message: usize| -> std::path::PathBuf {
+        let attachment = h.conversation(conversation).messages[message].attachments.clone().unwrap().remove(0);
+        h.app.data_dir.join("attachments").join(conversation).join(attachment.id)
+    };
+    let attach = |text: &str, name: &str| json!({ "text": text, "attachments": [{ "name": name, "mimeType": "text/plain", "data": base64_encode(name.as_bytes()) }] });
+    let (status, body) = h.post(&format!("/api/conversations/{conversation}/attachment-messages"), attach("@Alpha read this", "group.txt")).await;
+    assert_eq!(status, 202, "{body}");
+    h.settled(&conversation, 15).await;
+    let group_blob = blob(&conversation, 13);
+    let reply = h.conversation(&conversation).messages[14].id.clone();
+    let (status, created) = h.post(&format!("/api/conversations/{conversation}/threads"), json!({ "messageId": reply })).await;
+    assert_eq!(status, 201, "{created}");
+    let group_thread = created["conversation"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(h.post(&format!("/api/conversations/{group_thread}/attachment-messages"), attach("@Alpha and this", "thread.txt")).await.0, 202);
+    h.settled(&group_thread, 2).await;
+    let thread_blob = blob(&group_thread, 0);
+    let grok = h.state().bots[0].id.clone();
+    let (_, created) = h.post("/api/conversations", json!({ "botId": grok })).await;
+    let direct = created["conversation"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(h.post(&format!("/api/conversations/{direct}/attachment-messages"), attach("Keep this", "direct.txt")).await.0, 202);
+    h.settled(&direct, 2).await;
+    let direct_blob = blob(&direct, 0);
+    for path in [&group_blob, &thread_blob, &direct_blob] {
+        assert!(path.is_file(), "{} is stored", path.display());
+    }
+    assert!(h.app.data_dir.join("grok").join(&group_thread).join(&alpha).is_dir());
+
+    // Members cannot be changed under a running group; deleting keeps the bots and removes the
+    // files of the group's conversations and threads only.
     assert_eq!(h.app.api("DELETE", &format!("/api/groups/{group}"), Some(json!({}))).await.0, 200);
     let state = h.state();
     assert!(state.groups.is_empty());
-    assert!(!state.conversations.iter().any(|c| c.id == conversation));
+    assert!(!state.conversations.iter().any(|c| c.id == conversation || c.id == group_thread));
     assert!(state.bots.iter().any(|bot| bot.id == alpha));
+    for removed in [&conversation, &group_thread] {
+        assert!(!h.app.data_dir.join("attachments").join(removed).exists(), "attachments of {removed} are removed");
+        assert!(!h.app.data_dir.join("grok").join(removed).exists(), "engine sessions of {removed} are removed");
+    }
+    assert!(direct_blob.is_file(), "another conversation's attachment remains");
+    assert!(h.app.data_dir.join("grok").join(&direct).is_dir());
 }
 
 async fn threads_quote_their_parent(h: &Harness) {

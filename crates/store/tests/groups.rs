@@ -168,7 +168,11 @@ async fn deleting_a_group_removes_its_conversations_and_threads_but_keeps_bots()
     f.start(&direct.id).await;
     assert_eq!(f.store.mutate(|s| s.delete_group(&group.id)).await.unwrap_err().status, 409);
     f.finish(&direct.id).await;
-    f.store.mutate(|s| s.delete_group(&group.id)).await.unwrap();
+    let mut removed = f.store.mutate(|s| s.delete_group(&group.id)).await.unwrap();
+    removed.sort();
+    let mut expected = vec![group_conversation.id.clone(), group_thread.id.clone()];
+    expected.sort();
+    assert_eq!(removed, expected, "the removed conversations and threads are reported for file cleanup");
     let ids: Vec<String> = f.store.read(|s| s.disk().conversations.iter().map(|c| c.id.clone()).collect());
     assert!(!ids.contains(&group_conversation.id) && !ids.contains(&group_thread.id));
     assert!(ids.contains(&direct.id) && ids.contains(&direct_thread.id));

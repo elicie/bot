@@ -246,19 +246,27 @@ impl State {
         Ok(())
     }
 
-    /// Delete a group with its conversations and their threads. Member bots are kept.
-    pub fn delete_group(&mut self, id: &str) -> HttpResult<()> {
+    /// Delete a group with its conversations and their threads. Member bots are kept. Returns the
+    /// IDs of the removed conversations (threads included) so the caller can remove their files
+    /// outside `state.json` after the commit.
+    pub fn delete_group(&mut self, id: &str) -> HttpResult<Vec<String>> {
         self.assert_idle()?;
         self.group(id)?;
         self.assert_group_quiet(id)?;
         let disk = self.disk_mut();
         disk.groups.retain(|group| group.id != id);
-        let removed: HashSet<String> =
+        let group_conversations: HashSet<String> =
             disk.conversations.iter().filter(|conversation| conversation.group_id.as_deref() == Some(id)).map(|conversation| conversation.id.clone()).collect();
+        let mut removed = Vec::new();
         disk.conversations.retain(|conversation| {
-            !removed.contains(&conversation.id) && conversation.thread.as_ref().is_none_or(|link| !removed.contains(&link.parent_conversation_id))
+            let keep = !group_conversations.contains(&conversation.id)
+                && conversation.thread.as_ref().is_none_or(|link| !group_conversations.contains(&link.parent_conversation_id));
+            if !keep {
+                removed.push(conversation.id.clone());
+            }
+            keep
         });
-        Ok(())
+        Ok(removed)
     }
 
     /// Remove a bot from every group (for bot deletion). Groups keep their conversations; a group

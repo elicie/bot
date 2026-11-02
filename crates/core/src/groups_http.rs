@@ -36,7 +36,15 @@ async fn update_group(State(ctx): State<Ctx>, axum::extract::ConnectInfo(remote)
 
 async fn delete_group(State(ctx): State<Ctx>, axum::extract::ConnectInfo(remote): Remote, Path(id): Path<String>, JsonBody(_): JsonBody<Empty>) -> ApiResult {
     let store = ctx.store.clone();
-    ctx.queue.run(async move { store.mutate(|s| s.delete_group(&id)).await }).await?;
+    let removed = ctx.queue.run(async move { store.mutate(|s| s.delete_group(&id)).await }).await?;
+    // Attachment blobs and engine sessions of the removed conversations and their threads.
+    let data_dir = ctx.store.data_dir().to_path_buf();
+    let _ = tokio::task::spawn_blocking(move || {
+        for conversation_id in removed {
+            grok_bot_store::attachments::remove_conversation_files(&data_dir, &conversation_id);
+        }
+    })
+    .await;
     crate::chat_features::prune_generated_images(&ctx.store).await;
     Ok(state_reply(&ctx, StatusCode::OK, &remote))
 }
