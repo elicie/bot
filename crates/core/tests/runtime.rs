@@ -34,6 +34,9 @@ use custom_mcp::custom_mcp_servers;
 #[path = "runtime_bot_reports/mod.rs"]
 mod bot_reports;
 use bot_reports::{bot_report_cancellation, bot_report_failures, bot_reports};
+#[path = "runtime_workers/mod.rs"]
+mod workers;
+use workers::{worker_batches, worker_cancellation, worker_deadline};
 
 // ---------------------------------------------------------------------------------------------
 // Mock OpenAI-compatible provider (port of tests/mock-provider.ts and scriptedFileReply)
@@ -269,11 +272,12 @@ struct Options {
     startup: Duration,
     idle: Duration,
     cancel: Duration,
+    worker: Duration,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { startup: Duration::from_secs(30), idle: Duration::from_secs(30), cancel: Duration::from_millis(800) }
+        Self { startup: Duration::from_secs(30), idle: Duration::from_secs(30), cancel: Duration::from_millis(800), worker: Duration::from_secs(5 * 60) }
     }
 }
 
@@ -294,6 +298,7 @@ impl Fixture {
                 startup_timeout: options.startup,
                 prompt_idle_timeout: options.idle,
                 cancel_deadline: options.cancel,
+                worker_timeout: options.worker,
             },
         );
         runtime.initialize().await;
@@ -1318,6 +1323,9 @@ fn runtime_on_the_in_process_engine() {
         scenario!("bot-reports", Options::default(), bot_reports);
         scenario!("bot-report-failures", Options::default(), bot_report_failures);
         scenario!("bot-report-cancellation", Options::default(), bot_report_cancellation);
+        scenario!("workers", Options::default(), worker_batches);
+        scenario!("worker-cancellation", Options::default(), worker_cancellation);
+        scenario!("worker-deadline", Options { worker: Duration::from_millis(500), ..Options::default() }, worker_deadline);
         scenario!("bot-creation", Options::default(), bot_creation);
         scenario!("bot-data", Options::default(), bot_memory_and_knowledge);
         scenario!("permission-rules", Options::default(), permission_rules);

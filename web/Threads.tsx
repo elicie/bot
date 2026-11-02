@@ -4,7 +4,7 @@ import type { AppState, Bot, Conversation, Message } from '../shared/types';
 import { request } from './api';
 import { Composer, Transcript } from './Conversation';
 import { groupAsBot, roundPending, speakerLookup, type Run } from './Groups';
-import { activeRun } from './state';
+import { activeRun, runningConversation } from './state';
 import { Avatar, IconButton } from './ui';
 
 const threadFor = (data: AppState, messageId: string) => data.conversations.find(conversation => conversation.thread?.parentMessageId === messageId);
@@ -44,7 +44,7 @@ export function ThreadPanel({ data, threadId, busy, online, run, onSnapshot, onC
   const bot: Bot | undefined = group ? groupAsBot(group) : data.bots.find(item => item.id === thread?.botId);
   const speakerFor = group ? speakerLookup(data) : undefined;
   const author = parentMessage && (parentMessage.role === 'user' ? undefined : speakerFor?.(parentMessage) ?? bot);
-  const globalRun = data.conversations.find(conversation => activeRun(conversation.run.status));
+  const globalRun = runningConversation(data);
   const running = !!thread && (activeRun(thread.run.status) || roundPending(thread));
   const send = async () => {
     const text = draft.trim();

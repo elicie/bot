@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use grok_bot_model::{Clock, DeliveryStatus, HttpError, HttpResult, RoutineRun, RunStatus};
+use grok_bot_model::{Clock, DeliveryStatus, HttpError, HttpResult, ReportStatus, RoutineRun, RunStatus};
 use grok_bot_store::Store;
 use grok_bot_store::bot_messages::queued_reports;
 
@@ -59,6 +59,13 @@ enum Work {
     /// queued reports in one turn).
     Report {
         conversation_id: String,
+    },
+    Worker {
+        worker_id: String,
+        conversation_id: String,
+    },
+    WorkerReport {
+        batch_id: String,
     },
 }
 
@@ -198,6 +205,8 @@ impl RoutineScheduler {
             Work::Routine { conversation_id, prompt, .. } | Work::Delivery { conversation_id, prompt, .. } => self.runtime.start(conversation_id, prompt).await,
             Work::Group { conversation_id } => self.runtime.start_group_turn(conversation_id).await,
             Work::Report { conversation_id } => self.runtime.start_report(conversation_id).await,
+            Work::Worker { conversation_id, .. } => self.runtime.start_worker(conversation_id).await,
+            Work::WorkerReport { batch_id } => self.runtime.start_worker_report(batch_id).await,
         };
         if let Err(error) = started {
             self.store.read(|s| s.assert_writable())?;
@@ -224,6 +233,14 @@ impl RoutineScheduler {
                     let message =
                         if error.status == 500 { "The follow-up turn could not start. Check runtime and provider settings.".to_owned() } else { error.message };
                     self.store.mutate(|s| s.fail_bot_reports(&conversation_id, &message, now)).await?;
+                }
+                Work::Worker { worker_id, .. } => {
+                    let message = if error.status == 500 { "Worker could not start. Check runtime and provider settings.".to_owned() } else { error.message };
+                    self.store.mutate(|s| s.fail_worker(&worker_id, &message)).await?;
+                }
+                Work::WorkerReport { batch_id } => {
+                    let message = if error.status == 500 { "The grouped worker follow-up could not start.".to_owned() } else { error.message };
+                    self.store.mutate(|s| s.fail_worker_report(&batch_id, &message)).await?;
                 }
             }
         }
@@ -266,6 +283,29 @@ impl RoutineScheduler {
                     let oldest = queued_reports(&disk.bot_deliveries, &c.id).first()?.finished_at.clone().unwrap_or_default();
                     Some((parse(&oldest), position(&c.id), Work::Report { conversation_id: c.id.clone() }))
                 }))
+                .chain(disk.worker_batches.iter().filter(|batch| !batch.cancelled && batch.released_at.is_some()).flat_map(|batch| {
+                    batch.workers.iter().filter(|worker| worker.status == DeliveryStatus::Queued && worker.execution_run_id.is_none()).map(|worker| {
+                        (
+                            parse(&worker.created_at),
+                            position(&worker.conversation_id),
+                            Work::Worker { worker_id: worker.id.clone(), conversation_id: worker.conversation_id.clone() },
+                        )
+                    })
+                }))
+                .chain(
+                    disk.worker_batches
+                        .iter()
+                        .filter(|batch| {
+                            !batch.cancelled
+                                && batch.released_at.is_some()
+                                && batch.report.as_ref().is_some_and(|report| report.status == ReportStatus::Queued)
+                                && batch.workers.iter().all(|worker| grok_bot_store::workers::worker_terminal(worker.status))
+                        })
+                        .map(|batch| {
+                            let finished = batch.workers.iter().filter_map(|worker| worker.finished_at.as_deref()).map(parse).max().unwrap_or(i64::MAX);
+                            (finished, position(&batch.parent_conversation_id), Work::WorkerReport { batch_id: batch.id.clone() })
+                        }),
+                )
                 .collect();
             work.sort_by_key(|(created, position, _)| (*created, *position));
             work.into_iter().next().map(|(_, _, work)| work)

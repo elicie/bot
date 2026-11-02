@@ -44,6 +44,7 @@ import {
   isDirty,
   readRoute,
   queuedRoutineRun,
+  pendingWorkerBatch,
   reducer,
   runningConversation,
   selectedBot,
@@ -463,7 +464,7 @@ export function App() {
   const cancel = async () => {
     const before = current.current;
     const active = selectedConversation(before);
-    if (!active || (!activeRun(active.run.status) && !queuedRoutineRun(before.data, active))) return;
+    if (!active || (!activeRun(active.run.status) && !queuedRoutineRun(before.data, active) && !pendingWorkerBatch(before.data, active.id))) return;
     await command('cancel', async () => {
       const snapshot = await request<AppState>(
         `/api/conversations/${encodeURIComponent(active.id)}/cancel`,
@@ -763,7 +764,7 @@ export function App() {
               onSend={() => void send()}
               onFiles={() => toggleComputer(true)}
               onCancel={() => void cancel()}
-              running={!!queuedRun || (!!conversation && activeRun(conversation.run.status))}
+              running={!!queuedRun || (!!conversation && (activeRun(conversation.run.status) || !!pendingWorkerBatch(data, conversation.id)))}
               disabled={state.connection !== 'online' || !!globalRun || !!queuedRun}
               busy={busy}
               model={data.settings.model}

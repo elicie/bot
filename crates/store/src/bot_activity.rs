@@ -57,6 +57,9 @@ impl State {
 
     /// An assistant answer finished in this conversation: its bot becomes unread.
     pub fn mark_conversation_unread(&mut self, conversation_id: &str) -> HttpResult<()> {
+        if self.worker_for_conversation(conversation_id).is_some() {
+            return Ok(());
+        }
         let bot_id = self.conversation(conversation_id)?.bot_id.clone();
         self.set_bot_unread(&bot_id, true)
     }
@@ -74,6 +77,9 @@ impl State {
         let routine_ids: HashSet<&str> = disk.routines.iter().filter(|r| r.bot_id == id).map(|r| r.id.as_str()).collect();
         if disk.routine_runs.iter().any(|run| run.result.is_none() && (run.bot_id == id || routine_ids.contains(run.routine_id.as_str()))) {
             return Err(HttpError::conflict(QUEUED_ROUTINES));
+        }
+        if disk.worker_batches.iter().any(|batch| batch.bot_id == id && crate::workers::worker_batch_pending(batch)) {
+            return Err(HttpError::conflict("Wait for or cancel this bot’s pending workers and follow-up before deleting it."));
         }
         // Deliveries sent or received by the bot, then everything chained from them.
         let mut deliveries: HashSet<&str> = HashSet::new();
@@ -129,6 +135,7 @@ impl State {
         }
         candidate.routines.retain(|r| r.bot_id != id);
         candidate.routine_runs.retain(|run| run.bot_id != id && !conversations.contains(&run.conversation_id));
+        candidate.worker_batches.retain(|batch| batch.bot_id != id && !conversations.contains(&batch.parent_conversation_id));
         candidate.bot_deliveries.retain(|d| !deliveries.contains(&d.id));
         candidate.bot_exchanges.retain(|e| !exchanges.contains(&e.id) && !e.bot_ids.iter().any(|bot| bot == id));
         // Rules scoped to this bot would otherwise linger as "삭제된 Bot".

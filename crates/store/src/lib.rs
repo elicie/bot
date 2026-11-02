@@ -37,6 +37,7 @@ pub mod templates;
 pub mod validate;
 pub mod vault;
 pub mod webhooks;
+pub mod workers;
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -103,6 +104,7 @@ enum Job {
         routine_scheduling_error: Option<String>,
         /// The bytes contain bot report fields, which binaries without reports cannot load.
         reports: bool,
+        workers: bool,
         done: Option<oneshot::Sender<bool>>,
     },
     Flush(oneshot::Sender<()>),
@@ -110,6 +112,8 @@ enum Job {
 
 /// One-time copy of a `state.json` from before bot reports, kept next to it.
 pub const PRE_REPORTS_BACKUP: &str = "state.json.pre-bot-reports.bak";
+/// One-time rollback copy from before the first worker batch is persisted.
+pub const PRE_WORKERS_BACKUP: &str = "state.json.pre-workers.bak";
 
 fn uses_reports(disk: &DiskState) -> bool {
     disk.bot_deliveries.iter().any(|delivery| delivery.report.is_some())
@@ -121,18 +125,22 @@ fn uses_reports(disk: &DiskState) -> bool {
 /// lets the user go back to a binary without bot reports (`deny_unknown_fields` rejects the new
 /// fields). Failures are reported and do not block the write.
 fn backup_before_reports(path: &Path) {
-    let backup = path.with_file_name(PRE_REPORTS_BACKUP);
+    backup_before_extension(path, PRE_REPORTS_BACKUP, uses_reports);
+}
+
+fn backup_before_extension(path: &Path, name: &str, already_used: fn(&DiskState) -> bool) {
+    let backup = path.with_file_name(name);
     if std::fs::symlink_metadata(&backup).is_ok() {
         return;
     }
     let Ok(existing) = std::fs::read(path) else { return };
-    if serde_json::from_slice::<DiskState>(&existing).is_ok_and(|disk| uses_reports(&disk)) {
+    if serde_json::from_slice::<DiskState>(&existing).is_ok_and(|disk| already_used(&disk)) {
         return;
     }
     let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&backup) {
         Ok(file) => file,
         Err(error) => {
-            eprintln!("Could not keep a backup of state.json before bot reports: {error}");
+            eprintln!("Could not keep the {name} rollback backup: {error}");
             return;
         }
     };
@@ -143,7 +151,7 @@ fn backup_before_reports(path: &Path) {
     if let Err(error) = written {
         // Only the file created above is removed; a partial copy is not a backup.
         let _ = std::fs::remove_file(&backup);
-        eprintln!("Could not keep a backup of state.json before bot reports: {error}");
+        eprintln!("Could not keep the {name} rollback backup: {error}");
     }
 }
 
@@ -155,17 +163,24 @@ fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_err
         revision,
         settings,
         bots,
-        conversations,
+        mut conversations,
         mut routines,
         routine_runs,
         bot_exchanges,
         bot_deliveries,
+        worker_batches,
         permission_rules,
         groups,
         main_bot_id,
         ..
     } = disk;
     webhooks::strip_webhook_secrets(&mut routines);
+    let hidden: HashSet<&str> = worker_batches.iter().flat_map(|batch| batch.workers.iter().map(|worker| worker.conversation_id.as_str())).collect();
+    let inputs: HashSet<&str> = worker_batches.iter().filter_map(|batch| batch.report_input_id.as_deref()).collect();
+    conversations.retain(|conversation| !hidden.contains(conversation.id.as_str()));
+    for conversation in &mut conversations {
+        conversation.messages.retain(|message| !inputs.contains(message.id.as_str()));
+    }
     let mut state = AppState {
         revision,
         bots,
@@ -174,6 +189,7 @@ fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_err
         routine_runs,
         bot_exchanges,
         bot_deliveries,
+        worker_batches,
         permission_rules,
         groups,
         routine_scheduling_error: routine_scheduling_error.filter(|value| !value.is_empty()),
@@ -212,15 +228,20 @@ pub struct Store {
 
 fn writer_loop(shared: Arc<Shared>, path: PathBuf, jobs: mpsc::Receiver<Job>) {
     let mut backed_up = false;
+    let mut workers_backed_up = false;
     for job in jobs {
         match job {
             Job::Flush(done) => {
                 let _ = done.send(());
             }
-            Job::Write { bytes, runtime, routine_scheduling_error, reports, done } => {
+            Job::Write { bytes, runtime, routine_scheduling_error, reports, workers, done } => {
                 if reports && !backed_up {
                     backup_before_reports(&path);
                     backed_up = true;
+                }
+                if workers && !workers_backed_up {
+                    backup_before_extension(&path, PRE_WORKERS_BACKUP, |disk| !disk.worker_batches.is_empty());
+                    workers_backed_up = true;
                 }
                 let done = |ok: bool| {
                     if let Some(done) = done {
@@ -289,6 +310,7 @@ fn default_state(now: DateTime<Utc>) -> DiskState {
         routine_runs: Vec::new(),
         bot_exchanges: Vec::new(),
         bot_deliveries: Vec::new(),
+        worker_batches: Vec::new(),
         permission_rules: Vec::new(),
         groups: Vec::new(),
         secrets: Vec::new(),
@@ -485,6 +507,18 @@ struct Prospect<'a> {
     routine_runs: Vec<&'a RoutineRun>,
     bot_exchanges: Vec<&'a BotExchange>,
     bot_deliveries: Vec<&'a BotDelivery>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    worker_batches: Vec<&'a WorkerBatch>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    permission_rules: Vec<&'a PermissionRule>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    groups: Vec<&'a Group>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    secrets: Vec<&'a VaultSecret>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    mcp_servers: Vec<&'a McpServerRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    main_bot_id: Option<&'a str>,
 }
 
 fn truthy(value: &Option<String>) -> bool {
@@ -532,6 +566,12 @@ impl State {
             routine_runs: self.disk.routine_runs.iter().collect(),
             bot_exchanges: self.disk.bot_exchanges.iter().collect(),
             bot_deliveries: self.disk.bot_deliveries.iter().collect(),
+            worker_batches: self.disk.worker_batches.iter().collect(),
+            permission_rules: self.disk.permission_rules.iter().collect(),
+            groups: self.disk.groups.iter().collect(),
+            secrets: self.disk.secrets.iter().collect(),
+            mcp_servers: self.disk.mcp_servers.iter().collect(),
+            main_bot_id: self.disk.main_bot_id.as_deref(),
         }
     }
 
@@ -565,7 +605,33 @@ impl State {
             .filter(|delivery| matches!(delivery.status, DeliveryStatus::Queued | DeliveryStatus::Running))
             .map(|delivery| (if delivery.status == DeliveryStatus::Queued { json_bytes(&delivery.text) } else { 0 }) + MAX_BOT_REPLY_CHARACTERS * 12 + 8192)
             .sum();
-        if json_bytes(prospect).saturating_add(runs).saturating_add(deliveries) > MAX_STATE_BYTES {
+        if prospect.worker_batches.len() > workers::MAX_WORKER_BATCHES {
+            return Err(HttpError::conflict("Worker history is full. Existing history is retained."));
+        }
+        let workers: usize = prospect
+            .worker_batches
+            .iter()
+            .map(|batch| {
+                let tasks: usize = batch
+                    .workers
+                    .iter()
+                    .filter(|worker| !workers::worker_terminal(worker.status))
+                    .map(|worker| {
+                        (if worker.status == DeliveryStatus::Queued { json_bytes(&worker.task) + 4096 } else { 0 })
+                            + MAX_BOT_REPLY_CHARACTERS * 12
+                            + workers::MAX_WORKER_ANSWER_BYTES * 6
+                            + 8192
+                    })
+                    .sum();
+                let report = if !batch.cancelled && batch.report.as_ref().is_none_or(|report| !report.status.is_terminal()) {
+                    workers::MAX_WORKER_ANSWER_BYTES * batch.workers.len() * 12 + MAX_BOT_REPLY_CHARACTERS * 6 + 8192
+                } else {
+                    0
+                };
+                tasks.saturating_add(report)
+            })
+            .sum();
+        if json_bytes(prospect).saturating_add(runs).saturating_add(deliveries).saturating_add(workers) > MAX_STATE_BYTES {
             return Err(HttpError::too_large(
                 "Application state and reserved queued work would exceed the 64 MiB limit. Existing history and conversations are retained.",
             ));
@@ -577,7 +643,7 @@ impl State {
     /// for subscribers is rebuilt from these bytes on the writer thread, off the state lock.
     fn commit(&mut self) -> Job {
         let now = self.now();
-        let DiskState { routine_runs, conversations, bot_deliveries, bot_exchanges, .. } = &mut self.disk;
+        let DiskState { routine_runs, conversations, bot_deliveries, bot_exchanges, worker_batches, .. } = &mut self.disk;
         for routine_run in routine_runs.iter_mut() {
             if routine_run.result.is_some() {
                 continue;
@@ -601,6 +667,7 @@ impl State {
         }
         let routine_conversations: HashSet<&str> = routine_runs.iter().map(|run| run.conversation_id.as_str()).collect();
         reconcile_bot_deliveries(bot_deliveries, bot_exchanges, conversations, &routine_conversations, now);
+        workers::reconcile(worker_batches, conversations, now);
         self.disk.revision += 1;
         let bytes = serde_json::to_vec(&self.disk).unwrap_or_default();
         Job::Write {
@@ -608,6 +675,7 @@ impl State {
             runtime: self.runtime.clone(),
             routine_scheduling_error: self.routine_scheduling_error.clone(),
             reports: uses_reports(&self.disk),
+            workers: !self.disk.worker_batches.is_empty(),
             done: None,
         }
     }
@@ -707,6 +775,8 @@ impl State {
     pub fn is_reserved_conversation(&self, id: &str) -> bool {
         self.disk.bot_deliveries.iter().any(|delivery| delivery.recipient_conversation_id == id)
             || self.disk.routine_runs.iter().any(|run| run.conversation_id == id && run.result.is_none() && !truthy(&run.execution_run_id))
+            || self.worker_for_conversation(id).is_some()
+            || self.disk.worker_batches.iter().any(|batch| batch.parent_conversation_id == id && workers::worker_batch_pending(batch))
     }
 
     pub fn update_settings(&mut self, mut input: SettingsInput) -> HttpResult<()> {
@@ -1223,6 +1293,9 @@ impl State {
         let source = self.conversation(conversation_id)?;
         if source.group_id.is_some() {
             return Err(HttpError::conflict("Bot messages are unavailable in group conversations."));
+        }
+        if self.worker_for_conversation(conversation_id).is_some() {
+            return Err(HttpError::conflict("Workers cannot send bot messages."));
         }
         let message = source.messages.iter().rposition(|message| message.role == Role::Assistant);
         if source.run.id != execution_run_id

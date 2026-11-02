@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { reducer, emptyFiles, draftKey, readRoute, routeSearch, type UIState } from '../web/state.js';
+import { reducer, emptyFiles, draftKey, readRoute, routeSearch, runningConversation, pendingWorkerBatch, workerBatchPending, type UIState } from '../web/state.js';
 import type { AppState } from '../shared/types.js';
 
 function snapshot(revision: number, status: 'running' | 'completed'): AppState {
@@ -92,4 +92,29 @@ test('external document refresh updates clean editors and preserves unsaved edit
     assert.match(dirty.files.editor.error ?? '', /외부 작업/);
     assert.equal(dirty.files.editor.document.hash, 'old-hash');
   }
+});
+
+test('hidden worker queues keep the visible parent busy through one grouped report and Stop settlement', () => {
+  const data = snapshot(1, 'completed');
+  const parent = data.conversations[0];
+  const batch = {
+    id: randomUUID(), botId: parent.botId, parentConversationId: parent.id,
+    sourceMessageId: parent.messages[0].id, sourceRunId: parent.run.id,
+    createdAt: parent.updatedAt, cancelled: false,
+    workers: [{ id: randomUUID(), conversationId: randomUUID(), task: 'Review city data', status: 'queued' as const, createdAt: parent.updatedAt }],
+  };
+  data.workerBatches = [batch];
+  assert.equal(runningConversation(data), parent);
+  assert.equal(pendingWorkerBatch(data, parent.id), batch);
+  assert.equal(pendingWorkerBatch(data, 'other'), undefined);
+  const finished = { ...batch, workers: [{ ...batch.workers[0], status: 'completed' as const }], report: { status: 'queued' as const } };
+  assert.equal(workerBatchPending(finished), true);
+  assert.equal(workerBatchPending({ ...finished, report: { status: 'running' } }), true);
+  assert.equal(workerBatchPending({ ...finished, report: { status: 'completed' } }), false);
+  assert.equal(workerBatchPending({ ...batch, cancelled: true }), false);
+  assert.equal(workerBatchPending({ ...batch, cancelled: true, workers: [{ ...batch.workers[0], status: 'running' }] }), true);
+  data.workerBatches = [{ ...finished, report: { status: 'completed' } }];
+  assert.equal(runningConversation(data), undefined);
+  data.workerBatches = [];
+  assert.equal(runningConversation(data), undefined);
 });

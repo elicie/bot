@@ -77,6 +77,33 @@ export interface DeliveryReport {
   finishedAt?: string;
   error?: string;
 }
+/** App-owned, read-only same-Bot work. Child conversations are omitted from public state. */
+export interface WorkerTask {
+  id: string;
+  conversationId: string;
+  task: string;
+  createdAt: string;
+  status: BotDelivery['status'];
+  executionRunId?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  error?: string;
+  answer?: string;
+}
+export interface WorkerBatch {
+  id: string;
+  botId: string;
+  parentConversationId: string;
+  sourceMessageId: string;
+  sourceRunId: string;
+  createdAt: string;
+  releasedAt?: string;
+  cancelled: boolean;
+  workers: WorkerTask[];
+  report?: DeliveryReport;
+  reportInputId?: string;
+  reportMessageId?: string;
+}
 export interface PermissionOption { id: string; label: string; kind: string }
 export interface PendingPermission {
   id: string;
@@ -239,6 +266,7 @@ export interface AppState {
   routineRuns: RoutineRun[];
   botExchanges?: BotExchange[];
   botDeliveries?: BotDelivery[];
+  workerBatches?: WorkerBatch[];
   permissionRules?: PermissionRule[];
   groups?: Group[];
   routineSchedulingError?: string;

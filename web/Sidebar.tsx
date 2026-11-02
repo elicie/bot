@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Blocks, Eye, EyeOff, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pin, Plus, Repeat2, Search, Settings2, X } from 'lucide-react';
 import type { AppState, Bot } from '../shared/types';
-import { activeRun, conversationPreview, conversationsFor, mainBotId, type Selection } from './state';
+import { activeRun, conversationPreview, conversationsFor, mainBotId, pendingWorkerBatch, type Selection } from './state';
 import { Avatar, IconButton, Spinner } from './ui';
 import './workspace.css';
 
@@ -42,7 +42,7 @@ export function Sidebar({ data, selection, lastConversation, chat, search, open,
   const selectBot = (bot: Bot) => onSelect({ botId: bot.id, conversationId: selection.botId === bot.id ? selection.conversationId : Object.hasOwn(lastConversation, bot.id) ? lastConversation[bot.id] : conversationsFor(data, bot.id)[0]?.id ?? null });
   const row = (bot: Bot, tile: boolean) => {
     const latest = conversationsFor(data, bot.id)[0];
-    const running = data?.conversations.some(conversation => conversation.botId === bot.id && activeRun(conversation.run.status));
+    const running = data?.conversations.some(conversation => conversation.botId === bot.id && (activeRun(conversation.run.status) || !!pendingWorkerBatch(data, conversation.id)));
     const unread = !!bot.unread && !(chat && bot.id === selection.botId);
     const main = bot.id === mainId;
     const described = [main && `main-bot-${bot.id}`, unread && `unread-${bot.id}`].filter(Boolean).join(' ');

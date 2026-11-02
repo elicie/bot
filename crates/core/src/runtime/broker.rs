@@ -20,6 +20,7 @@ use super::{Run, Runtime, message_mut};
 pub(super) mod bot_data;
 pub(super) mod computer;
 pub(super) mod routines;
+mod workers;
 
 const MAX_REVIEWABLE_EDIT_BYTES: usize = 160 * 1024;
 const MAX_WRITE_CHARACTERS: usize = 1024 * 1024;
@@ -59,6 +60,7 @@ pub fn broker_tools() -> Value {
         list.splice(3..3, computer::tools());
         list.extend(bot_data::tools());
         list.extend(routines::tools());
+        list.push(workers::tool());
     }
     tools
 }
@@ -70,6 +72,7 @@ enum ToolCall {
     ListBots,
     SendMessage(BotMessageInput),
     CreateBot(BotInput),
+    SpawnWorker { task: String },
     BotData(bot_data::Call),
     Computer(computer::Call),
     Routine(routines::Call),
@@ -154,6 +157,7 @@ fn parse_call(params: &Value) -> BrokerResult<ToolCall> {
             }
             ToolCall::CreateBot(input)
         }
+        "spawn_worker" => ToolCall::SpawnWorker { task: required(strict(arguments, &["task"])?, "task")? },
         "list_files" => ToolCall::ListFiles { path: string(strict(arguments, &["path"])?, "path")?.unwrap_or_default() },
         "read_file" => ToolCall::ReadFile { path: required(strict(arguments, &["path"])?, "path")? },
         "write_file" => {
@@ -215,7 +219,15 @@ impl Runtime {
                 json!({"protocolVersion": version, "capabilities": {"tools": {"listChanged": false}}, "serverInfo": {"name": "grok-bot-workspace", "version": "1.0.0"}})
             }
             "ping" => json!({}),
-            "tools/list" => json!({"tools": broker_tools()}),
+            "tools/list" => {
+                let mut tools = broker_tools();
+                if run.worker_id.is_some()
+                    && let Some(tools) = tools.as_array_mut()
+                {
+                    tools.retain(|tool| tool["name"].as_str().is_some_and(|name| super::workers::READ_TOOLS.contains(&name)));
+                }
+                json!({"tools": tools})
+            }
             "tools/call" => {
                 // Tool calls of one run execute in order; finishing waits for the one in progress.
                 let _turn = run.broker.lock().await;
@@ -265,6 +277,9 @@ impl Runtime {
     async fn broker_call(&self, run: &Arc<Run>, params: &Value) -> BrokerResult<Value> {
         if run.inactive() {
             return Err(conflict_finished().into());
+        }
+        if run.worker_id.is_some() && !params.get("name").and_then(Value::as_str).is_some_and(|name| super::workers::READ_TOOLS.contains(&name)) {
+            return Err(HttpError::forbidden("Workers are read-only. This tool is unavailable in worker conversations.").into());
         }
         match parse_call(params)? {
             ToolCall::ListSkills { offset } => {
@@ -319,6 +334,7 @@ impl Runtime {
             }
             ToolCall::SendMessage(input) => self.send_bot_message(run, input).await,
             ToolCall::CreateBot(input) => self.create_bot(run, input).await,
+            ToolCall::SpawnWorker { task } => self.spawn_worker(run, task).await,
             ToolCall::BotData(call) => self.bot_data_call(run, call).await,
             ToolCall::Routine(call) => self.routine_call(run, call).await,
             ToolCall::Computer(call) => self.computer_call(run, call).await,
@@ -666,7 +682,8 @@ mod tests {
                 "list_routines",
                 "save_routine",
                 "set_routine_enabled",
-                "delete_routine"
+                "delete_routine",
+                "spawn_worker"
             ]
         );
         assert!(matches!(parse_call(&json!({"name": "computer_observe", "arguments": {}})), Ok(ToolCall::Computer(computer::Call::Observe))));

@@ -202,6 +202,7 @@ mod tests {
             secrets: Vec::new(),
             mcp_servers: Vec::new(),
             main_bot_id: None,
+            worker_batches: Vec::new(),
         }
     }
 

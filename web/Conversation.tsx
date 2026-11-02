@@ -23,11 +23,12 @@ import type {
   RoutineRun,
   ToolActivity,
 } from '../shared/types';
-import { activeRun, runLabels } from './state';
+import { activeRun, pendingWorkerBatch, runLabels } from './state';
 import { Avatar, ErrorNotice, IconButton } from './ui';
 import { BotMessageLinks, BotReportMarker } from './BotChat';
 import { RichMarkdown } from './RichMarkdown';
 import { TodoList } from './TodoList';
+import { WorkerProgress, WorkerReportMarker } from './Workers';
 import { AttachButton, AttachmentTray, DropOverlay, MessageAttachments, useFileDrop, type ComposerAttachments } from './Attachments';
 
 const toolLabels = {
@@ -281,6 +282,8 @@ export function Transcript({
     return () => observer.disconnect();
   }, []);
   const running = conversation && activeRun(conversation.run.status);
+  const workerPending = pendingWorkerBatch(data, conversation?.id);
+  const workerBatches = data?.workerBatches?.filter(batch => batch.parentConversationId === conversation?.id) ?? [];
   const status = conversation?.run.status;
   return (
     <div className="transcript-container">
@@ -332,7 +335,9 @@ export function Transcript({
                   {message === tail && message.role === 'assistant' && !!conversation?.run.todos?.length && (
                     <TodoList key={`${conversationId}-${conversation.run.id}`} todos={conversation.run.todos} running={!!running} />
                   )}
+                  <WorkerReportMarker messageId={message.id} data={data} />
                   <MessageView message={message} bot={speakerFor?.(message) ?? bot} conversationId={conversation?.id} named={!!speakerFor} />
+                  {workerBatches.filter(batch => batch.sourceMessageId === message.id).map(batch => <WorkerProgress key={batch.id} batch={batch} />)}
                   {data && onBotChat && <BotMessageLinks message={message} data={data} onOpen={onBotChat} onCancelReports={onCancelReports} cancelReportsDisabled={cancelReportsDisabled} />}
                   {onRoutines && <RoutineLinks message={message} onOpen={onRoutines} />}
                   {messageExtras?.(message)}
@@ -340,6 +345,9 @@ export function Transcript({
               )}
             </div>
           ))}
+          {workerPending && !running && (
+            <p className="run-indicator" role="status"><LoaderCircle size={14} className="spin" />하위 작업 결과를 기다리는 중</p>
+          )}
           {queuedRoutine && (
             <p className="run-indicator" role="status">
               <Clock3 size={14} />루틴 실행 대기 중
@@ -376,7 +384,7 @@ export function Transcript({
               작업을 중단했습니다.
             </p>
           )}
-          {status === 'completed' && (
+          {status === 'completed' && !workerPending && !workerBatches.some(batch => batch.sourceRunId === conversation?.run.id && batch.cancelled) && (
             <p className="terminal-note" role="status">
               <CheckCircle2 size={13} />
               작업 완료

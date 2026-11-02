@@ -11,6 +11,8 @@ mod bot_data;
 pub use bot_data::*;
 mod vault;
 pub use vault::*;
+mod workers;
+pub use workers::*;
 
 pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
@@ -664,6 +666,8 @@ pub struct DiskState {
     #[serde(default)]
     pub bot_deliveries: Vec<BotDelivery>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worker_batches: Vec<WorkerBatch>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permission_rules: Vec<PermissionRule>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<Group>,
@@ -690,6 +694,8 @@ pub struct AppState {
     pub routine_runs: Vec<RoutineRun>,
     pub bot_exchanges: Vec<BotExchange>,
     pub bot_deliveries: Vec<BotDelivery>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worker_batches: Vec<WorkerBatch>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permission_rules: Vec<PermissionRule>,
     /// Omitted when empty, like `state.json`.

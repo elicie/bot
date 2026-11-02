@@ -5,6 +5,7 @@ import type {
   FileDocument,
   FileListing,
   RunStatus,
+  WorkerBatch,
 } from '../shared/types';
 
 export type SettingsTab = 'general' | 'models' | 'files' | 'permissions' | 'vault' | 'usage' | 'updates';
@@ -66,8 +67,18 @@ export interface UIState {
 }
 export const activeRun = (status: RunStatus) =>
   status === 'starting' || status === 'running' || status === 'awaiting_permission';
-export const runningConversation = (data: AppState | null) =>
-  data?.conversations.find((conversation) => activeRun(conversation.run.status));
+/** Hidden workers retain the parent's busy/Stop affordance without exposing child sessions. */
+export const workerBatchPending = (batch: WorkerBatch) =>
+  batch.workers.some(worker => worker.status === 'running') || batch.report?.status === 'running' ||
+  (!batch.cancelled && (batch.workers.some(worker => worker.status === 'queued') || !batch.report || batch.report.status === 'queued'));
+export const pendingWorkerBatch = (data: AppState | null | undefined, conversationId: string | undefined) =>
+  data?.workerBatches?.find(batch => batch.parentConversationId === conversationId && workerBatchPending(batch));
+export const runningConversation = (data: AppState | null) => {
+  const active = data?.conversations.find(conversation => activeRun(conversation.run.status));
+  if (active) return active;
+  const batch = data?.workerBatches?.find(workerBatchPending);
+  return batch && data?.conversations.find(conversation => conversation.id === batch.parentConversationId);
+};
 export const queuedRoutineRun = (data: AppState | null, conversation: Conversation | undefined) =>
   conversation?.run.status === 'idle'
     ? data?.routineRuns.find((run) => run.conversationId === conversation.id && !run.result)

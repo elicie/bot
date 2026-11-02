@@ -45,6 +45,7 @@ impl Backend {
             startup_timeout: Duration::from_secs(30),
             prompt_idle_timeout: Duration::from_secs(30),
             cancel_deadline: Duration::from_millis(800),
+            worker_timeout: Duration::from_secs(5 * 60),
         });
         let runtime = Runtime::new(store.clone(), queue.clone(), runtime_options);
         let computer = crate::computer::ApplicationComputer::new(store.clone(), crate::computer::ComputerOptions::from_environment())?;

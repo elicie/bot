@@ -4,7 +4,7 @@ import type { AppState, AvatarShape, Bot, Conversation, Group, GroupInput, Messa
 import { request } from './api';
 import { botColors, History } from './Bots';
 import { Composer, Transcript } from './Conversation';
-import { activeRun, conversationPreview, type Surface } from './state';
+import { activeRun, conversationPreview, runningConversation, type Surface } from './state';
 import { ThreadLinks } from './Threads';
 import { Avatar, avatarShapes, ErrorNotice, IconButton, Modal } from './ui';
 import './groups.css';
@@ -168,7 +168,7 @@ export function GroupView({ data, surface, busy, online, run, onSnapshot, onRout
   if (!group) return <div className="main-empty"><button type="button" className="mobile-only icon-button group-empty-menu" aria-label="봇 목록 열기" onClick={onSidebar}><Menu size={19} /></button><Users size={28} /><h1>삭제된 그룹</h1><p>이 그룹을 찾을 수 없습니다. 사이드바에서 다른 Bot이나 그룹을 선택하세요.</p></div>;
   const bot = groupAsBot(group);
   const members = group.memberBotIds.map(id => data.bots.find(item => item.id === id)).filter((item): item is Bot => !!item);
-  const globalRun = data.conversations.find(item => activeRun(item.run.status));
+  const globalRun = runningConversation(data);
   const pending = roundPending(conversation);
   const running = !!conversation && (activeRun(conversation.run.status) || pending);
   const key = `group:${group.id}:${conversation?.id ?? 'new'}`;

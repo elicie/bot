@@ -81,6 +81,7 @@ pub(crate) fn schema_valid(disk: &mut DiskState) -> bool {
         && disk.bot_deliveries.iter_mut().all(delivery_valid)
         && crate::permissions::rules_valid(&disk.permission_rules)
         && crate::vault::schema_valid(disk)
+        && crate::workers::schema_valid(disk)
 }
 
 fn truthy(value: &Option<String>) -> bool {
@@ -146,6 +147,7 @@ pub(crate) fn references_valid(disk: &DiskState) -> Result<(), String> {
         || disk.conversations.iter().any(|conversation| !bot_ids.contains(conversation.bot_id.as_str()) && !crate::groups::is_group_conversation(conversation))
         || !crate::groups::references_valid(disk)
         || !crate::vault::references_valid(disk)
+        || !crate::workers::references_valid(disk)
         || disk.routines.iter().any(|routine| {
             !bot_ids.contains(routine.bot_id.as_str())
                 || (routine.enabled && !truthy(&routine.next_run_at))

@@ -315,6 +315,11 @@ impl State {
         issues.finish()?;
         self.assert_writable()?;
         let parent = self.conversation(conversation_id)?;
+        if self.worker_for_conversation(conversation_id).is_some()
+            || self.disk.worker_batches.iter().any(|batch| batch.report_input_id.as_deref() == Some(message_id))
+        {
+            return Err(HttpError::conflict("Worker conversations and report inputs are private execution state."));
+        }
         if parent.thread.is_some() {
             return Err(HttpError::bad_request("Threads cannot be nested. Reply in this thread instead."));
         }

@@ -10,7 +10,7 @@
 
 use std::sync::LazyLock;
 
-use grok_bot_model::{AppState, BotDelivery, BotExchange, Conversation, Routine, RoutineRun, RoutineSchedule};
+use grok_bot_model::{AppState, BotDelivery, BotExchange, Conversation, Routine, RoutineRun, RoutineSchedule, WorkerBatch};
 use regex::Regex;
 
 static IDENTIFIER: LazyLock<Regex> =
@@ -173,6 +173,35 @@ impl Redactor<'_> {
         }
     }
 
+    fn worker_batch(&self, batch: &mut WorkerBatch) {
+        for id in [&mut batch.id, &mut batch.bot_id, &mut batch.parent_conversation_id, &mut batch.source_message_id, &mut batch.source_run_id] {
+            self.id(id);
+        }
+        self.text(&mut batch.created_at);
+        self.optional(&mut batch.released_at);
+        self.optional_id(&mut batch.report_input_id);
+        self.optional_id(&mut batch.report_message_id);
+        for worker in &mut batch.workers {
+            self.id(&mut worker.id);
+            self.id(&mut worker.conversation_id);
+            self.text(&mut worker.task);
+            self.text(&mut worker.created_at);
+            self.optional_id(&mut worker.execution_run_id);
+            self.optional(&mut worker.started_at);
+            self.optional(&mut worker.finished_at);
+            self.optional(&mut worker.error);
+            self.optional(&mut worker.answer);
+            if let Some(answer) = &mut worker.answer {
+                *answer = crate::workers::bounded_answer(answer);
+            }
+        }
+        if let Some(report) = &mut batch.report {
+            self.optional_id(&mut report.run_id);
+            self.optional(&mut report.finished_at);
+            self.optional(&mut report.error);
+        }
+    }
+
     fn state(&self, state: &mut AppState) {
         for bot in &mut state.bots {
             self.id(&mut bot.id);
@@ -203,6 +232,7 @@ impl Redactor<'_> {
         state.routine_runs.iter_mut().for_each(|run| self.routine_run(run));
         state.bot_exchanges.iter_mut().for_each(|exchange| self.exchange(exchange));
         state.bot_deliveries.iter_mut().for_each(|delivery| self.delivery(delivery));
+        state.worker_batches.iter_mut().for_each(|batch| self.worker_batch(batch));
         for group in &mut state.groups {
             self.id(&mut group.id);
             self.text(&mut group.name);

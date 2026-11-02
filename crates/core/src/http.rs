@@ -507,12 +507,10 @@ async fn send_message(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(
 async fn cancel(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(id): Path<String>, JsonBody(_): JsonBody<Empty>) -> ApiResult {
     let store = ctx.store.clone();
     let queued_id = id.clone();
-    let cancelled_queued = ctx.queue.run(async move { store.mutate(|s| s.cancel_queued_work(&queued_id)).await }).await?;
-    if !cancelled_queued {
-        // Runtime cancellation waits for the run to settle; it is not held inside the command queue
-        // (the Node handler awaited `done` outside the queue as well).
-        ctx.runtime.cancel(&id).await?;
-    }
+    ctx.queue.run(async move { store.mutate(|s| s.cancel_queued_work(&queued_id)).await }).await?;
+    // Always cascade workers, even when the original parent turn already ended or queued work was
+    // cancelled above. Runtime cancellation waits outside the command queue.
+    ctx.runtime.cancel(&id).await?;
     Ok(state_reply(&ctx, StatusCode::OK, &remote))
 }
 

@@ -1,0 +1,32 @@
+.worker-progress { margin: 12px 0 18px 33px; min-width: 0; max-width: 640px; color: var(--secondary); font-size: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--elevated); }
+.worker-progress > details > summary { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 10px 12px; cursor: pointer; list-style: none; }
+.worker-progress summary::-webkit-details-marker { display: none; }
+.worker-progress > details > summary:hover { background: light-dark(#00000008, #ffffff08); }
+.worker-progress summary strong { color: var(--text); font-size: 13px; font-weight: 500; }
+.worker-count { margin-left: auto; font-size: 11px; white-space: nowrap; }
+.worker-chevron { transform: rotate(-90deg); }
+.worker-progress > details[open] > summary .worker-chevron { transform: none; }
+.worker-limits { margin: 0; padding: 0 12px 8px; font-size: 11px; line-height: 18px; }
+.worker-progress ol { list-style: none; margin: 0; padding: 0 8px 8px; }
+.worker-progress li { padding: 10px 4px; line-height: 19px; border-top: 1px solid var(--line); }
+.worker-task-heading { display: flex; align-items: flex-start; gap: 8px; }
+.worker-task-heading > svg { flex-shrink: 0; margin-top: 2px; }
+.worker-task { flex: 1; min-width: 0; color: var(--text); overflow-wrap: anywhere; white-space: pre-wrap; }
+.worker-task-heading > small { flex-shrink: 0; font-size: 11px; }
+.worker-task-detail > summary { cursor: pointer; list-style: none; }
+.worker-task-preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; white-space: normal; }
+.worker-task-disclosure { display: flex; align-items: center; gap: 5px; min-height: 32px; color: var(--secondary); }
+.worker-task-detail:not([open]) .worker-task-disclosure svg { transform: rotate(-90deg); }
+.worker-task-detail > p { margin: 0; max-height: 240px; overflow-y: auto; overflow-wrap: anywhere; white-space: pre-wrap; }
+.worker-running .worker-task-heading > svg { color: light-dark(#185d9f, #b7d9ff); }
+.worker-completed .worker-task-heading > svg { color: light-dark(#256444, #76b79a); }
+.worker-error, .worker-error .worker-task-heading > svg, .worker-interrupted .worker-task-heading > svg { color: var(--danger); }
+.worker-progress p.worker-error { margin: 6px 0 0 22px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.worker-result { margin: 4px 0 0 22px; }
+.worker-result summary { display: flex; align-items: center; gap: 5px; width: fit-content; min-height: 32px; cursor: pointer; list-style: none; }
+.worker-result:not([open]) summary svg { transform: rotate(-90deg); }
+.worker-result-limit { display: block; margin-bottom: 4px; font-size: 11px; }
+.worker-result p { margin: 0; max-height: 240px; overflow-y: auto; overflow-wrap: anywhere; white-space: pre-wrap; }
+.worker-progress .worker-report-status { margin: 0; padding: 0 12px 12px; line-height: 19px; }
+.worker-report-marker { gap: 6px; }
+@media (max-width: 760px) { .worker-progress { margin-left: 0; } }

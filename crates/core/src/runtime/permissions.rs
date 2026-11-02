@@ -38,6 +38,8 @@ impl Runtime {
     /// Permission rules never auto-approve their actions.
     pub(crate) fn rules_suspended(&self, run: &Run) -> bool {
         !run.report_deliveries.is_empty()
+            || run.worker_report.is_some()
+            || run.worker_id.is_some()
             || self.store.read(|state| {
                 state.disk().bot_deliveries.iter().any(|delivery| delivery.recipient_conversation_id == run.conversation_id)
                     || state.is_webhook_conversation(&run.conversation_id)
