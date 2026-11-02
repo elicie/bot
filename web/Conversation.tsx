@@ -27,6 +27,7 @@ import { activeRun, runLabels } from './state';
 import { Avatar, ErrorNotice, IconButton } from './ui';
 import { BotMessageLinks } from './BotChat';
 import { RichMarkdown } from './RichMarkdown';
+import { TodoList } from './TodoList';
 import { AttachButton, AttachmentTray, DropOverlay, MessageAttachments, useFileDrop, type ComposerAttachments } from './Attachments';
 
 const toolLabels = {
@@ -99,6 +100,8 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
   );
 }
 function MessageView({ message, bot, conversationId, named }: { message: Message; bot: Bot; conversationId?: string; named?: boolean }) {
+  // Successful native plan updates are represented once by the latest checklist, not tool history.
+  const tools = message.tools.filter(tool => tool.kind !== 'think' || tool.title !== 'Updating plan' || tool.status === 'failed');
   return (
     <article
       className={`message-row ${message.role}`}
@@ -119,14 +122,14 @@ function MessageView({ message, bot, conversationId, named }: { message: Message
             )}
           </div>
         )}
-        {message.tools.length > 0 && (
+        {tools.length > 0 && (
           <div className="tool-stack">
-            {message.tools.map((tool) => (
+            {tools.map((tool) => (
               <ToolCard key={tool.id} tool={tool} />
             ))}
           </div>
         )}
-        {(message.text || message.tools.length > 0 || !!message.attachments?.length) && (
+        {(message.text || tools.length > 0 || !!message.attachments?.length) && (
           <time className="message-time" dateTime={message.createdAt}>
             {formatTime(message.createdAt)}
           </time>
@@ -261,6 +264,7 @@ export function Transcript({
     tail?.tools,
     conversation?.run.status,
     conversation?.run.permission,
+    conversation?.run.todos,
   ]);
   useEffect(() => {
     if (!scrollRef.current || typeof ResizeObserver === 'undefined') return;
@@ -315,6 +319,9 @@ export function Transcript({
             <div key={message.id}>
               {dateKey(message.createdAt) !== dateKey(messages[index - 1]?.createdAt ?? '') && (
                 <div className="date-label">{dateKey(message.createdAt)}</div>
+              )}
+              {message === tail && message.role === 'assistant' && !!conversation?.run.todos?.length && (
+                <TodoList key={`${conversationId}-${conversation.run.id}`} todos={conversation.run.todos} running={!!running} />
               )}
               <MessageView message={message} bot={speakerFor?.(message) ?? bot} conversationId={conversation?.id} named={!!speakerFor} />
               {data && onBotChat && <BotMessageLinks message={message} data={data} onOpen={onBotChat} />}

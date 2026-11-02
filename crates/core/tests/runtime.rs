@@ -24,6 +24,9 @@ use serde_json::{Value, json};
 
 #[path = "runtime_bot_data/mod.rs"]
 mod bot_data;
+mod common;
+#[path = "runtime_todos/mod.rs"]
+mod todos;
 use bot_data::bot_memory_and_knowledge;
 #[path = "runtime_custom_mcp/mod.rs"]
 mod custom_mcp;
@@ -439,7 +442,7 @@ async fn file_approvals_and_sessions(f: &Fixture) {
     let inference = f.provider.inference();
     assert!(inference.len() >= 3);
     for request in &inference {
-        assert_eq!(tool_names(request), ["search_tool", "use_tool"]);
+        assert_eq!(tool_names(request), ["search_tool", "todo_write", "use_tool"]);
         assert_eq!(request["model"], "local-test-model");
     }
     assert!(tool_outcomes(&inference).iter().any(|t| t.contains("workspace__write_file")));
@@ -475,7 +478,7 @@ async fn file_approvals_and_sessions(f: &Fixture) {
     assert!(outcomes.contains("Symbolic links"), "{outcomes}");
     assert!(!outcomes.contains("outside stays unchanged"));
     for request in &after {
-        assert_eq!(tool_names(request), ["search_tool", "use_tool"]);
+        assert_eq!(tool_names(request), ["search_tool", "todo_write", "use_tool"]);
     }
 
     // Denial writes nothing.
@@ -1312,6 +1315,7 @@ fn runtime_on_the_in_process_engine() {
         scenario!("custom-mcp", Options::default(), custom_mcp_servers);
         scenario!("chat-routines", Options::default(), chat_routines);
         scenario!("restart", Options::default(), restart_continuation);
+        todos::checklist_updates(&base, &engine_root).await;
         startup_errors(&base, &engine_root).await;
     });
     let _ = std::fs::remove_dir_all(&base);

@@ -120,6 +120,46 @@ async fn mutations_commit_only_when_ok_and_dirty() {
 }
 
 #[tokio::test]
+async fn run_todos_survive_restart_including_interrupted_and_explicitly_empty_lists() {
+    let f = Fixture::new().await;
+    let conversation = f.store.mutate(|s| s.add_conversation(&f.bot)).await.unwrap();
+    assert!(f.disk_json()["conversations"][0]["run"].get("todos").is_none());
+    let todos = vec![
+        TodoItem { content: "Queued".into(), status: TodoStatus::Pending },
+        TodoItem { content: "Working".into(), status: TodoStatus::InProgress },
+        TodoItem { content: "Done".into(), status: TodoStatus::Completed },
+        TodoItem { content: "Skipped".into(), status: TodoStatus::Cancelled },
+    ];
+    f.set_run(&conversation.id, RunState { id: new_id(), status: RunStatus::Completed, todos: Some(todos.clone()), ..RunState::idle() }).await;
+    let restarted = f.reopen().await.unwrap();
+    assert_eq!(restarted.snapshot().conversations[0].run.todos.as_ref(), Some(&todos));
+    restarted
+        .mutate(|s| {
+            s.conversation_mut(&conversation.id)?.run.status = RunStatus::Running;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    drop(restarted);
+    let restarted = f.reopen().await.unwrap();
+    let snapshot = restarted.snapshot();
+    let run = &snapshot.conversations[0].run;
+    assert_eq!(run.status, RunStatus::Interrupted);
+    assert_eq!(run.todos.as_ref(), Some(&todos));
+    restarted
+        .mutate(|s| {
+            s.conversation_mut(&conversation.id)?.run.todos = Some(Vec::new());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    drop(restarted);
+    let restarted = f.reopen().await.unwrap();
+    assert_eq!(restarted.snapshot().conversations[0].run.todos, Some(Vec::new()));
+    assert_eq!(f.disk_json()["conversations"][0]["run"]["todos"], serde_json::json!([]));
+}
+
+#[tokio::test]
 async fn opening_rejects_symlinks_hard_links_and_corrupt_state_without_replacing_it() {
     let f = Fixture::new().await;
     let good = f.disk_text();
@@ -281,6 +321,7 @@ async fn snapshot_redaction_keeps_identifiers_enums_and_link_arrays() {
             c.run = RunState {
                 id: "run-a".into(),
                 status: RunStatus::AwaitingPermission,
+                todos: Some(vec![TodoItem { content: "a task".into(), status: TodoStatus::Cancelled }]),
                 permission: Some(PendingPermission {
                     id: "perm-a".into(),
                     title: "a".into(),
@@ -308,6 +349,8 @@ async fn snapshot_redaction_keeps_identifiers_enums_and_link_arrays() {
     assert_eq!(public.messages[0].tools[0].paths, Some(vec!["[redacted].txt".into()]));
     assert_eq!(public.run.id, "run-[redacted]");
     assert_eq!(public.run.status, RunStatus::AwaitingPermission);
+    assert_eq!(public.run.todos, Some(vec![TodoItem { content: "[redacted] t[redacted]sk".into(), status: TodoStatus::Cancelled }]));
+    assert_eq!(f.disk_json()["conversations"][0]["run"]["todos"][0], serde_json::json!({"content": "a task", "status": "cancelled"}));
     let permission = public.run.permission.as_ref().unwrap();
     assert_eq!((permission.kind.as_str(), permission.options[0].kind.as_str(), permission.options[0].id.as_str()), ("edit", "allow_once", "[redacted]llow"));
     let public_bot = state.bots.iter().find(|item| item.id == bot.id).unwrap();
