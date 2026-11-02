@@ -260,7 +260,7 @@ export function BotIntegrations({ bot, data, dispatch }: { bot: Bot; data: AppSt
       {secretActions.status && <p className="vault-status" role="status">{secretActions.status}</p>}
     </section>
     {editing === 'json' && <McpEditor bot={bot} onClose={() => setEditing(null)} onSaved={(state) => { snapshot(state); setEditing(null); setStatus('MCP 서버를 저장했어요. 새로 추가하거나 바꾼 서버는 꺼져 있어요.'); }} />}
-    {editing === 'form' && <McpServerForm bot={bot} data={data} canEdit={!!canEdit} running={running} onClose={() => setEditing(null)} onState={snapshot} onSaved={(state) => { snapshot(state); setEditing(null); setStatus('MCP 서버를 추가했어요. 목록에서 켜면 다음 대화부터 사용할 수 있어요.'); }} />}
+    {editing === 'form' && <McpServerForm bot={bot} data={data} canEdit={!!canEdit} running={running} onClose={() => setEditing(null)} onSaved={(state) => { snapshot(state); setEditing(null); setStatus('MCP 서버를 추가했어요. 목록에서 켜면 다음 대화부터 사용할 수 있어요.'); }} />}
     {secretActions.dialog === 'add' && <SecretForm data={data} botId={bot.id} onClose={() => secretActions.setDialog(null)} onSaved={secretActions.saved} />}
     {secretActions.dialog && typeof secretActions.dialog === 'object' && <SecretForm data={data} replace={secretActions.dialog.replace} onClose={() => secretActions.setDialog(null)} onSaved={secretActions.saved} />}
   </>;

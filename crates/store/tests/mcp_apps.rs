@@ -94,6 +94,68 @@ async fn old_state_omits_apps_and_new_resources_survive_restart_without_changing
 }
 
 #[tokio::test]
+async fn canvas_and_app_history_round_trip_together_and_redact_after_reopen() {
+    let f = Fixture::new().await;
+    let conversation = f.store.mutate(|s| s.add_conversation(&f.bot)).await.unwrap();
+    let secret = "SHARED_CANVAS_APP_SECRET_7391";
+    for revision in 0..2 {
+        f.store
+            .mutate(|s| {
+                s.save_canvas(
+                    &conversation.id,
+                    CanvasInput { revision, title: "Plan".into(), language: "markdown".into(), content: format!("Revision {revision}: {secret}") },
+                    CanvasSource::User,
+                )
+            })
+            .await
+            .unwrap();
+    }
+    let mut resource = app(&f.bot);
+    resource.html = format!("<p>{secret}</p>");
+    resource.input = json!({"query": secret}).to_string();
+    resource.output = secret.into();
+    append(&f, &conversation.id, message(resource.clone(), None)).await;
+    f.store.mutate(|s| s.add_secret(SecretInput { name: "SHARED_TOKEN".into(), value: secret.into(), bot_id: None }, true)).await.unwrap();
+    let stored = f.conversation(&conversation.id);
+    let check_public = |public: &AppState| {
+        let public = public.conversations.iter().find(|item| item.id == conversation.id).unwrap();
+        let canvas = public.canvas.as_ref().unwrap();
+        assert_eq!(canvas.content, "Revision 1: [redacted]");
+        assert_eq!(canvas.history[0].content, "Revision 0: [redacted]");
+        assert!(canvas.redacted && canvas.history[0].redacted);
+        let app = public.messages[0].tools[0].mcp_app.as_ref().unwrap();
+        assert_eq!(app.html, "<p>[redacted]</p>");
+        assert_eq!(app.input, r#"{"query":"[redacted]"}"#);
+        assert_eq!(app.output, "[redacted]");
+        assert_eq!((&app.bot_id, &app.server_id), (&resource.bot_id, &resource.server_id));
+        assert!(!serde_json::to_string(public).unwrap().contains(secret));
+    };
+    check_public(&f.store.snapshot());
+    let reopened = f.reopen().await.unwrap();
+    assert_eq!(reopened.read(|s| s.conversation(&conversation.id).unwrap().clone()), stored);
+    assert_eq!(stored.messages[0].tools[0].mcp_app.as_ref(), Some(&resource));
+    assert_eq!(stored.canvas.as_ref().unwrap().content, format!("Revision 1: {secret}"));
+    assert!(reopened.read(|s| s.disk().mcp_servers.is_empty()), "display history does not require a live server");
+    check_public(&reopened.snapshot());
+    drop(reopened);
+
+    // Neither side of the combined schema may be omitted by a merge resolution.
+    let valid = f.disk_json();
+    for invalid in ["app", "canvas"] {
+        let mut broken = valid.clone();
+        if invalid == "app" {
+            stored_app(&mut broken)["input"] = json!("[]");
+        } else {
+            broken["conversations"][0]["canvas"]["revision"] = json!(0);
+        }
+        let bytes = write_json(&f.state_file(), &broken);
+        assert_load_rejected(&f, &bytes).await;
+    }
+    write_json(&f.state_file(), &valid);
+    f.reopen().await.unwrap();
+}
+
+#[tokio::test]
 async fn disabling_editing_and_removing_servers_keeps_historical_html_loadable() {
     let f = Fixture::new().await;
     let configuration = r#"{"records":{"url":"https://example.com/mcp"}}"#;

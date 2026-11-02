@@ -438,6 +438,9 @@ impl Runtime {
         if self.closing.load(Ordering::SeqCst) {
             return Err(HttpError::unavailable("The server is shutting down."));
         }
+        if self.is_paused() {
+            return Err(HttpError::unavailable("The server is paused for update maintenance."));
+        }
         if !arguments.is_object() || arguments.to_string().len() > MAX_MCP_APP_INPUT_BYTES {
             return Err(HttpError::bad_request("MCP app arguments must be a JSON object of at most 32 KiB."));
         }
@@ -508,11 +511,19 @@ impl Runtime {
         if pending.created.elapsed() >= APPROVAL_TTL {
             return Err(stale());
         }
-        if self.closing.load(Ordering::SeqCst) {
-            return Err(HttpError::unavailable("The server is shutting down."));
-        }
         let (resolved, settings) = self.store.read(|state| -> HttpResult<_> {
             state.assert_idle()?;
+            // An approval may have passed HTTP middleware before maintenance latched. Check under
+            // the same store lock as pause_if_idle, including runs whose final write is settling.
+            if self.closing.load(Ordering::SeqCst) {
+                return Err(HttpError::unavailable("The server is shutting down."));
+            }
+            if self.is_paused() {
+                return Err(HttpError::unavailable("The server is paused for update maintenance."));
+            }
+            if !self.runs().is_empty() {
+                return Err(HttpError::conflict(super::RUN_BUSY));
+            }
             let (current, resolved) = bound_app(state, &pending.conversation, &pending.activity)?;
             if current != pending.app || resolved != pending.resolved {
                 return Err(stale());
@@ -698,6 +709,77 @@ mod tests {
         assert!(requests.pending.contains_key("other"));
         requests.clear();
         assert!(requests.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn app_admission_waits_for_runtime_settlement() {
+        let root = tempfile::tempdir().unwrap();
+        let store = grok_bot_store::Store::open(&root.path().join("data"), grok_bot_model::system_clock()).await.unwrap();
+        let runtime = Runtime::new(store.clone(), crate::queue::CommandQueue::new(), super::super::RuntimeOptions::new(root.path().join("engine")));
+        let (bot, settings, conversation) = store
+            .mutate(|state| {
+                let bot = state.disk().bots[0].clone();
+                let settings = state.settings().clone();
+                let conversation = state.add_conversation(&bot.id)?.id;
+                Ok((bot, settings, conversation))
+            })
+            .await
+            .unwrap();
+        // The durable status is idle, but a finishing run still owns engine settlement.
+        runtime.runs().push(Arc::new(Run {
+            conversation_id: conversation.clone(),
+            run_id: "settling-run".into(),
+            message_id: "settling-message".into(),
+            settings,
+            bot: bot.clone(),
+            token: String::new(),
+            fingerprint: String::new(),
+            history: Vec::new(),
+            attachments: Vec::new(),
+            speaker: None,
+            fresh_prompt: None,
+            loaded_prompt: None,
+            extra_rules: None,
+            report_deliveries: Vec::new(),
+            keys: Vec::new(),
+            mcp: RunMcp::default(),
+            flags: std::sync::Mutex::new(super::super::RunFlags { finishing: true, ..Default::default() }),
+            activity: tokio::sync::Notify::new(),
+            stop: tokio::sync::watch::Sender::new(false),
+            done: tokio::sync::watch::Sender::new(false),
+            broker: tokio::sync::Mutex::new(()),
+        }));
+        assert!(store.read(|state| state.active().is_none()));
+        assert_eq!(runtime.pause_if_idle().unwrap_err().status, 409);
+        let pending = Pending {
+            conversation,
+            activity: "activity".into(),
+            app: McpApp {
+                bot_id: bot.id,
+                server_id: "server".into(),
+                server_updated_at: "version".into(),
+                server: "apps".into(),
+                tool: "render".into(),
+                uri: "ui://fixture/app".into(),
+                html: "<p>app</p>".into(),
+                input: "{}".into(),
+                output: "text".into(),
+            },
+            name: "refresh".into(),
+            arguments: json!({}),
+            resolved: ResolvedMcpServer {
+                name: "apps".into(),
+                config: grok_bot_model::McpServerConfig::Http { url: "http://127.0.0.1/mcp".into(), headers: Vec::new() },
+            },
+            created: Instant::now(),
+        };
+        let error = runtime.execute_mcp_app_call(pending).await.unwrap_err();
+        assert_eq!((error.status, error.message.as_str()), (409, super::super::RUN_BUSY));
+        assert!(!runtime.mcp_app_busy.load(Ordering::SeqCst), "failed admission released its busy owner");
+        assert!(runtime.engine.current().await.is_none(), "settling admission started no engine");
+        runtime.runs().clear();
+        runtime.pause_if_idle().unwrap();
+        runtime.shutdown().await;
     }
 
     #[test]

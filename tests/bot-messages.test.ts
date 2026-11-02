@@ -10,6 +10,7 @@ import { botDeliverySchema, botExchangeSchema, MAX_BOT_MESSAGE_BYTES } from '../
 import { Store } from '../server/store.js';
 import type { AppState, Message } from '../shared/types.js';
 import { startMockProvider, type MockCompletion, type MockProviderRequest } from './mock-provider.js';
+import { stateSummary } from './state-summary.js';
 
 const use = (name: string, input: Record<string, unknown>): MockCompletion => ({
   tool: { name: 'use_tool', arguments: { tool_name: `workspace__${name}`, tool_input: input } },
@@ -40,7 +41,7 @@ async function fixture() {
   const wait = async (predicate: () => boolean) => {
     const deadline = Date.now() + 20000;
     while (!predicate()) {
-      assert.ok(Date.now() < deadline, `Timed out. ${JSON.stringify(backend.store.snapshot())}`);
+      if (Date.now() >= deadline) assert.fail(`Timed out. ${stateSummary(backend.store.snapshot())}`);
       await new Promise(resolve => setTimeout(resolve, 20));
     }
   };
@@ -68,10 +69,62 @@ async function fixture() {
     setPlan: (...completions: MockCompletion[]) => { plan = completions; },
     hold: () => { hold = new Promise(resolve => { release = resolve; }); },
     release: (text = 'Released.') => { release?.({ text }); hold = undefined; },
-    complete: (id = source.id) => wait(() => ['completed', 'cancelled', 'error'].includes(backend.store.conversation(id).run.status)),
+    complete: async (id = source.id) => {
+      await wait(() => ['completed', 'cancelled', 'error'].includes(backend.store.conversation(id).run.status));
+      // Terminal in-memory state precedes the final atomic write. Disk round-trip assertions
+      // must wait for that existing durable boundary, rather than winning a race with the writer.
+      await backend.store.flush();
+    },
     close: async () => { release?.({ text: 'Fixture closing.' }); await backend.close(); await provider.close(); await rm(root, { recursive: true, force: true }); },
   };
 }
+
+test('successful bot waits do not build snapshot diagnostics', async (context) => {
+  const f = await fixture();
+  const snapshot = context.mock.method(f.backend.store, 'snapshot');
+  try {
+    let polls = 0;
+    await f.wait(() => ++polls > 1);
+    assert.equal(polls, 2);
+    assert.equal(snapshot.mock.callCount(), 0);
+  } finally { snapshot.mock.restore(); await f.close(); }
+});
+
+test('recipient completion waits for pending durable writes before a state round trip', { timeout: 60000 }, async () => {
+  const f = await fixture();
+  let releaseWrite: (() => void) | undefined;
+  try {
+    await f.configure();
+    f.setPlan(discover, use('send_message', { toBotId: f.recipient.id, text: 'Pending durable reply.' }), { text: 'Queued.' });
+    await f.send(); await f.approve(); await f.complete();
+    const delivery = f.backend.store.botDeliveries[0];
+    const beforeRecipient = f.inference.length;
+    f.hold();
+    await f.backend.routines.tick();
+    await f.wait(() => f.inference.length > beforeRecipient);
+    await f.backend.store.flush();
+
+    // Hold the existing ordered writer tail, as a slow disk would, without delaying ACP text.
+    const writer = f.backend.store as unknown as { writeTail: Promise<void> };
+    const gate = new Promise<void>(resolve => { releaseWrite = resolve; });
+    writer.writeTail = Promise.all([writer.writeTail, gate]).then(() => undefined);
+    f.release('Recipient final answer.');
+    await f.wait(() => f.backend.store.conversation(delivery.recipientConversationId).run.status === 'completed');
+    assert.equal(f.backend.store.botExchanges[0].messages[1].text, 'Recipient final answer.');
+    const pendingDisk = JSON.parse(await readFile(join(f.dataDir, 'state.json'), 'utf8'));
+    assert.equal(pendingDisk.botExchanges[0].messages.length, 1);
+
+    let settled = false;
+    const complete = f.complete(delivery.recipientConversationId).then(() => { settled = true; });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(settled, false, 'terminal memory state alone must not settle a disk round trip');
+    releaseWrite!();
+    await complete;
+    const reopened = await Store.open(f.dataDir);
+    assert.deepEqual(reopened.botExchanges, f.backend.store.botExchanges);
+    assert.equal(reopened.botExchanges[0].messages[1].text, 'Recipient final answer.');
+  } finally { releaseWrite?.(); await f.close(); }
+});
 
 test('real source engine discovers authenticated bot tools, approves a durable idempotent delivery, and projects one recipient answer', { timeout: 60000 }, async () => {
   const f = await fixture();
@@ -140,8 +193,6 @@ test('real source engine discovers authenticated bot tools, approves a durable i
     for (const request of f.inference) assert.deepEqual(request.tools!.map(tool => tool.function.name).sort(), ['search_tool', 'todo_write', 'use_tool']);
     const fingerprint = createHash('sha256').update(JSON.stringify([f.backend.store.settings, f.sourceBot.instructions, 'broker-v2', '2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8'])).digest('hex');
     assert.notEqual(f.source.sessionFingerprint, fingerprint);
-    // Run completion is visible in memory before its queued atomic state write finishes.
-    await f.backend.store.flush();
     const reopened = await Store.open(f.dataDir);
     assert.deepEqual(reopened.botExchanges, f.backend.store.botExchanges);
     assert.deepEqual(reopened.botDeliveries, f.backend.store.botDeliveries);

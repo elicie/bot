@@ -2,7 +2,8 @@
 //! string has the API key and every vault secret value replaced by `[redacted]` except
 //! - `kind`, `status`, `role`, `color`, and `hash` fields,
 //! - identifier fields (`id`, `botId`, `routineId`, ...) whose value is a UUID or 64-hex digest,
-//! - the elements of bot exchange `botIds` and message `botExchangeIds` arrays.
+//! - the elements of bot exchange `botIds` and message `botExchangeIds` arrays,
+//! - app-generated canvas version timestamps (structural metadata, not editable text).
 //!
 //! Enum-typed fields outside that list (`shape`, `trigger`) are kept as-is: the Node replacer would
 //! rewrite them only if the key were a substring of the enum name, which a typed snapshot cannot
@@ -104,6 +105,18 @@ impl Redactor<'_> {
         self.id(&mut conversation.id);
         self.id(&mut conversation.bot_id);
         self.text(&mut conversation.title);
+        if let Some(canvas) = &mut conversation.canvas {
+            canvas.redacted |= crate::canvas::contains_secret(self.keys, &[&canvas.title, &canvas.language, &canvas.content]);
+            self.text(&mut canvas.title);
+            self.text(&mut canvas.language);
+            self.text(&mut canvas.content);
+            for version in &mut canvas.history {
+                version.redacted |= crate::canvas::version_has_secret(version, self.keys);
+                self.text(&mut version.title);
+                self.text(&mut version.language);
+                self.text(&mut version.content);
+            }
+        }
         for message in &mut conversation.messages {
             self.id(&mut message.id);
             self.text(&mut message.text);
@@ -225,6 +238,10 @@ impl Redactor<'_> {
             self.optional_id(&mut report.run_id);
             self.optional(&mut report.finished_at);
             self.optional(&mut report.error);
+        }
+        if let Some(termination) = delivery.chain_termination.as_mut() {
+            self.text(&mut termination.finished_at);
+            self.optional(&mut termination.error);
         }
     }
 

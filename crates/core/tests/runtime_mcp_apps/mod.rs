@@ -2,6 +2,7 @@
 //! then a separate explicitly approved session call with no model turn or workspace broker.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -21,6 +22,13 @@ struct Recorded {
     calls: Vec<Value>,
     reads: Vec<String>,
     slow_reads: bool,
+    call_gate: Option<Arc<CallGate>>,
+}
+
+#[derive(Default)]
+struct CallGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 
 async fn mcp(State(recorded): State<Arc<Mutex<Recorded>>>, Json(request): Json<Value>) -> Response {
@@ -47,7 +55,15 @@ async fn mcp(State(recorded): State<Arc<Mutex<Recorded>>>, Json(request): Json<V
             json!({"contents": [{"uri": URI, "mimeType": "text/html;profile=mcp-app", "text": format!("<!doctype html><h1>Counter app</h1><p>{SECRET}</p>")} ]})
         }
         "tools/call" => {
-            recorded.lock().unwrap().calls.push(request["params"].clone());
+            let gate = {
+                let mut recorded = recorded.lock().unwrap();
+                recorded.calls.push(request["params"].clone());
+                recorded.call_gate.clone()
+            };
+            if let Some(gate) = gate {
+                gate.entered.notify_one();
+                tokio::time::timeout(Duration::from_secs(10), gate.release.notified()).await.expect("release the isolated app call");
+            }
             json!({"content": [{"type": "text", "text": format!("counter: 1 {SECRET}")}], "structuredContent": {"mustNotBeSynthesized": true}, "_meta": {"privateResultMeta": true}})
         }
         _ => return Json(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "Method not found"}})).into_response(),
@@ -141,6 +157,8 @@ pub(super) async fn mcp_apps(f: &Fixture) {
     assert!(f.runtime.request_mcp_app_call(&id, &tool.id, "other__tool", json!({})).is_err());
     assert!(f.runtime.request_mcp_app_call(&id, &tool.id, "render", json!({"large": "한".repeat(12_000)})).is_err());
 
+    maintenance_admission(f, &recorded, &id, &tool.id).await;
+
     // Two slow resources used to stall the single event router past its five-second drain and
     // lose the final assistant text. Captures are concurrent tracked work, not router awaits.
     recorded.lock().unwrap().slow_reads = true;
@@ -184,4 +202,45 @@ pub(super) async fn mcp_apps(f: &Fixture) {
     assert!(f.runtime.decide_mcp_app_call(&id, &tool.id, &stale, true).await.is_err());
     assert_eq!(recorded.lock().unwrap().calls.len(), before_rejections);
     assert!(f.get(&id).messages.iter().flat_map(|message| &message.tools).any(|tool| tool.mcp_app.is_some()), "tightening preserves rendered history");
+}
+
+async fn maintenance_admission(f: &Fixture, recorded: &Arc<Mutex<Recorded>>, conversation: &str, activity: &str) {
+    let calls = recorded.lock().unwrap().calls.len();
+    let model_calls = f.provider.inference_len();
+    let late = f.runtime.request_mcp_app_call(conversation, activity, "refresh", json!({})).unwrap();
+    let before = f.store.snapshot();
+    f.runtime.pause_if_idle().unwrap();
+    assert_eq!(f.runtime.request_mcp_app_call(conversation, activity, "refresh", json!({})).unwrap_err().status, 503);
+    assert_eq!(f.runtime.decide_mcp_app_call(conversation, activity, &late, true).await.unwrap_err().status, 503);
+    assert_eq!(
+        f.runtime.decide_mcp_app_call(conversation, activity, &late, true).await.unwrap_err().status,
+        409,
+        "a paused approval is consumed, not replayed"
+    );
+    assert_eq!(recorded.lock().unwrap().calls.len(), calls, "late admission made no MCP call during maintenance");
+    assert_eq!(f.store.snapshot(), before, "paused app admission changed durable state");
+    f.runtime.resume().unwrap();
+
+    // An isolated app session leaves Conversation.run terminal. Its private busy owner must still
+    // block both direct maintenance preparation and a reply until the bounded session closes.
+    let gate = Arc::new(CallGate::default());
+    recorded.lock().unwrap().call_gate = Some(gate.clone());
+    let approved = f.runtime.request_mcp_app_call(conversation, activity, "refresh", json!({})).unwrap();
+    let (runtime, id, tool) = (f.runtime.clone(), conversation.to_owned(), activity.to_owned());
+    let running = tokio::spawn(async move { runtime.decide_mcp_app_call(&id, &tool, &approved, true).await });
+    tokio::time::timeout(Duration::from_secs(10), gate.entered.notified()).await.expect("isolated app call started");
+    assert!(f.get(conversation).run.status.is_terminal());
+    assert_eq!(f.runtime.pause_if_idle().unwrap_err().status, 409);
+    assert!(!f.runtime.is_paused(), "busy maintenance did not latch");
+    assert_eq!(f.runtime.start(conversation, "Must not overlap an MCP app session").await.unwrap_err().status, 409);
+    assert_eq!(f.store.snapshot(), before, "busy maintenance or turn admission changed durable state");
+    gate.release.notify_one();
+    let result = running.await.unwrap().unwrap();
+    recorded.lock().unwrap().call_gate = None;
+    assert_eq!(result["content"][0]["text"], "counter: 1 [redacted]");
+    assert_eq!(recorded.lock().unwrap().calls.len(), calls + 1);
+    assert_eq!(f.provider.inference_len(), model_calls, "maintenance checks and isolated app calls never prompt the model");
+    assert_eq!(f.store.snapshot(), before, "isolated app call replaced persisted conversation state");
+    f.runtime.pause_if_idle().unwrap();
+    f.runtime.resume().unwrap();
 }

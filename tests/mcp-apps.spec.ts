@@ -126,6 +126,36 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
   });
 }
 
+test('canvas and MCP app state coexist without changing each other', async ({ page }) => {
+  test.skip(baseline);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const subject = await setup(page);
+  try {
+    const conversation = (await snapshot(page)).conversations[0];
+    expect((await api(page, `/api/conversations/${conversation.id}/canvas`, { revision: 0, title: '앱 메모.md', language: 'markdown', content: '# 앱과 함께 쓰는 문서\n\n기존 내용' }, 'PUT')).status).toBe(200);
+    await page.getByRole('button', { name: '캔버스 열기', exact: true }).click();
+    const canvas = page.getByRole('complementary', { name: '대화 캔버스', exact: true });
+    await expect(canvas.getByRole('textbox', { name: '캔버스 내용', exact: true })).toHaveValue('# 앱과 함께 쓰는 문서\n\n기존 내용');
+    await canvas.getByRole('textbox', { name: '캔버스 내용', exact: true }).fill('# 앱과 함께 쓰는 문서\n\n수정한 내용');
+    await canvas.getByRole('button', { name: '캔버스 저장', exact: true }).click();
+    await expect(canvas.getByText(/버전 2 · 저장됨/)).toBeVisible();
+    const before = (await snapshot(page)).conversations.find(item => item.id === conversation.id)!;
+    const card = page.getByRole('figure', { name: 'MCP 카운터 · MCP 앱', exact: true });
+    const frame = card.locator('iframe').contentFrame();
+    await frame.getByRole('button', { name: '1 더하기', exact: true }).click();
+    await page.getByRole('region', { name: 'MCP 앱 도구 승인 요청', exact: true }).getByRole('button', { name: '한 번 실행', exact: true }).click();
+    await expect(frame.getByLabel('카운터 값')).toHaveText('1', { timeout: 30_000 });
+    const after = (await snapshot(page)).conversations.find(item => item.id === conversation.id)!;
+    expect(after.canvas).toEqual(before.canvas);
+    expect(after.run).toEqual(before.run);
+    await page.reload();
+    await expect(card.locator('iframe').contentFrame().getByRole('button', { name: '1 더하기', exact: true })).toBeEnabled();
+    if (!await canvas.isVisible()) await page.getByRole('button', { name: '캔버스 열기', exact: true }).click();
+    await expect(canvas.getByRole('textbox', { name: '캔버스 내용', exact: true })).toHaveValue('# 앱과 함께 쓰는 문서\n\n수정한 내용');
+    expect(subject.fixture.calls).toHaveLength(2);
+  } finally { await subject.stop(); }
+});
+
 test('a cancelled frame request cannot remain approvable', async ({ page }) => {
   test.skip(baseline);
   const subject = await setup(page);

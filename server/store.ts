@@ -3,11 +3,12 @@ import { open } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { z } from 'zod';
-import type { AppState, Bot, BotDelivery, BotExchange, Conversation, PublicSettings, Routine, RoutineInput, RoutineRun, RuntimeInfo, SettingsInput, Skill } from '../shared/types.js';
+import type { AppState, Bot, BotDelivery, BotExchange, Canvas, CanvasInput, Conversation, PublicSettings, Routine, RoutineInput, RoutineRun, RuntimeInfo, SettingsInput, Skill } from '../shared/types.js';
 import { atomicPrivateFile, canonicalDirectory, HttpError, isMissing, privateDirectory } from './files.js';
 import { MAX_SKILLS_PER_BOT, newSkill, nextSkill, skillSchema, skillPatchSchema, validateSkillSet, type SkillInput } from './skills.js';
 import { latestRoutineTime, nextRoutineTime, routineInputSchema, routineRunSchema, routineSchema } from './routines.js';
 import { botDeliverySchema, botExchangeSchema, botMessageInputSchema, existingBotDelivery, MAX_BOT_DELIVERIES, MAX_BOT_HOPS, MAX_BOT_MESSAGE_BYTES, MAX_BOT_REPLY_CHARACTERS, reconcileBotDeliveries, validBotMessageReferences, type BotMessageInput } from './bot-messages.js';
+import { canvasSchema, prepareCanvasRange, publicCanvas, readCanvas, replaceCanvasRange, restoreCanvas, saveCanvas, type CanvasRangeInput, type CanvasRangeProposal, type CanvasRead, type CanvasReadInput, type CanvasRestoreInput } from './canvas.js';
 
 /** New app inputs are encoded JSON, so redact decoded keys/strings before serializing again. */
 function publicAppInput(input: string, apiKey: string): string {
@@ -46,7 +47,11 @@ export const avatarShapeSchema = z.enum(['blob', 'cloud', 'square', 'spark', 'cl
 const botSchema = z.object({ id: z.string().uuid(), name: z.string(), color: z.string(), instructions: z.string(), shape: avatarShapeSchema.optional(), skills: z.array(skillSchema).max(MAX_SKILLS_PER_BOT).optional(), pinned: z.boolean().optional(), hidden: z.boolean().optional(), createdAt: z.string() }).strict();
 const conversationSchema = z.object({
   id: z.string().uuid(), botId: z.string().uuid(), title: z.string(), updatedAt: z.string(),
-  sessionId: z.string().optional(), sessionFingerprint: z.string().optional(),
+  sessionId: z.string().optional(), sessionFingerprint: z.string().optional(), canvas: canvasSchema.optional(),
+  groupId: z.string().uuid().optional(),
+  thread: z.object({ parentConversationId: z.string().uuid(), parentMessageId: z.string().uuid() }).strict().optional(),
+  groupRound: z.object({ id: z.string().uuid(), userMessageId: z.string().uuid(), pendingBotIds: z.array(z.string().uuid()), createdAt: z.string() }).strict().optional(),
+  memberSessions: z.array(z.object({ botId: z.string().uuid(), sessionId: z.string(), sessionFingerprint: z.string() }).strict()).optional(),
   messages: z.array(z.object({
     id: z.string().uuid(), role: z.enum(['user', 'assistant']), text: z.string(), createdAt: z.string(), tools: z.array(toolSchema),
     botExchangeIds: z.array(z.string().uuid()).max(1).optional(), sourceBotId: z.string().uuid().optional(),
@@ -170,14 +175,28 @@ export class Store {
 
   snapshot(): AppState {
     const { apiKey, ...settings } = this.disk.settings;
+    const canvasVersions = new Set<unknown>();
+    const recipients = new Set(this.botDeliveries.map(delivery => delivery.recipientConversationId));
+    const conversations = this.conversations.map(conversation => {
+      if (!conversation.canvas) return conversation;
+      const { canvas: privateCanvas, ...rest } = conversation;
+      if (recipients.has(conversation.id)) return rest;
+      const canvas = publicCanvas(privateCanvas, apiKey);
+      canvasVersions.add(canvas);
+      for (const version of canvas.history) canvasVersions.add(version);
+      return { ...rest, canvas };
+    });
     const state: AppState = {
-      revision: this.disk.revision, bots: this.bots, conversations: this.conversations, routines: this.routines, routineRuns: this.routineRuns, botExchanges: this.botExchanges, botDeliveries: this.botDeliveries,
+      revision: this.disk.revision, bots: this.bots, conversations, routines: this.routines, routineRuns: this.routineRuns, botExchanges: this.botExchanges, botDeliveries: this.botDeliveries,
       settings: { ...settings, hasApiKey: Boolean(apiKey) }, runtime: this.runtime,
       ...(this.routineSchedulingError ? { routineSchedulingError: this.routineSchedulingError } : {}),
     };
     const publicLinkArrays = new Set<unknown>([...this.botExchanges.map(exchange => exchange.botIds),
       ...this.conversations.flatMap(conversation => conversation.messages.flatMap(message => message.botExchangeIds ? [message.botExchangeIds] : []))]);
     return JSON.parse(JSON.stringify(state, function (this: unknown, field, value: unknown) {
+      // Canvas fields were projected from private text above. Do not redact the display
+      // again (a short key may itself occur in the literal "[redacted]").
+      if (canvasVersions.has(this)) return value;
       if (publicLinkArrays.has(this)) return value;
       if (field === 'mcpApp' && apiKey && value && typeof value === 'object' && 'input' in value && typeof value.input === 'string') {
         return { ...value, input: publicAppInput(value.input, apiKey) };
@@ -251,6 +270,55 @@ export class Store {
     const conversation = this.conversations.find(c => c.id === id);
     if (!conversation) throw new HttpError(404, 'Conversation does not exist.');
     return conversation;
+  }
+
+  private canvasConversation(id: string): Conversation {
+    const conversation = this.conversation(id);
+    if (this.botDeliveries.some(delivery => delivery.recipientConversationId === id)) {
+      throw new HttpError(403, 'Bot delivery conversations are chat-only. Canvas access is unavailable.');
+    }
+    return conversation;
+  }
+
+  readCanvas(id: string, input: CanvasReadInput = {}): CanvasRead | null {
+    return readCanvas(this.canvasConversation(id).canvas, this.settings.apiKey, input);
+  }
+
+  async updateCanvas(id: string, input: CanvasInput): Promise<Canvas> {
+    this.assertWritable();
+    const conversation = this.canvasConversation(id);
+    const now = this.now().toISOString();
+    return this.commitCanvas(conversation, saveCanvas(conversation.canvas, input, now, this.settings.apiKey), now);
+  }
+
+  async restoreCanvas(id: string, input: CanvasRestoreInput): Promise<Canvas> {
+    this.assertWritable();
+    const conversation = this.canvasConversation(id);
+    const now = this.now().toISOString();
+    return this.commitCanvas(conversation, restoreCanvas(conversation.canvas, input, now, this.settings.apiKey), now);
+  }
+
+  prepareCanvasRange(id: string, input: CanvasRangeInput): CanvasRangeProposal {
+    this.assertWritable();
+    return prepareCanvasRange(this.canvasConversation(id).canvas, input, this.settings.apiKey);
+  }
+
+  async replaceCanvasRange(id: string, proposal: CanvasRangeProposal): Promise<Canvas> {
+    this.assertWritable();
+    const conversation = this.canvasConversation(id);
+    const now = this.now().toISOString();
+    return this.commitCanvas(conversation, replaceCanvasRange(conversation.canvas, proposal, now, this.settings.apiKey), now);
+  }
+
+  private async commitCanvas(conversation: Conversation, canvas: Canvas, now: string): Promise<Canvas> {
+    if (canvas === conversation.canvas) return canvas;
+    const candidate = { ...conversation, canvas, updatedAt: now };
+    // The store has no rollback: validate the complete candidate before assigning it.
+    this.checkCapacity(this.routines, this.routineRuns, this.conversations.map(item => item.id === conversation.id ? candidate : item));
+    conversation.canvas = canvas;
+    conversation.updatedAt = now;
+    await this.changed();
+    return canvas;
   }
 
   bot(id: string): Bot {

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { request } from 'node:http';
 import { createBackend } from '../server/app.js';
+import { stateSummary } from './state-summary.js';
 import type { AppState, RoutineInput, RoutineRunResult } from '../shared/types.js';
 
 const fakeAgent = `#!/usr/bin/env node
@@ -57,7 +58,7 @@ async function fixture(options: { autoStart?: boolean; pollIntervalMs?: number }
   const wait = async (predicate: () => boolean, timeoutMs = 5000) => {
     const deadline = Date.now() + timeoutMs;
     while (!predicate()) {
-      assert.ok(Date.now() < deadline, JSON.stringify(backend.store.snapshot()));
+      if (Date.now() >= deadline) assert.fail(stateSummary(backend.store.snapshot()));
       await new Promise(resolve => setTimeout(resolve, 10));
     }
   };
@@ -67,6 +68,17 @@ async function fixture(options: { autoStart?: boolean; pollIntervalMs?: number }
     close: async () => { await backend.close(); await rm(root, { recursive: true, force: true }); },
   };
 }
+
+test('successful routine waits do not build snapshot diagnostics', async (context) => {
+  const f = await fixture();
+  const snapshot = context.mock.method(f.backend.store, 'snapshot');
+  try {
+    let polls = 0;
+    await f.wait(() => ++polls > 1);
+    assert.equal(polls, 2);
+    assert.equal(snapshot.mock.callCount(), 0);
+  } finally { snapshot.mock.restore(); await f.close(); }
+});
 
 test('routine HTTP routes implement typed CRUD, toggle, manual result, validation, and history retention', async () => {
   const f = await fixture();

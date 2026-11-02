@@ -1,11 +1,13 @@
 import type {
   AppState,
   Bot,
+  BotDelivery,
   Conversation,
   FileDocument,
   FileListing,
   RunStatus,
 } from '../shared/types';
+import { previewText } from './preview-text';
 
 export type SettingsTab = 'general' | 'models' | 'files' | 'permissions' | 'vault' | 'usage' | 'updates';
 export type Overlay =
@@ -68,14 +70,28 @@ export const activeRun = (status: RunStatus) =>
   status === 'starting' || status === 'running' || status === 'awaiting_permission';
 export const runningConversation = (data: AppState | null) =>
   data?.conversations.find((conversation) => activeRun(conversation.run.status));
+/** A waiting Bot chain can own descendants even when this conversation has no active engine turn. */
+export const pendingBotWork = (data: AppState | null, conversation: Conversation | undefined) =>
+  !!data?.runtime.botMessageChains && !!conversation && !!data.botDeliveries?.some(delivery =>
+    ((delivery.sourceConversationId === conversation.id || delivery.recipientConversationId === conversation.id)
+      && ['queued', 'running', 'waiting_children'].includes(delivery.status))
+    || (delivery.sourceConversationId === conversation.id && !!delivery.report
+      && ['queued', 'running'].includes(delivery.report.status)));
 export const queuedRoutineRun = (data: AppState | null, conversation: Conversation | undefined) =>
   conversation?.run.status === 'idle'
     ? data?.routineRuns.find((run) => run.conversationId === conversation.id && !run.result)
     : undefined;
+/** The bot message a conversation was opened to answer: set for a recipient's dedicated conversation. */
+export const recipientDelivery = (data: AppState | null | undefined, conversationId: string | null | undefined): BotDelivery | undefined =>
+  conversationId ? data?.botDeliveries?.find((delivery) => delivery.recipientConversationId === conversationId) : undefined;
 export const conversationsFor = (data: AppState | null, botId: string | null) =>
   (data?.conversations ?? [])
     .filter((conversation) => conversation.botId === botId && !conversation.thread)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+/** The bot's own conversations with the user, newest first: no recipient conversations opened by another bot's message.
+ *  Clicking a bot opens (and its sidebar row previews) the newest of these; the history list still shows every conversation. */
+export const ownConversationsFor = (data: AppState | null, botId: string | null) =>
+  conversationsFor(data, botId).filter((conversation) => !recipientDelivery(data, conversation.id));
 /** The main bot ("메인 Bot"): the chosen one, or the first bot when none is chosen (or the server has none). */
 export const mainBotId = (data: AppState | null | undefined): string | null =>
   (data?.mainBotId && data.bots.some((bot) => bot.id === data.mainBotId) ? data.mainBotId : data?.bots[0]?.id) ?? null;
@@ -165,7 +181,7 @@ function reconcile(
           (conversation) =>
             conversation.id === history[botId ?? ''] && conversation.botId === botId,
         )?.id ??
-        conversationsFor(data, botId)[0]?.id ??
+        ownConversationsFor(data, botId)[0]?.id ??
         null);
   return { botId, conversationId };
 }
@@ -410,5 +426,5 @@ export function conversationPreview(conversation: Conversation | undefined): str
   if (conversation.run.status === 'error') return conversation.run.error ?? '실행 오류';
   // Report inputs are app-written data for the bot, never shown as text.
   const message = [...conversation.messages].reverse().find((message) => !message.reportDeliveryIds && message.text.trim());
-  return message?.text.replace(/\s+/g, ' ') ?? '아직 메시지가 없습니다';
+  return message ? previewText(message.text, message.id) || '메시지' : '아직 메시지가 없습니다';
 }

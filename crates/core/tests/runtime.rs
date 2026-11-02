@@ -37,6 +37,12 @@ use mcp_apps::mcp_apps;
 #[path = "runtime_bot_reports/mod.rs"]
 mod bot_reports;
 use bot_reports::{bot_report_cancellation, bot_report_failures, bot_reports};
+#[path = "runtime_canvas/mod.rs"]
+mod canvas;
+use canvas::{canvas_edits, canvas_literal_data, canvas_redaction};
+#[path = "runtime_bot_chains/mod.rs"]
+mod bot_chains;
+use bot_chains::{expire_nested_bot_chains, four_hop_bot_reports, nested_bot_reports, nested_report_start_failure, stop_nested_bot_chains};
 
 // ---------------------------------------------------------------------------------------------
 // Mock OpenAI-compatible provider (port of tests/mock-provider.ts and scriptedFileReply)
@@ -718,6 +724,10 @@ async fn streamed_redaction(f: &Fixture) {
     }
 }
 
+// Keep the real-engine deadline test above ordinary CI scheduling latency. Approval holds below
+// still exceed this budget, so pause/resume assertions remain meaningful (production is unchanged).
+const TEST_INACTIVITY: Duration = Duration::from_secs(2);
+
 /// backend-runtime.test.ts: inactivity deadline, its pause during approvals, and cancellation.
 async fn deadlines_and_cancellation(f: &Fixture) {
     let id = f.conversation(&f.bot_id()).await;
@@ -739,7 +749,7 @@ async fn deadlines_and_cancellation(f: &Fixture) {
     f.provider.plan(vec![use_tool("write_file", json!({"path": "notes.txt", "content": "AI approved contents\n"})), text("Written.")]);
     f.runtime.start(&id, "write").await.unwrap();
     let pending = f.pending(&id).await;
-    tokio::time::sleep(Duration::from_millis(900)).await;
+    tokio::time::sleep(TEST_INACTIVITY + Duration::from_millis(500)).await;
     let still = f.get(&id);
     assert_eq!(still.run.status, RunStatus::AwaitingPermission);
     assert_eq!(still.run.permission.as_ref().map(|p| &p.id), pending.run.permission.as_ref().map(|p| &p.id));
@@ -752,7 +762,7 @@ async fn deadlines_and_cancellation(f: &Fixture) {
     f.provider.plan(vec![use_tool("write_file", json!({"path": "notes.txt", "content": "second\n"})), Reply::Hold]);
     f.runtime.start(&id, "write-hang").await.unwrap();
     f.pending(&id).await;
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    tokio::time::sleep(TEST_INACTIVITY + Duration::from_millis(500)).await;
     f.decide(&id, "allow_once").await;
     let failed = f.settled(&id).await;
     assert_eq!(failed.run.status, RunStatus::Error);
@@ -1071,6 +1081,8 @@ async fn bot_messages(f: &Fixture) {
         discover("workspace read_file write_file"),
         use_tool("read_file", json!({"path": "notes.txt"})),
         use_tool("write_file", json!({"path": "notes.txt", "content": "must not be saved"})),
+        use_tool("read_canvas", json!({})),
+        use_tool("replace_canvas_range", json!({"revision": 1, "oldText": "must not read", "replacement": "must not save"})),
         text("Recipient final answer."),
     ]);
     f.runtime.start(&delivery.recipient_conversation_id, &delivery.text).await.unwrap();
@@ -1310,17 +1322,25 @@ fn runtime_on_the_in_process_engine() {
         }
         scenario!("rules-reload", Options::default(), rules_survive_session_reloads);
         scenario!("files", Options::default(), file_approvals_and_sessions);
+        scenario!("canvas", Options::default(), canvas_edits);
+        scenario!("canvas-literal-data", Options::default(), canvas_literal_data);
+        scenario!("canvas-redaction", Options::default(), canvas_redaction);
         scenario!("scripted", Options::default(), scripted_file_reply_flow);
         scenario!("fingerprint", Options::default(), fingerprint_migration);
         scenario!("provider-failure", Options::default(), provider_failure);
         scenario!("redaction", Options::default(), streamed_redaction);
-        scenario!("deadlines", Options { idle: Duration::from_millis(400), ..Options::default() }, deadlines_and_cancellation);
+        scenario!("deadlines", Options { idle: TEST_INACTIVITY, ..Options::default() }, deadlines_and_cancellation);
         scenario!("limits", Options::default(), write_limits_and_model_only);
         scenario!("skills", Options::default(), skills);
         scenario!("bot-messages", Options::default(), bot_messages);
         scenario!("bot-reports", Options::default(), bot_reports);
         scenario!("bot-report-failures", Options::default(), bot_report_failures);
         scenario!("bot-report-cancellation", Options::default(), bot_report_cancellation);
+        scenario!("nested-bot-reports", Options::default(), nested_bot_reports);
+        scenario!("stop-nested-bot-chains", Options::default(), stop_nested_bot_chains);
+        scenario!("expire-nested-bot-chains", Options::default(), expire_nested_bot_chains);
+        scenario!("four-hop-bot-reports", Options::default(), four_hop_bot_reports);
+        scenario!("nested-report-start-failure", Options::default(), nested_report_start_failure);
         scenario!("bot-creation", Options::default(), bot_creation);
         scenario!("bot-data", Options::default(), bot_memory_and_knowledge);
         scenario!("permission-rules", Options::default(), permission_rules);

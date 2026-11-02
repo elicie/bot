@@ -5,6 +5,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Body;
+use axum::extract::ConnectInfo;
+use axum::http::{Request, StatusCode};
+use grok_bot_core::http::{HttpContext, default_allowed_hosts, router};
 use grok_bot_core::queue::CommandQueue;
 use grok_bot_core::scheduler::{RoutineScheduler, SchedulerOptions};
 use grok_bot_model::{
@@ -12,6 +16,7 @@ use grok_bot_model::{
 };
 use grok_bot_store::bot_messages::queued_reports;
 use serde_json::{Value, json};
+use tower::ServiceExt;
 
 use super::{Fixture, Reply, content_text, messages, text, tool_outcomes, use_tool, user_texts};
 
@@ -178,8 +183,30 @@ pub(super) async fn bot_reports(f: &Fixture) {
     dispatcher.close().await;
 }
 
+/// Exercise the real HTTP cancellation handler against the fixture's store/runtime and the exact
+/// same command queue as dispatch, without another server or scheduler timer influencing ordering.
+async fn cancel_selected_reports(f: &Fixture, dispatcher: &Arc<RoutineScheduler>, queue: &CommandQueue, ids: &[String], source: &str) -> Value {
+    let context =
+        Arc::new(HttpContext::new(Arc::clone(&f.store), Arc::clone(&f.runtime), Arc::clone(dispatcher), queue.clone(), default_allowed_hosts(&[]), None));
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/api/conversations/{source}/bot-reports/cancel"))
+        .header("Host", "127.0.0.1")
+        .header("Origin", "http://127.0.0.1")
+        .header("Content-Type", "application/json")
+        .header("X-Grok-Bot", "1")
+        .extension(ConnectInfo("127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap()))
+        .body(Body::from(json!({"deliveryIds": ids}).to_string()))
+        .unwrap();
+    let response = router(context).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
 /// Cancelling a queued report wins before dispatch in the shared command queue: no follow-up
 /// message, run, or provider request is created, including after reopening the store and runtime.
+/// The opposite ordering returns an empty actual result and leaves the running report alone.
 pub(super) async fn bot_report_cancellation(f: &Fixture) {
     f.configure("", false).await;
     let queue = CommandQueue::new();
@@ -194,11 +221,12 @@ pub(super) async fn bot_report_cancellation(f: &Fixture) {
     let before = f.get(&source);
     let requests = f.provider.inference_len();
 
+    let selected = vec![pending.id.clone()];
     let (cancelled, dispatched) = tokio::join!(biased;
-        queue.run(async { f.store.mutate(|s| s.cancel_bot_reports(&source)).await }),
+        cancel_selected_reports(f, &dispatcher, &queue, &selected, &source),
         dispatcher.tick(),
     );
-    cancelled.unwrap();
+    assert_eq!(cancelled["cancelledDeliveryIds"], json!(selected));
     dispatched.unwrap();
     dispatcher.tick().await.unwrap();
     assert_eq!(f.get(&source), before, "cancellation allocates no run or hidden report input");
@@ -207,6 +235,67 @@ pub(super) async fn bot_report_cancellation(f: &Fixture) {
     let report = delivery(f, &pending.id).report.unwrap();
     assert_eq!((report.status, report.run_id.as_deref(), report.error.as_deref()), (ReportStatus::Cancelled, None, None));
     assert!(report.finished_at.is_some());
+
+    // A is selected, then B's answer arrives before the cancellation command. The API must cancel
+    // only A, and the real scheduler/provider must subsequently execute B alone.
+    {
+        let source = f.conversation(&sender).await;
+        let first = send_from_user(f, &source, &recipient, "Selected A", true).await;
+        let later = send_from_user(f, &source, &recipient, "Later B", true).await;
+        deliver(f, &dispatcher, &first, text("ANSWER_A_NOT_TO_BE_REPORTED")).await;
+        let selected = vec![first.id.clone()];
+        deliver(f, &dispatcher, &later, text("ANSWER_B_MUST_STILL_BE_REPORTED")).await;
+        let before = f.get(&source);
+        let result = cancel_selected_reports(f, &dispatcher, &queue, &selected, &source).await;
+        assert_eq!(result["cancelledDeliveryIds"], json!(selected));
+        assert_eq!(f.get(&source), before, "cancelling A creates no run or hidden message");
+        assert_eq!(delivery(f, &first.id).report.unwrap().status, ReportStatus::Cancelled);
+        assert_eq!(delivery(f, &later.id).report.unwrap().status, ReportStatus::Queued);
+        f.provider.plan(vec![text("Relayed B only.")]);
+        dispatcher.tick().await.unwrap();
+        let completed = f.completed(&source).await;
+        let input = completed.messages.iter().find(|m| m.report_delivery_ids.is_some()).unwrap();
+        assert_eq!(input.report_delivery_ids.as_deref(), Some(std::slice::from_ref(&later.id)));
+        assert!(input.text.contains("ANSWER_B_MUST_STILL_BE_REPORTED") && !input.text.contains("ANSWER_A_NOT_TO_BE_REPORTED"));
+        assert_eq!(delivery(f, &later.id).report.unwrap().status, ReportStatus::Completed);
+        assert_eq!(delivery(f, &first.id).report.unwrap().run_id, None);
+    }
+
+    // Deterministically put dispatch first in the same queue. Hold the provider response so the
+    // actual HTTP response is observed while A is running; cancellation must not act as Stop.
+    {
+        let source = f.conversation(&sender).await;
+        let first = send_from_user(f, &source, &recipient, "Dispatch wins", true).await;
+        deliver(f, &dispatcher, &first, text("Already-started answer")).await;
+        let selected = vec![first.id.clone()];
+        let requests = f.provider.inference_len();
+        f.provider.plan(vec![Reply::Hold]);
+        let (dispatched, result) = tokio::join!(biased;
+            dispatcher.tick(),
+            cancel_selected_reports(f, &dispatcher, &queue, &selected, &source),
+        );
+        dispatched.unwrap();
+        assert_eq!(result["cancelledDeliveryIds"], json!([]));
+        let started = delivery(f, &first.id).report.unwrap();
+        assert_eq!(started.status, ReportStatus::Running);
+        assert_eq!(started.run_id.as_deref(), Some(f.get(&source).run.id.as_str()));
+        let returned = result["state"]["botDeliveries"].as_array().unwrap().iter().find(|d| d["id"] == first.id).unwrap();
+        assert_eq!(returned["report"]["status"], "running");
+        let running =
+            f.wait(&source, "the held report's provider request", |c| c.run.status == RunStatus::Running && f.provider.inference_len() > requests).await;
+        let repeated = cancel_selected_reports(f, &dispatcher, &queue, &selected, &source).await;
+        assert_eq!(repeated["cancelledDeliveryIds"], json!([]));
+        assert_eq!(f.get(&source).run.id, running.run.id);
+        assert_eq!(delivery(f, &first.id).report.as_ref(), Some(&started));
+        f.provider.release.notify_one();
+        let completed = f.completed(&source).await;
+        assert_eq!(completed.run.id, running.run.id, "the already-running report completes, not cancels");
+        assert_eq!(delivery(f, &first.id).report.unwrap().status, ReportStatus::Completed);
+        let requests = f.provider.inference_len();
+        dispatcher.tick().await.unwrap();
+        assert_eq!(f.provider.inference_len(), requests, "the completed report is never rerun");
+    }
+    let requests = f.provider.inference_len();
     dispatcher.close().await;
     f.runtime.shutdown().await;
 

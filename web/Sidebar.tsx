@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Blocks, Eye, EyeOff, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pin, Plus, Repeat2, Search, Settings2, X } from 'lucide-react';
 import type { AppState, Bot } from '../shared/types';
-import { activeRun, conversationPreview, conversationsFor, mainBotId, type Selection } from './state';
+import { activeRun, conversationPreview, ownConversationsFor, mainBotId, type Selection } from './state';
 import { Avatar, IconButton, Spinner } from './ui';
 import './workspace.css';
 
@@ -39,9 +39,9 @@ export function Sidebar({ data, selection, lastConversation, chat, search, open,
   const pinned = bots.filter(isPinned).sort((a, b) => Number(b.id === mainId) - Number(a.id === mainId));
   const normal = bots.filter(bot => !pinned.includes(bot));
   const closeSearch = () => { onSearch(''); setSearchOpen(false); aside.current?.querySelector<HTMLButtonElement>('button[aria-label="검색"]')?.focus(); };
-  const selectBot = (bot: Bot) => onSelect({ botId: bot.id, conversationId: selection.botId === bot.id ? selection.conversationId : Object.hasOwn(lastConversation, bot.id) ? lastConversation[bot.id] : conversationsFor(data, bot.id)[0]?.id ?? null });
+  const selectBot = (bot: Bot) => onSelect({ botId: bot.id, conversationId: selection.botId === bot.id ? selection.conversationId : Object.hasOwn(lastConversation, bot.id) ? lastConversation[bot.id] : ownConversationsFor(data, bot.id)[0]?.id ?? null });
   const row = (bot: Bot, tile: boolean) => {
-    const latest = conversationsFor(data, bot.id)[0];
+    const latest = ownConversationsFor(data, bot.id)[0];
     const running = data?.conversations.some(conversation => conversation.botId === bot.id && activeRun(conversation.run.status));
     const unread = !!bot.unread && !(chat && bot.id === selection.botId);
     const main = bot.id === mainId;
