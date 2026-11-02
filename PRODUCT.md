@@ -29,6 +29,7 @@ The confirmed initial user runs this repository on their local computer and open
 - Bind to loopback by default, support explicit trusted-network binding, and validate Host and Origin.
 - Use no Docker commands or automatic container provisioning.
 - Store provider credentials on the backend. Never return stored API keys to the browser.
+- Connect HTTPS MCP accounts through explicit local-browser OAuth/PKCE, with a separate encrypted OAuth sidecar and per-turn credential relay; real-account interoperability remains an explicit verification gate.
 
 ## Brand commitments
 
@@ -50,4 +51,4 @@ The user explicitly requests the same UI as Grok Bot. Follow the live 0.78.1 acc
 
 ## Open decisions
 
-The user granted Mac screen recording and the observed window states have been visually compared. Exact pixel equality remains unverified across fonts, independent avatars, local feature extensions, and unobserved states. Cloud computers, system-wide desktop control, encrypted credential vaults, cloud billing, recurring cloud automations, and hosted multi-user deployment remain separate capabilities. Managed Chrome requires a working host sandbox and fails closed when it cannot verify one.
+The user granted Mac screen recording and the observed window states have been visually compared. Exact pixel equality remains unverified across fonts, independent avatars, local feature extensions, and unobserved states. Cloud computers, system-wide desktop control, OS-keychain/unlock-password protection for all credentials, cloud billing, recurring cloud automations, and hosted multi-user deployment remain separate capabilities. OAuth-only local file encryption does not protect against a same-user process or theft of both ciphertext and its adjacent key. Managed Chrome requires a working host sandbox and fails closed when it cannot verify one.

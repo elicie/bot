@@ -47,6 +47,9 @@ impl Backend {
             cancel_deadline: Duration::from_millis(800),
         });
         let runtime = Runtime::new(store.clone(), queue.clone(), runtime_options);
+        // OAuth credentials are restored before any HTTP/SSE state is served. A failed encrypted
+        // vault never silently downgrades to plaintext or discards a saved account.
+        runtime.set_oauth(crate::mcp_oauth::service::OAuthService::open(store.clone()).await?);
         let computer = crate::computer::ApplicationComputer::new(store.clone(), crate::computer::ComputerOptions::from_environment())?;
         runtime.set_computer(Arc::new(computer));
         runtime.set_relay(crate::provider_relay::start(store.clone()).await?);
@@ -83,6 +86,9 @@ impl Backend {
             // then wait for their cleanup independently, including disconnected HTTP callers.
             // SSE stays open until run cancellation and the final state flush below complete.
             context.mcp_tests.stop();
+            if let Some(oauth) = runtime.oauth() {
+                oauth.shutdown().await;
+            }
             scheduler.close().await;
             queue.run(async {}).await;
             context.mcp_tests.wait().await;

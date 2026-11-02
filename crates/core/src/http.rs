@@ -280,6 +280,7 @@ pub fn router(ctx: Ctx) -> Router {
         .merge(crate::groups_http::routes())
         .merge(crate::computer_http::routes())
         .merge(crate::vault_http::routes())
+        .merge(crate::mcp_oauth_http::routes())
         .merge(crate::main_bot::routes())
         .fallback(|| async { (StatusCode::NOT_FOUND, Json(json!({ "error": "API endpoint does not exist." }))) });
     let mut app = Router::new()

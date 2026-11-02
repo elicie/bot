@@ -84,6 +84,18 @@ async function openVault(page: Page) {
 }
 
 type McpJson = { mcpServers: Record<string, { command?: string; args?: string[]; env?: Record<string, string>; url?: string; headers?: Record<string, string> }> };
+type OAuthUiStatus = { status: 'not_connected' | 'awaiting_login' | 'connected' | 'login_required' | 'error' | 'unavailable'; canLogin: boolean };
+
+async function setupOAuthUi(page: Page, url: string) {
+  await page.goto(url);
+  const botId = (await snapshot(page)).bots[0].id;
+  const path = `/api/bots/${botId}/mcp-servers`;
+  await vaultRequest(page, path, 'PUT', { json: JSON.stringify({ mcpServers: { remote: { url: 'https://example.invalid/mcp' } } }) });
+  await page.getByRole('button', { name: '봇 편집', exact: true }).first().click();
+  const row = details(page).getByRole('listitem', { name: 'MCP 서버 remote', exact: true });
+  await expect(row).toBeVisible();
+  return { path, row, authState: row.getByRole('status', { name: 'remote 인증 상태', exact: true }) };
+}
 
 /** Real Rust store requests, including setup and concurrent edits; only failure responses are routed. */
 async function vaultRequest<T>(page: Page, path: string, method = 'GET', body?: unknown, expectedStatus = 200): Promise<T> {
@@ -872,6 +884,229 @@ test('mobile light form: every action is reachable at 390x844, keyboard cancel a
     await app.stop();
     await fixture.close();
   }
+});
+
+test('OAuth UI: browser login uses an isolated popup, optional metadata stays explicit, and only confirmed status connects without enabling', async ({ page, context }) => {
+  const app = await startTestApp();
+  const authorizationUrl = 'https://oauth-ui.invalid/authorize?state=ui-only-marker';
+  let status: OAuthUiStatus = { status: 'not_connected', canLogin: true };
+  const logins: unknown[] = [];
+  let logouts = 0;
+  await context.route('https://oauth-ui.invalid/**', route => route.fulfill({ contentType: 'text/html', body: '<title>Mock OAuth</title><p>Mock login only</p>' }));
+  await page.route(/\/mcp-servers\/remote\/oauth(?:\/(?:login|logout))?$/, async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/login')) {
+      logins.push(route.request().postDataJSON()); status = { status: 'awaiting_login', canLogin: true };
+      await route.fulfill({ json: { authorizationUrl } });
+    } else if (path.endsWith('/logout')) {
+      expect(route.request().postDataJSON()).toEqual({}); logouts++;
+      status = { status: 'not_connected', canLogin: true };
+      await route.fulfill({ json: status });
+    } else await route.fulfill({ json: status });
+  });
+  try {
+    const { row, authState } = await setupOAuthUi(page, app.url);
+    const login = row.getByRole('button', { name: 'remote 로그인', exact: true });
+    await expect(authState).toHaveText('로그인 안 됨');
+    await login.click();
+    const dialog = page.getByRole('dialog', { name: 'remote 로그인', exact: true });
+    await expect(dialog.getByLabel('클라이언트 ID (선택)', { exact: true })).toBeFocused();
+    await expect(dialog.getByLabel('클라이언트 ID (선택)', { exact: true })).toHaveValue('');
+    await expect(dialog.getByLabel('리소스 식별자 (선택)', { exact: true })).toHaveValue('');
+    await expect(dialog.locator('input[type=password]')).toHaveCount(0);
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(login).toBeFocused();
+    expect(logins).toEqual([]);
+
+    await login.click();
+    const popupReady = page.context().waitForEvent('page');
+    await dialog.getByRole('button', { name: '브라우저에서 로그인', exact: true }).click();
+    const popup = await popupReady;
+    await popup.waitForURL(authorizationUrl);
+    expect(await popup.evaluate(() => window.opener === null)).toBe(true);
+    await expect(dialog).toBeHidden();
+    await expect(authState).toHaveText('로그인 대기 중');
+    await expect(row.getByRole('switch', { name: 'remote 사용', exact: true })).not.toBeChecked();
+    expect(logins).toEqual([{}]);
+    expect(await page.locator('body').innerText()).not.toContain('ui-only-marker');
+    expect(JSON.stringify(await snapshot(page))).not.toContain('ui-only-marker');
+    expect(await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } }))).not.toContain('ui-only-marker');
+    status = { status: 'connected', canLogin: true };
+    await expect(authState).toHaveText('연결됨');
+    await expect(row.getByRole('button', { name: 'remote 로그아웃', exact: true })).toBeEnabled();
+    await expect(row.getByRole('switch', { name: 'remote 사용', exact: true })).not.toBeChecked();
+    await popup.close();
+    await row.getByRole('button', { name: 'remote 로그아웃', exact: true }).click();
+    await expect(authState).toHaveText('로그인 안 됨');
+    expect(logouts).toBe(1);
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await login.click();
+    await dialog.getByLabel('클라이언트 ID (선택)', { exact: true }).fill('public-client-id');
+    await dialog.getByText('리소스 식별자가 필요한 경우', { exact: true }).click();
+    await expect(dialog.getByText(/Notion의/)).toContainText('https://mcp.notion.com');
+    await dialog.getByLabel('리소스 식별자 (선택)', { exact: true }).fill('https://mcp.notion.com');
+    await expectNoFormOverflow(page, dialog);
+    const explicitPopupReady = page.context().waitForEvent('page');
+    await dialog.getByRole('button', { name: '브라우저에서 로그인', exact: true }).click();
+    const explicitPopup = await explicitPopupReady;
+    await explicitPopup.waitForURL(authorizationUrl);
+    expect(logins[1]).toEqual({ clientId: 'public-client-id', resource: 'https://mcp.notion.com' });
+    expect(await explicitPopup.evaluate(() => window.opener === null)).toBe(true);
+    status = { status: 'connected', canLogin: true };
+    await expect(authState).toHaveText('연결됨');
+    await explicitPopup.close();
+  } finally { await app.stop(); }
+});
+
+test('OAuth UI: safe failures close unused popups, blocked popups do not start login, and unavailable or LAN access disables controls', async ({ page }) => {
+  const app = await startTestApp();
+  const unsafeDetail = 'https://oauth-ui.invalid/authorize?state=never-render-this-marker';
+  let status: OAuthUiStatus = { status: 'not_connected', canLogin: true };
+  let loginPosts = 0;
+  let statusGets = 0;
+  await page.route(/\/mcp-servers\/remote\/oauth(?:\/login)?$/, async route => {
+    if (route.request().method() === 'POST') {
+      loginPosts++;
+      await route.fulfill({ status: 409, json: { error: unsafeDetail } });
+    } else {
+      statusGets++;
+      await route.fulfill({ json: { ...status, message: unsafeDetail } });
+    }
+  });
+  try {
+    const { row, authState } = await setupOAuthUi(page, app.url);
+    await expect(authState).toHaveText('로그인 안 됨');
+    await row.getByRole('button', { name: 'remote 로그인', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'remote 로그인', exact: true });
+    const popupReady = page.context().waitForEvent('page');
+    await dialog.getByRole('button', { name: '브라우저에서 로그인', exact: true }).click();
+    const popup = await popupReady;
+    await expect.poll(() => popup.isClosed()).toBe(true);
+    await expect(dialog.getByRole('alert')).toContainText('실행 중인 작업을 마친 뒤 다시 시도');
+    expect(await page.locator('body').innerText()).not.toContain('never-render-this-marker');
+    expect(loginPosts).toBe(1);
+    await page.evaluate(() => { window.open = () => null; });
+    await dialog.getByRole('button', { name: '브라우저에서 로그인', exact: true }).click();
+    await expect(dialog.getByRole('alert')).toContainText('팝업을 허용한 뒤 다시 시도');
+    expect(loginPosts).toBe(1);
+    await page.keyboard.press('Escape');
+
+    status = { status: 'error', canLogin: true };
+    await row.getByRole('button', { name: 'remote 인증 상태 새로고침', exact: true }).click();
+    await expect(authState).toHaveText('인증 확인 실패');
+    await expect(row.getByRole('button', { name: 'remote 다시 로그인', exact: true })).toBeEnabled();
+    expect(await page.locator('body').innerText()).not.toContain('never-render-this-marker');
+    status = { status: 'unavailable', canLogin: false };
+    await row.getByRole('button', { name: 'remote 인증 상태 새로고침', exact: true }).click();
+    await expect(authState).toHaveText('로그인 지원 안 됨');
+    await expect(row.getByRole('button', { name: 'remote 로그인', exact: true })).toBeDisabled();
+
+    // The existing vault access policy is an independent gate; do not call even GET OAuth on LAN.
+    await page.route('**/api/vault', route => route.fulfill({ json: { canEdit: false } }));
+    const beforeReload = statusGets;
+    await page.reload();
+    await page.getByRole('button', { name: '봇 편집', exact: true }).first().click();
+    await expect(details(page).getByText(/localhost 연결이 아니에요/)).toBeVisible();
+    await expect(authState).toHaveText('로컬에서만 로그인');
+    await expect(row.getByRole('button', { name: 'remote 로그인', exact: true })).toBeDisabled();
+    expect(statusGets).toBe(beforeReload);
+    expect(loginPosts).toBe(1);
+  } finally { await app.stop(); }
+});
+
+test('OAuth UI: explicit login polling is bounded and login_required or unsupported status stops until user retry', async ({ page, context }) => {
+  const app = await startTestApp();
+  const authorizationUrl = 'https://oauth-ui.invalid/authorize';
+  let status: OAuthUiStatus = { status: 'not_connected', canLogin: true };
+  let statusGets = 0;
+  await context.route('https://oauth-ui.invalid/**', route => route.fulfill({ contentType: 'text/html', body: '<title>Mock OAuth</title>' }));
+  await page.route(/\/mcp-servers\/remote\/oauth(?:\/login)?$/, async route => {
+    if (route.request().method() === 'POST') {
+      status = { status: 'awaiting_login', canLogin: true };
+      await route.fulfill({ json: { authorizationUrl } });
+    } else { statusGets++; await route.fulfill({ json: status }); }
+  });
+  try {
+    const { row, authState } = await setupOAuthUi(page, app.url);
+    await expect(authState).toHaveText('로그인 안 됨');
+    await page.clock.install();
+    await row.getByRole('button', { name: 'remote 로그인', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'remote 로그인', exact: true });
+    const popupReady = page.context().waitForEvent('page');
+    await dialog.getByRole('button', { name: '브라우저에서 로그인', exact: true }).click();
+    const popup = await popupReady;
+    await popup.waitForURL(authorizationUrl);
+    await expect(authState).toHaveText('로그인 대기 중');
+    await page.clock.fastForward(95_000);
+    await expect(authState).toHaveText('로그인 확인 시간 초과');
+    await expect(row.getByRole('button', { name: 'remote 다시 로그인', exact: true })).toBeEnabled();
+    const afterTimeout = statusGets;
+    await page.clock.fastForward(180_000);
+    expect(statusGets).toBe(afterTimeout);
+    status = { status: 'login_required', canLogin: true };
+    await row.getByRole('button', { name: 'remote 인증 상태 새로고침', exact: true }).click();
+    await expect(authState).toHaveText('로그인 필요');
+    await expect(row.getByRole('button', { name: 'remote 다시 로그인', exact: true })).toBeEnabled();
+    status = { status: 'awaiting_login', canLogin: false };
+    await row.getByRole('button', { name: 'remote 인증 상태 새로고침', exact: true }).click();
+    await expect(authState).toHaveText('로그인 대기 중');
+    await expect(row.getByRole('button', { name: 'remote 로그인', exact: true })).toBeDisabled();
+    const afterUnsupported = statusGets;
+    await page.clock.fastForward(180_000);
+    expect(statusGets).toBe(afterUnsupported);
+    await popup.close();
+  } finally { await app.stop(); }
+});
+
+test('OAuth UI: config identity changes discard late status and login responses and close unused blank windows', async ({ page, context }) => {
+  const app = await startTestApp();
+  let holdStatus = false;
+  let releaseStatus = () => {};
+  let releaseLogin = () => {};
+  let statusStarted = () => {};
+  let loginStarted = () => {};
+  const statusReady = new Promise<void>(resolve => { statusStarted = resolve; });
+  const loginReady = new Promise<void>(resolve => { loginStarted = resolve; });
+  const statusGate = new Promise<void>(resolve => { releaseStatus = resolve; });
+  const loginGate = new Promise<void>(resolve => { releaseLogin = resolve; });
+  let providerVisits = 0;
+  await context.route('https://oauth-ui.invalid/**', route => { providerVisits++; return route.fulfill({ contentType: 'text/html', body: '<title>Stale mock OAuth</title>' }); });
+  await page.route(/\/mcp-servers\/remote\/oauth(?:\/login)?$/, async route => {
+    if (route.request().method() === 'POST') {
+      loginStarted(); await loginGate;
+      await route.fulfill({ json: { authorizationUrl: 'https://oauth-ui.invalid/stale-login' } }).catch(() => {});
+    } else if (holdStatus) {
+      holdStatus = false; statusStarted(); await statusGate;
+      await route.fulfill({ json: { status: 'connected', canLogin: true } }).catch(() => {});
+    } else await route.fulfill({ json: { status: 'not_connected', canLogin: true } });
+  });
+  try {
+    const { path, row, authState } = await setupOAuthUi(page, app.url);
+    await expect(authState).toHaveText('로그인 안 됨');
+    holdStatus = true;
+    await row.getByRole('button', { name: 'remote 인증 상태 새로고침', exact: true }).click();
+    await statusReady;
+    await vaultRequest(page, path, 'PUT', { json: JSON.stringify({ mcpServers: { remote: { url: 'https://changed.invalid/mcp' } } }) });
+    await expect(authState).toHaveText('로그인 안 됨');
+    releaseStatus();
+    await expect(row.getByRole('button', { name: 'remote 로그인', exact: true })).toBeEnabled();
+    await expect(row.getByRole('button', { name: 'remote 로그아웃', exact: true })).toHaveCount(0);
+
+    await row.getByRole('button', { name: 'remote 로그인', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'remote 로그인', exact: true });
+    const popupReady = page.context().waitForEvent('page');
+    await dialog.getByRole('button', { name: '브라우저에서 로그인', exact: true }).click();
+    const popup = await popupReady;
+    await loginReady;
+    await vaultRequest(page, path, 'PUT', { json: JSON.stringify({ mcpServers: { remote: { url: 'https://changed-again.invalid/mcp' } } }) });
+    await expect(dialog).toBeHidden();
+    await expect.poll(() => popup.isClosed()).toBe(true);
+    releaseLogin();
+    await expect(authState).toHaveText('로그인 안 됨');
+    expect(providerVisits).toBe(0);
+  } finally { releaseStatus(); releaseLogin(); await app.stop(); }
 });
 
 test('a LAN client sees secret names and server summaries read-only and cannot change them', async ({ browser }, info) => {

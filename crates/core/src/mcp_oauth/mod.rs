@@ -1,9 +1,10 @@
-//! Strict, storage-independent discovery for a future remote MCP OAuth client.
+//! Remote MCP OAuth: strict discovery, encrypted credential lifecycle, and frozen transport leases.
 //!
-//! This module is deliberately not wired into MCP configuration, login, or token storage. The
-//! argument to [`discover`] is the exact resource identifier, not a transport URL from which an
-//! origin should be inferred. Only well-known discovery is implemented; `WWW-Authenticate`
-//! challenges, signed metadata, registration, and browser/PKCE flows are outside this module.
+//! The argument to [`discover`] is the exact resource identifier, not a transport URL from which
+//! an origin should be inferred. The discovery function is credential-free; [`OAuthService`]
+//! owns public-client registration, PKCE/loopback login and encrypted token storage. The runtime
+//! exposes only local per-turn leases to the engine. `WWW-Authenticate` challenge discovery and
+//! signed metadata remain outside the supported initial profile.
 //!
 //! Resource and issuer identities use exact decoded JSON string equality, without URL
 //! normalization (RFC 9728 §3.3/§6 and RFC 8414 §3.3/§4). Candidate fallback is allowed only for
@@ -22,6 +23,11 @@ use url::{Host, Url};
 use crate::computer::network::is_global_ip;
 
 mod fetch;
+mod flow;
+pub(crate) mod relay;
+pub mod service;
+mod vault;
+pub use service::{LoginInput, LoginResponse, OAuthService, OAuthStatus};
 #[cfg(test)]
 mod tests;
 
