@@ -56,7 +56,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
+          # ~/.npm persists on the self-hosted runner; uploading it to the Actions cache only costs time.
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
       - run: npm ci
       - run: npm run build
 
@@ -127,7 +128,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
+          # ~/.npm persists on the self-hosted runner; uploading it to the Actions cache only costs time.
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
       - name: Install ripgrep (bundled into the engine build)
         if: runner.environment == 'github-hosted'
         run: sudo apt-get update && sudo apt-get install -y ripgrep
