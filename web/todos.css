@@ -1,0 +1,18 @@
+.todo-list { margin: 0 0 18px 33px; min-width: 0; max-width: 640px; color: var(--secondary); font-size: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--elevated); }
+.todo-list summary { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 10px 12px; cursor: pointer; list-style: none; }
+.todo-list summary::-webkit-details-marker { display: none; }
+.todo-list summary:hover { background: light-dark(#00000008, #ffffff08); }
+.todo-list summary strong { color: var(--text); font-size: 13px; font-weight: 500; }
+.todo-count { margin-left: auto; font-size: 11px; white-space: nowrap; }
+.todo-chevron { transform: rotate(-90deg); }
+.todo-list details[open] .todo-chevron { transform: none; }
+.todo-list ul { display: grid; gap: 4px; list-style: none; margin: 0; padding: 0 8px 8px; }
+.todo-list li { display: flex; align-items: flex-start; gap: 8px; padding: 8px; line-height: 19px; border-radius: 6px; }
+.todo-list li > svg { margin-top: 2px; }
+.todo-content { flex: 1; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.todo-list li > small { font-size: 11px; white-space: nowrap; }
+.todo-list .todo-in_progress { color: light-dark(#185d9f, #b7d9ff); background: #1084fe18; }
+.todo-list .todo-in_progress .todo-content { font-weight: 500; }
+.todo-completed > svg { color: light-dark(#256444, #76b79a); }
+.todo-cancelled > svg { color: var(--danger); }
+@media (max-width: 760px) { .todo-list { margin-left: 0; } }

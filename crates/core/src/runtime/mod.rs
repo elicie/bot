@@ -16,6 +16,7 @@ mod custom_mcp;
 mod engine;
 mod permissions;
 pub mod text;
+mod todos;
 mod turns;
 
 use std::collections::{HashMap, VecDeque};
@@ -29,7 +30,7 @@ use grok_bot_engine::host::{ENGINE_SOURCE_REVISION, ENGINE_VERSION};
 use grok_bot_files::{atomic_private_file, private_directory};
 use grok_bot_model::{
     Bot, DeliveryReport, DeliveryStatus, HttpError, HttpResult, Message, PendingPermission, PermissionOption, PrivateSettings, ReportStatus, Role, RunState,
-    RunStatus, RuntimeInfo, Skill, ToolActivity, ToolStatus, iso, new_id,
+    RunStatus, RuntimeInfo, Skill, TodoItem, TodoStatus, ToolActivity, ToolStatus, iso, new_id,
 };
 use grok_bot_store::attachments::PreparedAttachment;
 use grok_bot_store::memory::bot_context_fingerprint;
@@ -111,6 +112,7 @@ struct RunFlags {
     skills: Vec<Skill>,
     text_suffix: String,
     tool_ids: HashMap<String, String>,
+    todos: todos::TodoTracker,
     idle_since: Option<Instant>,
     /// Epoch of the managed browser this run acted on; cancellation stops only that epoch.
     computer_epoch: Option<String>,
@@ -637,11 +639,11 @@ impl Runtime {
             // definition and is applied on every create, load, and harness rebuild.
             "yoloMode": false, "autoMode": false,
             "agentProfile": {
-                "name": "grok-bot-scoped", "description": "Workspace broker only", "promptMode": "extend",
+                "name": "grok-bot-scoped", "description": "Workspace broker and checklist", "promptMode": "extend",
                 "promptBody": self.rules(run)?,
                 "injectDefaultTools": false, "agentsMd": false,
-                "toolConfig": {"tools": [{"id": "GrokBuild:search_tool"}, {"id": "GrokBuild:use_tool"}]},
-                "tools": ["search_tool", "use_tool"], "disallowedTools": DENIED_BUILTIN_TOOLS,
+                "toolConfig": {"tools": [{"id": "GrokBuild:search_tool"}, {"id": "GrokBuild:use_tool"}, {"id": "GrokBuild:todo_write"}]},
+                "tools": ["search_tool", "use_tool", "todo_write"], "disallowedTools": DENIED_BUILTIN_TOOLS,
                 "discoverSkills": false, "inheritSkills": false, "permissionMode": "default",
             },
         });
@@ -912,7 +914,7 @@ impl Runtime {
         self.settled.notify_one();
     }
 
-    /// Port of `project()`: stream text and tool activity into the run's assistant message.
+    /// Port of `project()`: stream text/tool activity and replace the run's latest checklist.
     pub(crate) async fn project(&self, notification: acp::SessionNotification) {
         let Some(run) = self.run_for_session(&notification.session_id.0) else {
             return;
@@ -928,7 +930,53 @@ impl Runtime {
             return;
         };
         let kind = update["sessionUpdate"].as_str().unwrap_or_default().to_owned();
-        let result = if kind == "agent_message_chunk" && update["content"]["type"] == "text" {
+        let result = if let acp::SessionUpdate::Plan(plan) = notification.update {
+            // Native successes carry IDs, unlike the full-session Plans emitted after them.
+            if run.flags().todos.native {
+                return;
+            }
+            // In pinned 2bdd1d6 only durable Plans carry eventId. The transient turn-end cleanup
+            // falsely marks in_progress entries completed for display; never persist that cosmetic state.
+            if notification.meta.as_ref().and_then(|meta| meta.get("eventId")).and_then(Value::as_str).is_none() {
+                return;
+            }
+            // ACP-only agents retain the complete durable Plan fallback until a native success.
+            // Raw tool inputs may be partial or rejected, so never project their values directly.
+            let todos = plan
+                .entries
+                .into_iter()
+                .map(|entry| {
+                    let cancelled = entry.meta.as_ref().and_then(|meta| meta.get("cancelled")).and_then(Value::as_bool).unwrap_or(false);
+                    TodoItem {
+                        content: run.redact(&entry.content),
+                        status: if cancelled {
+                            TodoStatus::Cancelled
+                        } else {
+                            match entry.status {
+                                acp::PlanEntryStatus::InProgress => TodoStatus::InProgress,
+                                acp::PlanEntryStatus::Completed => TodoStatus::Completed,
+                                _ => TodoStatus::Pending,
+                            }
+                        },
+                    }
+                })
+                .collect::<Vec<_>>();
+            let projected = Arc::clone(&run);
+            self.store
+                .mutate(move |state| {
+                    let flags = projected.flags();
+                    if !flags.accepting_updates || flags.stopped || flags.finishing || flags.todos.native {
+                        return Ok(());
+                    }
+                    let conversation = state.conversation(&projected.conversation_id)?;
+                    if conversation.run.id != projected.run_id || conversation.run.todos.as_ref() == Some(&todos) {
+                        return Ok(());
+                    }
+                    state.conversation_mut(&projected.conversation_id)?.run.todos = Some(todos);
+                    touch(state, &projected)
+                })
+                .await
+        } else if kind == "agent_message_chunk" && update["content"]["type"] == "text" {
             let chunk = update["content"]["text"].as_str().unwrap_or_default().to_owned();
             self.persist(&run, move |state, run| {
                 let mut flags = run.flags();
@@ -946,9 +994,24 @@ impl Runtime {
                 if !flags.accepting_updates || flags.stopped || flags.finishing {
                     return Ok(());
                 }
+                let todos = flags.todos.project(&update).map(|todos| {
+                    todos
+                        .into_iter()
+                        .map(|mut todo| {
+                            todo.content = run.redact(&todo.content);
+                            todo
+                        })
+                        .collect::<Vec<_>>()
+                });
                 let call_id = update["toolCallId"].as_str().unwrap_or_default().to_owned();
                 let public_id = flags.tool_ids.entry(call_id).or_insert_with(new_id).clone();
                 drop(flags);
+                if let Some(todos) = todos {
+                    let conversation = state.conversation_mut(&run.conversation_id)?;
+                    if conversation.run.id == run.run_id && conversation.run.todos.as_ref() != Some(&todos) {
+                        conversation.run.todos = Some(todos);
+                    }
+                }
                 let message = message_mut(state, run)?;
                 let index = match message.tools.iter().position(|tool| tool.id == public_id) {
                     Some(index) => index,

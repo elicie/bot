@@ -87,6 +87,8 @@ export interface PendingPermission {
   paths: string[];
   localOnly?: boolean;
 }
+export type TodoStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled';
+export interface TodoItem { content: string; status: TodoStatus }
 export interface RunState {
   id: string;
   status: RunStatus;
@@ -94,6 +96,8 @@ export interface RunState {
   permission?: PendingPermission;
   startedAt?: string;
   finishedAt?: string;
+  /** Latest complete engine plan for this turn; absent until the first update. */
+  todos?: TodoItem[];
 }
 export interface Conversation {
   id: string;

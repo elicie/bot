@@ -5,7 +5,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as acp from '@agentclientprotocol/sdk';
 import { z } from 'zod';
-import type { Bot, Conversation, Message, PendingPermission, ToolActivity } from '../shared/types.js';
+import { TodoTracker } from './todos.js';
+import type { Bot, Conversation, Message, PendingPermission, TodoItem, ToolActivity } from '../shared/types.js';
 import { atomicPrivateFile, HttpError, privateDirectory, WorkspaceFiles } from './files.js';
 import { Store, type PrivateSettings } from './store.js';
 import { ENGINE_COMMAND, ENGINE_SOURCE_REVISION, probeEngine } from './engine.js';
@@ -45,6 +46,7 @@ type Run = {
   createdSkills: Map<string, string>;
   textSuffix: string;
   toolIds: Map<string, string>;
+  todoTracker: TodoTracker;
   idleTimer?: NodeJS.Timeout;
   rejectIdle?: (error: Error) => void;
   done: Promise<void>;
@@ -230,11 +232,11 @@ skills = false
     if (conversation.messages.length === 2) conversation.title = prompt.replace(/\s+/g, ' ').slice(0, 70);
     conversation.updatedAt = now;
     conversation.run = { id: randomUUID(), status: 'starting', startedAt: now };
-    const fingerprint = createHash('sha256').update(JSON.stringify([settings, bot.instructions, skillFingerprint(bot.skills ?? []), 'broker-v6', ENGINE_SOURCE_REVISION])).digest('hex');
+    const fingerprint = createHash('sha256').update(JSON.stringify([settings, bot.instructions, skillFingerprint(bot.skills ?? []), 'broker-v7-todos', ENGINE_SOURCE_REVISION])).digest('hex');
     if (delivery) delivery.executionRunId = conversation.run.id;
     const run: Run = {
       conversation, message, settings, bot, fingerprint, history, token: randomBytes(32).toString('hex'),
-      stopped: false, finishing: false, acceptingUpdates: false, approvals: [], createdSkills: new Map(), textSuffix: '', toolIds: new Map(), done: Promise.resolve(), brokerTail: Promise.resolve(),
+      stopped: false, finishing: false, acceptingUpdates: false, approvals: [], createdSkills: new Map(), textSuffix: '', toolIds: new Map(), todoTracker: new TodoTracker(), done: Promise.resolve(), brokerTail: Promise.resolve(),
     };
     this.runs.set(conversationId, run);
     try { await this.store.changed(); }
@@ -314,7 +316,20 @@ skills = false
     const update = notification.update;
     if (update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text') {
       this.appendText(run, update.content.text);
+    } else if (update.sessionUpdate === 'plan') {
+      // Pinned engine durable plans carry eventId. Its untagged turn-end cleanup only
+      // paints unfinished items as complete; never persist that cosmetic notification.
+      if (run.todoTracker.native || typeof notification._meta?.eventId !== 'string') return;
+      const todos: TodoItem[] = update.entries.map(entry => ({
+        content: this.redact(run, entry.content),
+        status: entry._meta?.cancelled === true ? 'cancelled' : entry.status,
+      }));
+      // ACP plans are complete snapshots, including the engine's merge semantics.
+      if (JSON.stringify(run.conversation.run.todos) === JSON.stringify(todos)) return;
+      run.conversation.run.todos = todos;
     } else if (update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') {
+      const native = run.todoTracker.project(update)?.map(todo => ({ ...todo, content: this.redact(run, todo.content) }));
+      if (native && JSON.stringify(run.conversation.run.todos) !== JSON.stringify(native)) run.conversation.run.todos = native;
       let publicId = run.toolIds.get(update.toolCallId);
       if (!publicId) { publicId = randomUUID(); run.toolIds.set(update.toolCallId, publicId); }
       let tool = run.message.tools.find(t => t.id === publicId);
@@ -393,8 +408,8 @@ skills = false
           agentProfile: {
             name: 'grok-bot-scoped', description: 'Workspace broker only', promptMode: 'extend',
             injectDefaultTools: false, agentsMd: false,
-            toolConfig: { tools: [{ id: 'GrokBuild:search_tool' }, { id: 'GrokBuild:use_tool' }] },
-            tools: ['search_tool', 'use_tool'], disallowedTools: deniedBuiltinTools,
+            toolConfig: { tools: [{ id: 'GrokBuild:search_tool' }, { id: 'GrokBuild:use_tool' }, { id: 'GrokBuild:todo_write' }] },
+            tools: ['search_tool', 'use_tool', 'todo_write'], disallowedTools: deniedBuiltinTools,
             discoverSkills: false, inheritSkills: false, permissionMode: 'default',
           },
         },

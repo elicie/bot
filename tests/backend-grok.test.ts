@@ -65,7 +65,7 @@ test('source-linked app engine exposes only broker tools, blocks bypasses, appro
     assert.equal(await readFile(path.join(workspace, 'notes.txt'), 'utf8'), 'approved by browser\n');
     assert.ok(inference.length >= 3);
     assert.equal(provider.requests.every(request => request.model === 'local-test-model'), true);
-    for (const request of inference) assert.deepEqual(request.tools!.map(tool => tool.function.name).sort(), ['search_tool', 'use_tool']);
+    for (const request of inference) assert.deepEqual(request.tools!.map(tool => tool.function.name).sort(), ['search_tool', 'todo_write', 'use_tool']);
     assert.ok(inference.some(request => request.messages.some(message => message.role === 'tool' && String(message.content).includes('workspace__write_file'))));
     const originalSession = completed.sessionId;
     const beforeContinuation = inference.length;
@@ -86,7 +86,7 @@ test('source-linked app engine exposes only broker tools, blocks bypasses, appro
     assert.equal(continued.messages[3].text, 'Forbidden tools and traversal were blocked.');
     assert.equal(inference[beforeContinuation].messages.some(message => message.role === 'assistant' && String(message.content).includes('The approved write succeeded.')), true);
     assert.equal(await readFile(path.join(root, 'outside.txt'), 'utf8'), 'outside stays unchanged\n');
-    for (const request of inference) assert.deepEqual(request.tools!.map(tool => tool.function.name).sort(), ['search_tool', 'use_tool']);
+    for (const request of inference) assert.deepEqual(request.tools!.map(tool => tool.function.name).sort(), ['search_tool', 'todo_write', 'use_tool']);
     const outcomes = inference.slice(beforeContinuation + 1).map(request => request.messages.filter(message => message.role === 'tool').at(-1)?.content).join('\n');
     assert.match(outcomes, /not found|Unknown tool|unknown tool|not available|not supported/i);
     assert.match(outcomes, /denied|permission/i);
