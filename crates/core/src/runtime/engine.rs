@@ -113,6 +113,11 @@ impl EngineManager {
         Ok(engine)
     }
 
+    /// The already-running engine, without starting or changing its provider configuration.
+    pub async fn current(&self) -> Option<Engine> {
+        self.slot.lock().await.as_ref().map(|slot| slot.engine.clone())
+    }
+
     pub async fn shutdown(&self) {
         if let Some(previous) = self.slot.lock().await.take() {
             stop(previous.engine).await;

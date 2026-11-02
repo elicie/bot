@@ -9,9 +9,33 @@ import { MAX_SKILLS_PER_BOT, newSkill, nextSkill, skillSchema, skillPatchSchema,
 import { latestRoutineTime, nextRoutineTime, routineInputSchema, routineRunSchema, routineSchema } from './routines.js';
 import { botDeliverySchema, botExchangeSchema, botMessageInputSchema, existingBotDelivery, MAX_BOT_DELIVERIES, MAX_BOT_HOPS, MAX_BOT_MESSAGE_BYTES, MAX_BOT_REPLY_CHARACTERS, reconcileBotDeliveries, validBotMessageReferences, type BotMessageInput } from './bot-messages.js';
 
+/** New app inputs are encoded JSON, so redact decoded keys/strings before serializing again. */
+function publicAppInput(input: string, apiKey: string): string {
+  const redact = (value: unknown): unknown => {
+    if (typeof value === 'string') return value.split(apiKey).join('[redacted]');
+    if (Array.isArray(value)) return value.map(redact);
+    if (value && typeof value === 'object') {
+      const entries = Object.entries(value).map(([key, item]) => [key.split(apiKey).join('[redacted]'), redact(item)] as const);
+      if (new Set(entries.map(([key]) => key)).size !== entries.length) throw new Error('Redacted key collision');
+      return Object.fromEntries(entries);
+    }
+    return value;
+  };
+  try {
+    const parsed: unknown = JSON.parse(input);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return '{}';
+    return JSON.stringify(redact(parsed));
+  } catch { return '{}'; }
+}
+
 const toolSchema = z.object({
   id: z.string(), title: z.string(), kind: z.string(), status: z.enum(['pending', 'in_progress', 'completed', 'failed']),
   input: z.string().optional(), output: z.string().optional(), paths: z.array(z.string()).optional(), localOnly: z.boolean().optional(),
+  mcpApp: z.object({
+    botId: z.string().uuid(), serverId: z.string().uuid(), serverUpdatedAt: z.string(), server: z.string().max(32), tool: z.string().max(128),
+    uri: z.string().max(2048).startsWith('ui://'), html: z.string().refine(value => Buffer.byteLength(value) <= 200_000),
+    input: z.string().refine(value => Buffer.byteLength(value) <= 32 * 1024), output: z.string().refine(value => Buffer.byteLength(value) <= 64 * 1024),
+  }).strict().optional(),
 }).strict();
 const permissionSchema = z.object({
   id: z.string(), title: z.string(), kind: z.string(), description: z.string(), paths: z.array(z.string()),
@@ -155,8 +179,11 @@ export class Store {
       ...this.conversations.flatMap(conversation => conversation.messages.flatMap(message => message.botExchangeIds ? [message.botExchangeIds] : []))]);
     return JSON.parse(JSON.stringify(state, function (this: unknown, field, value: unknown) {
       if (publicLinkArrays.has(this)) return value;
+      if (field === 'mcpApp' && apiKey && value && typeof value === 'object' && 'input' in value && typeof value.input === 'string') {
+        return { ...value, input: publicAppInput(value.input, apiKey) };
+      }
       if (['kind', 'status', 'role', 'color', 'hash'].includes(field)) return value;
-      if (['id', 'botId', 'routineId', 'conversationId', 'executionRunId', 'sessionId', 'sessionFingerprint', 'exchangeId', 'sourceConversationId', 'sourceMessageId', 'recipientConversationId', 'fromBotId', 'toBotId', 'chainId', 'sourceBotId'].includes(field) && typeof value === 'string' && /^(?:[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}|[a-f\d]{64})$/i.test(value)) return value;
+      if (['id', 'botId', 'serverId', 'routineId', 'conversationId', 'executionRunId', 'sessionId', 'sessionFingerprint', 'exchangeId', 'sourceConversationId', 'sourceMessageId', 'recipientConversationId', 'fromBotId', 'toBotId', 'chainId', 'sourceBotId'].includes(field) && typeof value === 'string' && /^(?:[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}|[a-f\d]{64})$/i.test(value)) return value;
       return typeof value === 'string' && apiKey ? value.split(apiKey).join('[redacted]') : value;
     })) as AppState;
   }

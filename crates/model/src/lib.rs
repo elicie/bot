@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 
 mod bot_data;
 pub use bot_data::*;
+mod mcp_apps;
+pub use mcp_apps::*;
 mod vault;
 pub use vault::*;
 
@@ -119,6 +121,9 @@ pub struct ToolActivity {
     /// ("내 규칙으로 자동 승인됨").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_by_rule: Option<String>,
+    /// A custom MCP app's durable display resource, separate from the model run's permission state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_app: Option<McpApp>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

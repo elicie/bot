@@ -29,6 +29,7 @@ pub fn project_computer_permissions(mut state: AppState, local: bool) -> AppStat
                         paths: None,
                         local_only: Some(true),
                         approved_by_rule: None,
+                        mcp_app: None,
                     };
                 }
             }
@@ -137,6 +138,7 @@ mod tests {
             paths: Some(vec![detail.into()]),
             local_only,
             approved_by_rule: None,
+            mcp_app: None,
         }
     }
 

@@ -54,8 +54,8 @@ async function fixture(options: { autoStart?: boolean; pollIntervalMs?: number }
     const response = await api('/api/settings', { baseUrl: 'http://127.0.0.1:12345/v1', model: 'fixture', workspace, apiKey }, 'PUT');
     assert.equal(response.status, 200);
   };
-  const wait = async (predicate: () => boolean) => {
-    const deadline = Date.now() + 5000;
+  const wait = async (predicate: () => boolean, timeoutMs = 5000) => {
+    const deadline = Date.now() + timeoutMs;
     while (!predicate()) {
       assert.ok(Date.now() < deadline, JSON.stringify(backend.store.snapshot()));
       await new Promise(resolve => setTimeout(resolve, 10));
@@ -244,7 +244,9 @@ test('routine byte-capacity admission reserves prompt dispatch before committing
         await response.body?.cancel();
         assert.equal(f.backend.store.routineRuns.length, 1);
         const run = f.backend.store.routineRuns[0];
-        await f.wait(() => f.backend.store.conversation(run.conversationId).run.status === 'completed');
+        // Several atomic 64 MiB writes are deliberately exercised here. This checks admission,
+        // not disk/CPU latency; leave enough time on a loaded validation or CI host.
+        await f.wait(() => f.backend.store.conversation(run.conversationId).run.status === 'completed', 20_000);
         assert.equal(run.result?.status, 'completed');
         assert.match(f.backend.store.routineSchedulingError ?? '', /64 MiB/);
         assert.equal(f.backend.store.routine(due.id).nextRunAt, '2026-01-01T00:01:00.000Z');

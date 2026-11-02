@@ -65,6 +65,7 @@ pub(crate) fn schema_valid(disk: &mut DiskState) -> bool {
     let conversations = disk.conversations.iter().all(|conversation| {
         is_uuid(&conversation.id)
             && is_uuid(&conversation.bot_id)
+            && crate::mcp_apps::conversation_mcp_apps_valid(conversation)
             && conversation.messages.iter().all(|message| {
                 is_uuid(&message.id)
                     && message.bot_exchange_ids.as_ref().is_none_or(|ids| ids.len() <= 1 && ids.iter().all(|id| is_uuid(id)))

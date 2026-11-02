@@ -161,6 +161,66 @@ async fn mcp_servers_are_loopback_only_disabled_by_default_and_resolve_secrets_a
 }
 
 #[tokio::test]
+async fn server_versions_advance_for_fixed_or_backwards_clocks_and_preserve_no_op_identity() {
+    let f = Fixture::new().await;
+    let bot = f.bot_id();
+    let first = r#"{"apps":{"url":"https://first.example/mcp"}}"#;
+    let second = first.replace("first.example", "second.example");
+    let record = || f.store.read(|s| s.mcp_servers_for(&bot).next().unwrap().clone());
+    let still_bound = |saved: &McpServerRecord| {
+        let current = record();
+        current.id == saved.id && current.name == saved.name && current.updated_at == saved.updated_at && current.enabled
+    };
+    f.store.mutate(|s| s.set_mcp_servers(&bot, first, true)).await.unwrap();
+    let original = record();
+    assert_eq!(original.updated_at, f.iso_now());
+    let revision = f.store.snapshot().revision;
+    f.store.mutate(|s| s.set_mcp_servers(&bot, first, true)).await.unwrap();
+    assert_eq!(record(), original, "unchanged save preserves ID, timestamp, and disabled state");
+    assert_eq!(f.store.snapshot().revision, revision, "unchanged save is not a write");
+
+    f.store.mutate(|s| s.set_mcp_server_enabled(&bot, "apps", true, true)).await.unwrap();
+    let before_edit = record();
+    assert_eq!(before_edit.updated_at, "2026-01-01T00:00:00.001Z");
+    assert!(still_bound(&before_edit));
+    f.store.mutate(|s| s.set_mcp_servers(&bot, &second, true)).await.unwrap();
+    let edited = record();
+    assert_eq!(edited.updated_at, "2026-01-01T00:00:00.002Z");
+    assert!(!edited.enabled);
+    f.store.mutate(|s| s.set_mcp_server_enabled(&bot, "apps", true, true)).await.unwrap();
+    let after_edit = record();
+    assert_eq!(after_edit.updated_at, "2026-01-01T00:00:00.003Z");
+    assert_eq!((after_edit.id.as_str(), after_edit.created_at.as_str()), (original.id.as_str(), original.created_at.as_str()));
+    assert!(!still_bound(&before_edit), "same-clock edit and re-enable cannot revive the old app binding");
+
+    let revision = f.store.snapshot().revision;
+    f.store.mutate(|s| s.set_mcp_servers(&bot, &second, true)).await.unwrap();
+    f.store.mutate(|s| s.set_mcp_server_enabled(&bot, "apps", true, true)).await.unwrap();
+    assert_eq!(record(), after_edit, "no-op config and toggle preserve the live binding");
+    assert_eq!(f.store.snapshot().revision, revision);
+    f.store.mutate(|s| s.set_mcp_server_enabled(&bot, "apps", false, false)).await.unwrap();
+    assert_eq!(record().updated_at, "2026-01-01T00:00:00.004Z");
+    f.store.mutate(|s| s.set_mcp_server_enabled(&bot, "apps", true, true)).await.unwrap();
+    let after_toggle = record();
+    assert_eq!(after_toggle.updated_at, "2026-01-01T00:00:00.005Z");
+    assert_eq!(after_toggle.config, after_edit.config);
+    assert!(!still_bound(&after_edit), "same-clock disable/re-enable invalidates pending bindings even with identical resolved config");
+
+    f.set_time("2025-12-01T00:00:00.000Z");
+    f.store.mutate(|s| s.set_mcp_servers(&bot, first, true)).await.unwrap();
+    assert_eq!(record().updated_at, "2026-01-01T00:00:00.006Z");
+    f.store.mutate(|s| s.set_mcp_server_enabled(&bot, "apps", true, true)).await.unwrap();
+    assert_eq!(record().updated_at, "2026-01-01T00:00:00.007Z");
+    assert!(!still_bound(&after_toggle), "backwards clock changes cannot reuse versions either");
+    f.set_time("2026-01-03T00:00:00.000Z");
+    f.store.mutate(|s| s.set_mcp_server_enabled(&bot, "apps", false, false)).await.unwrap();
+    let final_record = record();
+    assert_eq!(final_record.updated_at, f.iso_now(), "a newer wall clock still supplies the timestamp");
+    let reopened = f.reopen().await.unwrap();
+    assert_eq!(reopened.read(|s| s.mcp_servers_for(&bot).next().unwrap().clone()), final_record);
+}
+
+#[tokio::test]
 async fn bot_deletion_removes_its_secrets_and_servers() {
     let f = Fixture::new().await;
     let other = f.store.mutate(|s| s.add_bot(BotInput { name: "Other".into(), color: None, instructions: None, shape: None, pinned: None })).await.unwrap().id;

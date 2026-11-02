@@ -14,6 +14,7 @@ pub mod attachments;
 mod broker;
 mod custom_mcp;
 mod engine;
+mod mcp_apps;
 mod permissions;
 pub mod text;
 mod todos;
@@ -112,6 +113,10 @@ struct RunFlags {
     skills: Vec<Skill>,
     text_suffix: String,
     tool_ids: HashMap<String, String>,
+    /// Completed MCP UI captures already attempted this turn (no duplicate resource reads).
+    mcp_app_seen: std::collections::HashSet<String>,
+    mcp_app_captures: Vec<tokio::task::JoinHandle<()>>,
+    mcp_app_captures_sealed: bool,
     todos: todos::TodoTracker,
     idle_since: Option<Instant>,
     /// Epoch of the managed browser this run acted on; cancellation stops only that epoch.
@@ -208,6 +213,9 @@ pub struct Runtime {
     closing: AtomicBool,
     runs: Mutex<Vec<Arc<Run>>>,
     engine: EngineManager,
+    mcp_app_requests: Mutex<mcp_apps::Requests>,
+    /// A bounded app call owns the engine admission slot, without starting an LLM turn.
+    mcp_app_busy: AtomicBool,
     /// Notified whenever a run settles, so the dispatcher can start the next queued turn at once.
     settled: tokio::sync::Notify,
     this: Weak<Runtime>,
@@ -334,6 +342,8 @@ impl Runtime {
             closing: AtomicBool::new(false),
             runs: Mutex::new(Vec::new()),
             engine: EngineManager::default(),
+            mcp_app_requests: Mutex::new(mcp_apps::Requests::default()),
+            mcp_app_busy: AtomicBool::new(false),
             settled: tokio::sync::Notify::new(),
             this: this.clone(),
             computer: std::sync::OnceLock::new(),
@@ -415,13 +425,16 @@ impl Runtime {
 
     async fn start_turn(&self, conversation_id: &str, turn: Turn, attachments: Vec<PreparedAttachment>) -> HttpResult<()> {
         let closing = self.closing.load(Ordering::SeqCst);
+        if self.mcp_app_busy.load(Ordering::SeqCst) {
+            return Err(HttpError::conflict("An MCP app call is still running. Wait for it to finish."));
+        }
         let origin = self.origin.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
         let id = conversation_id.to_owned();
         let metas: Vec<grok_bot_model::Attachment> = attachments.iter().map(|a| a.meta.clone()).collect();
         let (run_id, message_id, settings, plan, extras, prompt, report_deliveries) = self
             .store
             .mutate(move |state| {
-                if state.active().is_some() {
+                if state.active().is_some() || self.mcp_app_busy.load(Ordering::SeqCst) {
                     state.assert_writable()?;
                     return Err(HttpError::conflict(RUN_BUSY));
                 }
@@ -546,6 +559,7 @@ impl Runtime {
             done: watch::Sender::new(false),
             broker: tokio::sync::Mutex::new(()),
         });
+        self.mcp_app_requests.lock().unwrap_or_else(|p| p.into_inner()).cancel(&run.conversation_id);
         self.runs().push(Arc::clone(&run));
         let runtime = self.arc();
         tokio::spawn(async move { runtime.execute(run, prompt).await });
@@ -838,6 +852,16 @@ impl Runtime {
     }
 
     async fn finish(&self, run: &Arc<Run>, outcome: Outcome) {
+        // Resource fetches do not block the event router. Drain has projected all normal updates;
+        // join this turn's bounded captures before closing their session, not before projecting text.
+        let captures = {
+            let mut flags = run.flags();
+            flags.mcp_app_captures_sealed = true;
+            std::mem::take(&mut flags.mcp_app_captures)
+        };
+        for capture in captures {
+            let _ = capture.await;
+        }
         let suffix = {
             let mut flags = run.flags();
             flags.finishing = true;
@@ -930,6 +954,7 @@ impl Runtime {
             return;
         };
         let kind = update["sessionUpdate"].as_str().unwrap_or_default().to_owned();
+        let app_update = mcp_apps::has_ui_metadata(&update).then(|| update.clone());
         let result = if let acp::SessionUpdate::Plan(plan) = notification.update {
             // Native successes carry IDs, unlike the full-session Plans emitted after them.
             if run.flags().todos.native {
@@ -1026,6 +1051,7 @@ impl Runtime {
                             paths: None,
                             local_only: None,
                             approved_by_rule: None,
+                            mcp_app: None,
                         });
                         message.tools.len() - 1
                     }
@@ -1070,9 +1096,14 @@ impl Runtime {
         } else {
             return;
         };
-        if result.is_err() {
+        if result.is_ok() {
+            if let Some(update) = app_update {
+                self.queue_mcp_app_capture(&run, update);
+            }
+        } else {
             let runtime = self.arc();
             let conversation_id = run.conversation_id.clone();
+            let run = Arc::clone(&run);
             tokio::spawn(async move {
                 if runtime.cancel(&conversation_id).await.is_err() {
                     run.flags().stopped = true;
@@ -1181,6 +1212,7 @@ impl Runtime {
 
     /// Cancel an active run and wait for it to settle. No-op for idle conversations (404 if missing).
     pub async fn cancel(&self, conversation_id: &str) -> HttpResult<()> {
+        self.mcp_app_requests.lock().unwrap_or_else(|p| p.into_inner()).cancel(conversation_id);
         let Some(run) = self.run_for_conversation(conversation_id) else {
             return self.store.read(|state| state.conversation(conversation_id).map(|_| ()));
         };
@@ -1193,6 +1225,7 @@ impl Runtime {
 
     pub async fn shutdown(&self) {
         self.closing.store(true, Ordering::SeqCst);
+        self.mcp_app_requests.lock().unwrap_or_else(|p| p.into_inner()).clear();
         let runs: Vec<Arc<Run>> = self.runs().clone();
         for run in &runs {
             self.request_stop(run);

@@ -10,7 +10,7 @@
 
 use std::sync::LazyLock;
 
-use grok_bot_model::{AppState, BotDelivery, BotExchange, Conversation, Routine, RoutineRun, RoutineSchedule};
+use grok_bot_model::{AppState, BotDelivery, BotExchange, Conversation, McpApp, Routine, RoutineRun, RoutineSchedule};
 use regex::Regex;
 
 static IDENTIFIER: LazyLock<Regex> =
@@ -48,6 +48,58 @@ impl Redactor<'_> {
         }
     }
 
+    /// App arguments are JSON encoded inside a string. Redact decoded keys and string values too,
+    /// so credentials with quotes/backslashes or Unicode escapes cannot survive that encoding.
+    fn encoded_json(&self, text: &mut String) {
+        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(text)
+            && value.is_object()
+        {
+            let original = value.clone();
+            if !self.json_value(&mut value) {
+                // Redacted keys collided. Do not silently merge argument fields or leave secrets.
+                *text = "{}".into();
+            } else if value != original {
+                *text = value.to_string();
+            }
+        } else {
+            // Only object arguments are durable. Invalid in-memory data is never forwarded.
+            *text = "{}".into();
+        }
+        self.text(text);
+    }
+
+    /// False when redacting object keys would conflate distinct fields.
+    fn json_value(&self, value: &mut serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::String(text) => self.text(text),
+            serde_json::Value::Array(items) => return items.iter_mut().all(|item| self.json_value(item)),
+            serde_json::Value::Object(fields) => {
+                let mut redacted = serde_json::Map::new();
+                for (mut key, mut value) in std::mem::take(fields) {
+                    self.text(&mut key);
+                    if !self.json_value(&mut value) || redacted.insert(key, value).is_some() {
+                        return false;
+                    }
+                }
+                *fields = redacted;
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn mcp_app(&self, app: &mut McpApp) {
+        self.id(&mut app.bot_id);
+        self.id(&mut app.server_id);
+        self.text(&mut app.server_updated_at);
+        self.text(&mut app.server);
+        self.text(&mut app.tool);
+        self.text(&mut app.uri);
+        self.text(&mut app.html);
+        self.encoded_json(&mut app.input);
+        self.text(&mut app.output);
+    }
+
     fn conversation(&self, conversation: &mut Conversation) {
         self.id(&mut conversation.id);
         self.id(&mut conversation.bot_id);
@@ -63,6 +115,9 @@ impl Redactor<'_> {
                 self.optional(&mut tool.output);
                 for path in tool.paths.iter_mut().flatten() {
                     self.text(path);
+                }
+                if let Some(app) = &mut tool.mcp_app {
+                    self.mcp_app(app);
                 }
             }
             self.optional_id(&mut message.source_bot_id);

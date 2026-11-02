@@ -80,16 +80,20 @@ function useSeen<T extends Element>(): [RefCallback<T>, boolean] {
 }
 
 /**
- * One sandboxed run of a source. A new nonce (and so a fresh frame) per mount or retry; the frame's
- * messages count only if they come from this frame's window and carry this nonce.
+ * One sandboxed run with a fresh frame/nonce per mount or retry. Bootstrap telemetry also needs
+ * that nonce. Only persisted MCP app cards opt into a separate JSON-RPC handler; both paths require
+ * this exact frame window and its opaque origin. A message is never itself tool approval.
  */
-function VisualizationFrame({ source, kind, title, fill, onEscape }: {
+export function VisualizationFrame({ source, kind, title, fill, onEscape, onAppMessage, onAppReset }: {
   source: string;
   kind: VisualizationKind;
   title: string;
   /** Fill the container (viewer) instead of sizing to the content (inline card). */
   fill?: boolean;
   onEscape?: () => void;
+  /** Only persisted MCP app cards opt in. Ordinary Markdown previews have no tool bridge. */
+  onAppMessage?: (data: unknown, respond: (data: unknown) => void) => void;
+  onAppReset?: () => void;
 }) {
   const frame = useRef<HTMLIFrameElement>(null);
   const [attempt, setAttempt] = useState(0);
@@ -101,13 +105,19 @@ function VisualizationFrame({ source, kind, title, fill, onEscape }: {
   const loads = useRef(0);
   const escape = useRef(onEscape);
   escape.current = onEscape;
+  const appMessage = useRef(onAppMessage);
+  const appReset = useRef(onAppReset);
+  appMessage.current = onAppMessage;
+  appReset.current = onAppReset;
   const fail = useCallback((reason: Extract<FrameStatus, { kind: 'failed' }>['reason'], detail?: string) => {
+    appReset.current?.();
     setStatus((current) => (current.kind === 'failed' ? current : { kind: 'failed', reason, detail }));
   }, []);
 
   // Build the document (loading d3 first when the source uses it).
   useEffect(() => {
     let active = true;
+    appReset.current?.();
     setStatus({ kind: 'starting' });
     setDocument(null);
     setHeight(null);
@@ -126,8 +136,14 @@ function VisualizationFrame({ source, kind, title, fill, onEscape }: {
   useEffect(() => {
     if (!document_) return;
     const timer = setTimeout(() => fail('timeout'), VISUALIZATION_START_TIMEOUT_MS);
+    let active = true;
     const listen = (event: MessageEvent) => {
-      if (!frame.current || event.source !== frame.current.contentWindow) return;
+      if (!frame.current || event.source !== frame.current.contentWindow || event.origin !== 'null') return;
+      const target = frame.current.contentWindow;
+      appMessage.current?.(event.data, (data) => {
+        // Opaque srcdoc origins require '*'; never post into a remounted or navigated frame.
+        if (active && frame.current?.contentWindow === target && loads.current <= 1) target?.postMessage(data, '*');
+      });
       const message = readFrameMessage(event.data, document_.nonce);
       if (!message) return;
       switch (message.type) {
@@ -154,7 +170,7 @@ function VisualizationFrame({ source, kind, title, fill, onEscape }: {
       }
     };
     window.addEventListener('message', listen);
-    return () => { clearTimeout(timer); window.removeEventListener('message', listen); };
+    return () => { active = false; clearTimeout(timer); window.removeEventListener('message', listen); };
   }, [document_, fail]);
 
   if (status.kind === 'failed') {
