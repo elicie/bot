@@ -93,6 +93,13 @@ impl Redactor {
         Ok(out)
     }
 
+    fn finished_suffix(&self, suffix: &str) -> Result<String, ()> {
+        // A long incomplete credential is still sensitive even when a terminal frame proves it
+        // cannot complete. Keep short incidental prefixes (for example a JWT's final e) intact.
+        let substantial = self.keys.iter().any(|key| key.starts_with(suffix) && suffix.len() < key.len() && suffix.len() >= 8.min(key.len() / 2));
+        self.text(if substantial { "[redacted]" } else { suffix })
+    }
+
     fn json(&self, value: &mut Value, parse_arguments: bool) -> Result<bool, ()> {
         self.json_inner(value, parse_arguments, false, 0)
     }
@@ -214,7 +221,6 @@ pub(super) async fn rewrite_body(bytes: Bytes, directory: PathBuf, redactor: Red
 #[derive(Default)]
 struct Tool {
     arguments: Option<String>,
-    name_suffix: String,
 }
 
 #[derive(Default)]
@@ -226,14 +232,12 @@ struct Choice {
 
 impl Choice {
     fn delta(&mut self, delta: &mut Map<String, Value>, redactor: &Redactor) -> Result<bool, ()> {
-        let mut changed = false;
-        // Unknown textual delta formats cannot safely be treated as complete independent values.
-        // Fail closed rather than forward an unrecognized fragmented/encoded credential channel.
-        for (key, value) in delta.iter() {
-            if !TEXT_FIELDS.contains(&key.as_str()) && !matches!(key.as_str(), "role" | "tool_calls" | "function_call") && !value.is_null() {
-                return Err(());
-            }
-        }
+        // The pinned ChatChunkDelta/sampler ignores extensions such as reasoning_details. Omit
+        // unconsumed fields instead of either rejecting ordinary provider replies or forwarding
+        // unrecognized fragmented credential channels to the engine.
+        let original_fields = delta.len();
+        delta.retain(|key, _| TEXT_FIELDS.contains(&key.as_str()) || matches!(key.as_str(), "role" | "tool_calls" | "function_call"));
+        let mut changed = delta.len() != original_fields;
         for field in TEXT_FIELDS {
             match delta.get_mut(field) {
                 Some(Value::String(text)) => {
@@ -266,13 +270,15 @@ impl Choice {
 
     fn function(tool: &mut Tool, function: &mut Map<String, Value>, redactor: &Redactor) -> Result<bool, ()> {
         let mut changed = false;
-        if let Some(value) = function.get_mut("name") {
+        if let Some(value) = function.get_mut("name").filter(|value| !value.is_null()) {
             let name = value.as_str().ok_or(())?;
-            let safe = redactor.streamed(&mut tool.name_suffix, name)?;
+            // The pinned sampler assigns the latest name; it appends only arguments. A held name
+            // suffix emitted at finish would overwrite search_tool/todo_write with that suffix.
+            let safe = redactor.text(name)?;
             changed |= safe != name;
             *value = Value::String(safe);
         }
-        if let Some(value) = function.get_mut("arguments") {
+        if let Some(value) = function.get_mut("arguments").filter(|value| !value.is_null()) {
             let arguments = value.as_str().ok_or(())?;
             let pending = tool.arguments.get_or_insert_default();
             if pending.len().checked_add(arguments.len()).is_none_or(|length| length > MAX_BUFFERED_BYTES) {
@@ -289,15 +295,11 @@ impl Choice {
         let mut delta = Map::new();
         for (field, suffix) in self.suffixes {
             if !suffix.is_empty() {
-                // Once this choice has ended, a proper prefix is a complete harmless suffix.
-                delta.insert(field.to_owned(), Value::String(suffix));
+                delta.insert(field.to_owned(), Value::String(redactor.finished_suffix(&suffix)?));
             }
         }
         for ((legacy, index), tool) in self.tools {
             let mut function = Map::new();
-            if !tool.name_suffix.is_empty() {
-                function.insert("name".into(), Value::String(tool.name_suffix));
-            }
             if let Some(arguments) = tool.arguments {
                 function.insert("arguments".into(), Value::String(redactor.arguments(&arguments, 0)?));
             }
@@ -314,8 +316,7 @@ impl Choice {
     }
 
     fn buffered(&self) -> usize {
-        self.suffixes.values().map(String::len).sum::<usize>()
-            + self.tools.values().map(|tool| tool.name_suffix.len() + tool.arguments.as_ref().map_or(0, String::len)).sum::<usize>()
+        self.suffixes.values().map(String::len).sum::<usize>() + self.tools.values().map(|tool| tool.arguments.as_ref().map_or(0, String::len)).sum::<usize>()
     }
 }
 
@@ -368,6 +369,7 @@ pub(super) struct Sse {
     line: Vec<u8>,
     event: Vec<u8>,
     event_lines: usize,
+    choice_index: Option<u64>,
     choices: BTreeMap<u64, Choice>,
     completed_choices: BTreeSet<u64>,
     metadata: Map<String, Value>,
@@ -382,6 +384,7 @@ impl Sse {
             line: Vec::new(),
             event: Vec::new(),
             event_lines: 0,
+            choice_index: None,
             choices: BTreeMap::new(),
             completed_choices: BTreeSet::new(),
             metadata: Map::new(),
@@ -477,6 +480,13 @@ impl Sse {
             for choice in choices {
                 let choice = choice.as_object_mut().ok_or(())?;
                 let index = index(choice, single)?;
+                // The application requests n=1, but the pinned sampler concatenates ALL choice
+                // indices into one content/reasoning accumulator. Never admit a second distinct
+                // index, even after the first choice finished and flushed a harmless prefix.
+                if self.choice_index.is_some_and(|first| first != index) {
+                    return Err(());
+                }
+                self.choice_index = Some(index);
                 // finish_reason made any held proper prefix safe to flush. Accepting later text
                 // for that same choice could reassemble the credential after that flush.
                 if self.completed_choices.contains(&index) {

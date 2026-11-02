@@ -86,14 +86,12 @@ fn escaped_split_content_and_reasoning_are_held_across_sse_and_network_chunks() 
 }
 
 #[test]
-fn choice_indices_are_independent_and_harmless_suffixes_precede_finish_or_done() {
+fn harmless_suffixes_precede_finish_or_done() {
     let root = tempfile::tempdir().unwrap();
     let mut filter = sse(root.path());
-    let prefix = &ACCESS[..ACCESS.len() - 1];
+    let prefix = &ACCESS[..1];
     let mut wire = filter.push(&delta(0, json!({"content":prefix}))).unwrap();
-    wire.extend(filter.push(&delta(1, json!({"content":&ACCESS[ACCESS.len()-1..]}))).unwrap());
     assert!(field(&wire, 0, "content").is_empty());
-    assert!(field(&wire, 1, "content") == ACCESS[ACCESS.len() - 1..]);
     let terminal = filter.push(&finish(0)).unwrap();
     assert!(values(&terminal)[0]["choices"][0]["delta"]["content"] == prefix);
     assert!(values(&terminal)[0]["choices"][0]["finish_reason"] == "stop");
@@ -110,6 +108,32 @@ fn choice_indices_are_independent_and_harmless_suffixes_precede_finish_or_done()
 }
 
 #[test]
+fn a_second_choice_index_cannot_complete_content_or_reasoning_in_the_native_accumulator() {
+    let root = tempfile::tempdir().unwrap();
+    let prefix = &ACCESS[..ACCESS.len() - 1];
+    for channel in ["content", "reasoning_content"] {
+        for finish_first in [false, true] {
+            let mut filter = sse(root.path());
+            let mut wire = filter.push(&delta(0, json!({channel:prefix}))).unwrap();
+            assert!(field(&wire, 0, channel).is_empty());
+            if finish_first {
+                wire.extend(filter.push(&finish(0)).unwrap());
+                assert!(field(&wire, 0, channel) == "[redacted]");
+            }
+            assert!(!contains(&wire, &ACCESS.as_bytes()[..20]), "a substantial credential prefix escaped before rejecting the extra choice");
+            let second = event(json!({"choices":[{"index":1,"delta":{channel:&ACCESS[ACCESS.len()-1..]},"finish_reason":"stop"}]}));
+            assert!(filter.push(&second).is_err(), "the n=1 native sampler must never receive a second distinct choice index");
+            assert_safe(&wire);
+        }
+        let both = event(json!({"choices":[
+            {"index":0,"delta":{channel:prefix},"finish_reason":"stop"},
+            {"index":1,"delta":{channel:&ACCESS[ACCESS.len()-1..]},"finish_reason":"stop"}
+        ]}));
+        assert!(sse(root.path()).push(&both).is_err(), "a multi-choice frame must fail before any of it is forwarded");
+    }
+}
+
+#[test]
 fn a_finished_choice_cannot_resume_and_reassemble_a_flushed_credential_prefix() {
     let root = tempfile::tempdir().unwrap();
     let mut filter = sse(root.path());
@@ -117,10 +141,42 @@ fn a_finished_choice_cannot_resume_and_reassemble_a_flushed_credential_prefix() 
     let mut wire = filter.push(&delta(0, json!({"content":prefix}))).unwrap();
     assert!(field(&wire, 0, "content").is_empty());
     wire.extend(filter.push(&finish(0)).unwrap());
-    assert!(field(&wire, 0, "content") == prefix);
-    // The legal terminal flush must not become the first part of a later credential echo.
+    assert!(field(&wire, 0, "content") == "[redacted]");
+    assert!(!contains(&wire, &ACCESS.as_bytes()[..20]), "a substantial credential prefix escaped at finish");
     assert!(filter.push(&delta(0, json!({"content":&ACCESS[ACCESS.len()-1..]}))).is_err(), "a completed choice must reject later fragments");
     assert_safe(&wire);
+}
+
+#[test]
+fn terminal_boundaries_redact_substantial_prefixes_but_preserve_short_incidental_suffixes() {
+    let root = tempfile::tempdir().unwrap();
+    let prefix = &ACCESS[..ACCESS.len() - 1];
+    for channel in ["content", "reasoning_content"] {
+        for terminal in 0..3 {
+            let mut filter = sse(root.path());
+            let mut wire = filter.push(&delta(0, json!({channel:prefix}))).unwrap();
+            wire.extend(match terminal {
+                0 => filter.push(&finish(0)).unwrap(),
+                1 => filter.push(b"data: [DONE]\n\n").unwrap(),
+                _ => filter.finish().unwrap(),
+            });
+            assert!(field(&wire, 0, channel) == "[redacted]");
+            assert!(!contains(&wire, &ACCESS.as_bytes()[..20]), "a substantial credential prefix escaped at a terminal boundary");
+            assert_safe(&wire);
+        }
+    }
+    for terminal in 0..3 {
+        let keys = vec!["eyJ.synthetic-oauth-fixture-token".into()];
+        let mut filter = Sse::new(Redactor::new(keys).unwrap().unwrap(), root.path().to_owned());
+        let mut wire = filter.push(&delta(0, json!({"content":"legitimate"}))).unwrap();
+        assert!(field(&wire, 0, "content") == "legitimat");
+        wire.extend(match terminal {
+            0 => filter.push(&finish(0)).unwrap(),
+            1 => filter.push(b"data: [DONE]\n\n").unwrap(),
+            _ => filter.finish().unwrap(),
+        });
+        assert!(field(&wire, 0, "content") == "legitimate");
+    }
 }
 
 #[test]
@@ -164,18 +220,52 @@ fn split_inner_unicode_escaped_tool_arguments_are_decoded_before_emission() {
 }
 
 #[test]
-fn legacy_function_arguments_flush_before_done_and_tool_names_hold_prefixes() {
+fn legacy_function_arguments_flush_before_done() {
     let root = tempfile::tempdir().unwrap();
     let mut filter = sse(root.path());
-    let prefix = &ACCESS[..ACCESS.len() - 1];
-    let mut wire = filter.push(&delta(0, json!({"function_call":{"name":prefix,"arguments":"{\"value\":\""}}))).unwrap();
-    assert!(!contains(&wire, prefix.as_bytes()), "tool-name prefix escaped before resolution");
-    wire.extend(filter.push(&delta(0, json!({"function_call":{"name":&ACCESS[ACCESS.len()-1..],"arguments":format!("{RETIRED}\"}}")}}))).unwrap());
+    let mut wire = filter.push(&delta(0, json!({"function_call":{"name":"lookup","arguments":"{\"value\":\""}}))).unwrap();
+    wire.extend(filter.push(&delta(0, json!({"function_call":{"arguments":format!("{RETIRED}\"}}")}}))).unwrap());
     wire.extend(filter.push(b"data: [DONE]\n\n").unwrap());
     assert_safe(&wire);
     let frames = values(&wire);
     let function = &frames.last().unwrap()["choices"][0]["delta"]["function_call"];
     assert!(serde_json::from_str::<Value>(function["arguments"].as_str().unwrap()).unwrap() == json!({"value":"[redacted]"}));
+    assert!(function.get("name").is_none(), "argument flush must not replace a previously emitted name");
+}
+
+#[test]
+fn native_last_name_assignment_preserves_search_tool_and_todo_write() {
+    let root = tempfile::tempdir().unwrap();
+    for expected in ["search_tool", "todo_write"] {
+        // The first key shares search_tool's suffix; a JWT-style key shares todo_write's final e.
+        // Neither partial match is a credential, and the native sampler assigns complete names.
+        let keys = vec!["tool-secret-credential".into(), "eyJ.synthetic-oauth-fixture-token".into()];
+        let mut filter = Sse::new(Redactor::new(keys).unwrap().unwrap(), root.path().to_owned());
+        let mut wire = filter
+            .push(&delta(0, json!({"tool_calls":[{"index":0,"id":"call-name","type":"function","function":{"name":"placeholder","arguments":""}}]})))
+            .unwrap();
+        let latest = filter.push(&delta(0, json!({"tool_calls":[{"index":0,"function":{"name":expected,"arguments":"{}"}}]}))).unwrap();
+        assert!(values(&latest)[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["name"] == expected);
+        wire.extend(latest);
+        // The pinned Option<String> fields also accept explicit null continuation fragments.
+        wire.extend(filter.push(&delta(0, json!({"tool_calls":[{"index":0,"function":{"name":null,"arguments":null}}]}))).unwrap());
+        wire.extend(filter.push(&finish(0)).unwrap());
+        let mut actual_name = String::new();
+        let mut arguments = String::new();
+        // Mirror pinned stream/chat_completions.rs: name replaces, arguments append.
+        for frame in values(&wire) {
+            for call in frame["choices"][0]["delta"]["tool_calls"].as_array().into_iter().flatten() {
+                if let Some(name) = call["function"]["name"].as_str() {
+                    actual_name = name.to_owned();
+                }
+                if let Some(fragment) = call["function"]["arguments"].as_str() {
+                    arguments.push_str(fragment);
+                }
+            }
+        }
+        assert!(actual_name == expected, "the final native tool name must remain the complete latest name");
+        assert!(serde_json::from_str::<Value>(&arguments).unwrap() == json!({}));
+    }
 }
 
 #[tokio::test]
@@ -239,6 +329,25 @@ async fn ordinary_json_plain_text_and_images_keep_their_existing_semantics() {
 }
 
 #[test]
+fn ignored_delta_extensions_are_omitted_without_rejecting_ordinary_content() {
+    let root = tempfile::tempdir().unwrap();
+    for details in [json!([]), json!([{"type":"reasoning.text","text":&ACCESS[..ACCESS.len()-1]}])] {
+        let mut filter = sse(root.path());
+        let mut wire = filter.push(&delta(0, json!({"content":"ordinary ","reasoning_details":details,"audio":{"data":ACCESS}}))).unwrap();
+        wire.extend(filter.push(&delta(0, json!({"content":"response","reasoning_details":[{"text":&ACCESS[ACCESS.len()-1..]}]}))).unwrap());
+        wire.extend(filter.push(&finish(0)).unwrap());
+        assert!(field(&wire, 0, "content") == "ordinary response");
+        assert_safe(&wire);
+        assert!(!contains(&wire, &ACCESS.as_bytes()[..20]), "an ignored extension leaked a credential prefix");
+        for value in values(&wire) {
+            let delta = &value["choices"][0]["delta"];
+            assert!(delta.get("reasoning_details").is_none());
+            assert!(delta.get("audio").is_none());
+        }
+    }
+}
+
+#[test]
 fn malformed_or_unsupported_frames_and_excess_state_fail_closed() {
     let root = tempfile::tempdir().unwrap();
     for input in [b"data: not-json\n\n".as_slice(), b"data: {\"delta\":\"unknown fragment\"}\n\n", b"data: \xff\n\n"] {
@@ -248,10 +357,8 @@ fn malformed_or_unsupported_frames_and_excess_state_fail_closed() {
     let pending = delta(0, json!({"tool_calls":[{"index":0,"function":{"arguments":"{broken"}}]}));
     filter.push(&pending).unwrap();
     assert!(filter.push(&finish(0)).is_err(), "invalid inner tool JSON must fail closed");
-    let mut filter = sse(root.path());
-    assert!(filter.push(&delta(0, json!({"audio":{"data":"unsupported fragment"}}))).is_err());
-    let choices: Vec<_> = (0..1025).map(|index| json!({"index":index,"delta":{}})).collect();
-    assert!(sse(root.path()).push(&event(json!({"choices":choices}))).is_err());
+    let calls: Vec<_> = (0..1025).map(|index| json!({"index":index,"function":{"arguments":""}})).collect();
+    assert!(sse(root.path()).push(&delta(0, json!({"tool_calls":calls}))).is_err());
     assert!(sse(root.path()).push(": pending\n".repeat(16385).as_bytes()).is_err());
     assert!(Redactor::new((0..1025).map(|index| format!("synthetic-budget-key-{index}")).collect()).is_err());
     assert!(Redactor::new(Vec::new()).unwrap().is_none());

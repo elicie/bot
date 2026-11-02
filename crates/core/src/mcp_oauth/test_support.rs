@@ -16,8 +16,10 @@ use zeroize::Zeroizing;
 
 use crate::mcp_oauth::{LoginInput, OAuthService, flow};
 
-pub(crate) const ACCESS: &str = "synthetic-runtime-oauth-access-723841";
-pub(crate) const REFRESH: &str = "synthetic-runtime-oauth-refresh-519263";
+// Deliberately overlap ordinary tool-name suffixes (`search_tool`, `todo_write`). Native engine
+// function names overwrite, rather than append: withholding their suffix would corrupt tool calls.
+pub(crate) const ACCESS: &str = "tool-secret-credential";
+pub(crate) const REFRESH: &str = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJzeW50aGV0aWMifQ.synthetic-signature";
 pub(crate) const REMOTE: &str = "https://runtime-oauth.example/mcp";
 const ISSUER: &str = "https://runtime-issuer.example";
 const CLIENT: &str = "synthetic-runtime-public-client";
@@ -244,7 +246,7 @@ impl Drop for DroppedForward {
 
 fn escaped_json(value: Value) -> Vec<u8> {
     // Ordinary string replacement alone cannot sanitize this encoded token; JSON parsing is needed.
-    serde_json::to_string(&value).unwrap().replace(ACCESS, &format!("\\u0073{}", &ACCESS[1..])).into_bytes()
+    serde_json::to_string(&value).unwrap().replace(ACCESS, &format!("\\u{:04x}{}", ACCESS.as_bytes()[0], &ACCESS[1..])).into_bytes()
 }
 
 fn reply(status: StatusCode, content_type: &'static str, chunks: Vec<Vec<u8>>) -> UpstreamResponse {

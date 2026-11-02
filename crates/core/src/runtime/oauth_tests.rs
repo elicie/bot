@@ -77,6 +77,12 @@ fn synthetic_oauth_runtime_end_to_end() {
 enum Reply {
     Tool(&'static str, Value),
     Text(Vec<String>),
+    /// The pinned sampler appends all choice indices to shared content/reasoning accumulators.
+    /// A provider must not reassemble a credential through a second, separately finished choice.
+    CrossChoice {
+        field: &'static str,
+        token: &'static str,
+    },
 }
 
 #[derive(Default)]
@@ -116,6 +122,25 @@ async fn completions(AxumState(provider): AxumState<Arc<Provider>>, Json(request
             "tool_calls",
         ),
         Reply::Text(chunks) => sse(model, chunks.into_iter().map(|chunk| json!({"content":chunk})).collect(), "stop"),
+        Reply::CrossChoice { field, token } => {
+            let split = token.len() - 1;
+            let mut frames = Vec::new();
+            for (index, fragment) in [(0, &token[..split]), (1, &token[split..])] {
+                let value = json!({"id":"synthetic-cross-choice", "object":"chat.completion.chunk", "created":1, "model":model,
+                    "choices":[{"index":index,"delta":{(field):fragment},"finish_reason":"stop"}]});
+                frames.push(format!("data: {value}\n\n"));
+            }
+            frames.push("data: [DONE]\n\n".into());
+            let stream = futures::stream::iter(frames.into_iter().enumerate()).then(|(index, frame)| async move {
+                // Give the real relay/engine a separate HTTP body chunk for the first terminal
+                // choice, so rejecting a coalesced second frame cannot hide an unsafe prefix flush.
+                if index > 0 {
+                    tokio::time::sleep(Duration::from_millis(40)).await;
+                }
+                Ok::<_, std::convert::Infallible>(frame)
+            });
+            ([(header::CONTENT_TYPE, "text/event-stream")], axum::body::Body::from_stream(stream)).into_response()
+        }
     }
 }
 
@@ -252,6 +277,7 @@ async fn exercise(root: &Path, engine_root: &Path) {
     });
 
     provider.plan.lock().unwrap().extend([
+        Reply::Tool("todo_write", json!({"todos":[{"id":"synthetic-oauth-lookup","content":"Look up the approved synthetic record","status":"in_progress"}]})),
         Reply::Tool("search_tool", json!({"query":"remote lookup", "limit":5})),
         Reply::Tool("use_tool", json!({"tool_name":"remote__lookup", "tool_input":{"query":"alpha"}})),
         Reply::Text(vec!["OAuth lookup returned ".into(), ACCESS[..ACCESS.len() - 1].into(), format!("{} safely.", &ACCESS[ACCESS.len() - 1..])]),
@@ -268,6 +294,10 @@ async fn exercise(root: &Path, engine_root: &Path) {
     let completed = wait_for(&store, &id, |conversation| conversation.run.status.is_terminal()).await;
     assert!(completed.run.status == RunStatus::Completed);
     assert!(completed.messages.last().unwrap().text == "OAuth lookup returned [redacted] safely.");
+    assert!(
+        completed.run.todos.as_ref().is_some_and(|todos| todos.iter().any(|todo| todo.content == "Look up the approved synthetic record")),
+        "todo_write must remain an ordinary working tool under OAuth redaction"
+    );
     assert!(completed.messages.last().unwrap().tools.iter().any(|tool| tool.status == ToolStatus::Completed
         && tool.output.as_deref().is_some_and(|output| output.contains("oauth-tool-ok:alpha") && output.contains("[redacted]"))));
     upstream.assert_used();
@@ -303,6 +333,28 @@ async fn exercise(root: &Path, engine_root: &Path) {
     assert!(store.read(|state| state.conversation(&id).unwrap().run.status) == RunStatus::Cancelled);
     closed(&cancel_lease.0).await;
     upstream.assert_forward_dropped();
+
+    // Unlike separate-choice filter unit tests, the pinned real sampler appends EVERY choice to
+    // shared text/reasoning accumulators. Finish on choice 0 cannot authorize a later choice 1
+    // to complete a credential. These are rejected responses, not successful tool scenarios.
+    for (field, token) in [("content", ACCESS), ("reasoning_content", REFRESH)] {
+        let adversarial_id = store.mutate(|state| state.add_conversation(&bot)).await.unwrap().id;
+        provider.plan.lock().unwrap().push_back(Reply::CrossChoice { field, token });
+        runtime.start(&adversarial_id, "Reject the synthetic cross-choice credential response.").await.unwrap();
+        let adversarial_lease = local_declaration(&runtime, &adversarial_id);
+        let rejected = wait_for(&store, &adversarial_id, |conversation| conversation.run.status.is_terminal()).await;
+        assert!(rejected.run.status == RunStatus::Error, "cross-choice provider output must fail closed before the second choice reaches the engine");
+        assert!(
+            !rejected.messages.last().unwrap().tools.iter().any(|tool| tool.status == ToolStatus::Completed),
+            "no tool success is claimed for a rejected provider response"
+        );
+        assert_no_tokens(&serde_json::to_string(&rejected).unwrap());
+        closed(&adversarial_lease.0).await;
+        // Even a finished first choice must not flush an almost-complete known credential into
+        // native files before the later index is rejected. Preserve the same 20-byte prefix gate.
+        assert_engine_files_redacted(engine_root);
+        assert_engine_files_redacted(&store.data_dir().join("grok"));
+    }
 
     // Drive an actual HTTP 401 through Runtime::prepare_oauth's own callback, without a second
     // engine retry policy obscuring the classification. A dropped prepared (unadmitted) lease
