@@ -371,6 +371,24 @@ async fn draft_probe_routes(app: &TestApp, bot: &str) {
     let base = format!("/api/bots/{bot}/mcp-servers");
     assert_eq!(api(app, LOCAL, "PUT", &base, Some(json!({"json":r#"{"test":{"url":"http://127.0.0.1:1"}}"#}))).await.0, 200);
     assert_eq!(api(app, LOCAL, "PATCH", &route, Some(json!({"enabled":true}))).await.0, 200);
+
+    // Optional direct secrets are saved atomically through the same PUT, and remain write-only.
+    let atomic_json = r#"{"atomic":{"url":"http://127.0.0.1:1","headers":{"X-Token":"${secret:ATOMIC_TOKEN}"}}}"#;
+    let direct = json!({"name":"ATOMIC_TOKEN","value":"atomic-route-credential","botId":bot});
+    let (status, state) = api(app, LOCAL, "PUT", &base, Some(json!({"json":atomic_json,"secrets":[direct.clone()]}))).await;
+    assert_eq!(status, 200, "{state}");
+    assert!(!state.to_string().contains("atomic-route-credential"));
+    assert!(state["secrets"].as_array().unwrap().iter().any(|secret| secret["name"] == "ATOMIC_TOKEN" && secret["botId"] == bot));
+    let before = std::fs::read(app.data_dir.join("state.json")).unwrap();
+    for (body, status) in [
+        (json!({"json":"{","secrets":[{"name":"FAILED_TOKEN","value":"failed-route-credential"}]}), 400),
+        (json!({"json":atomic_json,"secrets":[direct]}), 409),
+    ] {
+        let (actual, error) = api(app, LOCAL, "PUT", &base, Some(body)).await;
+        assert_eq!(actual, status, "{error}");
+        assert!(!error.to_string().contains("route-credential"));
+        assert_eq!(std::fs::read(app.data_dir.join("state.json")).unwrap(), before, "failed atomic PUT leaves neither new secrets nor config changes");
+    }
 }
 
 async fn stdio_probe(app: &TestApp, bot: &str, route: &str) {

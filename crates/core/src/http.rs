@@ -41,8 +41,8 @@ pub struct HttpContext {
     pub closing: AtomicBool,
     /// Built frontend (`dist/`). `None` serves the API only.
     pub web_root: Option<PathBuf>,
-    /// Cancels disposable MCP probes before the command queue is drained on shutdown.
-    pub mcp_test_stopping: tokio::sync::watch::Sender<bool>,
+    /// Bounded disposable probes, tracked independently of the app command queue for shutdown.
+    pub(crate) mcp_tests: crate::mcp_probe::Probes,
     /// Flips to `true` after final state flush; open SSE streams can then finish.
     pub stopping: tokio::sync::watch::Sender<bool>,
 }

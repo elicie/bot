@@ -63,7 +63,7 @@ impl Backend {
             port: AtomicU16::new(0),
             closing: AtomicBool::new(false),
             web_root: options.web_root,
-            mcp_test_stopping: tokio::sync::watch::Sender::new(false),
+            mcp_tests: crate::mcp_probe::Probes::default(),
             stopping: tokio::sync::watch::Sender::new(false),
         });
         Ok(Self { store, runtime, scheduler, queue, context })
@@ -83,11 +83,13 @@ impl Backend {
         let closer = tokio::spawn(async move {
             shutdown.await;
             context.closing.store(true, Ordering::SeqCst);
-            // Probes hold the command queue. Cancel them before draining it, while leaving SSE
-            // open until run cancellation and the final state flush below have completed.
-            context.mcp_test_stopping.send_replace(true);
+            // Probes run outside the app queue. Stop admission and cancel them immediately,
+            // then wait for their cleanup independently, including disconnected HTTP callers.
+            // SSE stays open until run cancellation and the final state flush below complete.
+            context.mcp_tests.stop();
             scheduler.close().await;
             queue.run(async {}).await;
+            context.mcp_tests.wait().await;
             runtime.shutdown().await;
             if let Some(computer) = runtime.computer() {
                 let _ = computer.stop(None).await;

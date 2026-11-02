@@ -7,8 +7,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::{StreamExt, stream::BoxStream};
@@ -67,42 +67,110 @@ impl fmt::Display for Failure {
 }
 impl std::error::Error for Failure {}
 
-/// Never move the store, a model client, or the command queue into this worker.
-pub(crate) async fn test(server: ResolvedMcpServer, mut stopping: tokio::sync::watch::Receiver<bool>) -> HttpResult<usize> {
-    if *stopping.borrow() {
-        return Err(HttpError::unavailable(STOPPED));
+/// At most one disposable probe is admitted per backend. The slot belongs to the WORKER, not
+/// its HTTP future: disconnected callers cannot release admission before child cleanup completes.
+/// There is no waiting list; repeated requests get a prompt 429 rather than a hidden 10s queue.
+#[derive(Clone)]
+pub(crate) struct Probes {
+    state: Arc<Mutex<ProbeState>>,
+    stopping: tokio::sync::watch::Sender<bool>,
+}
+
+#[derive(Default)]
+struct ProbeState {
+    closed: bool,
+    active: Option<tokio::sync::watch::Receiver<bool>>,
+}
+
+impl Default for Probes {
+    fn default() -> Self {
+        Self { state: Arc::default(), stopping: tokio::sync::watch::Sender::new(false) }
     }
+}
+
+impl Probes {
+    pub(crate) fn admit(&self) -> HttpResult<Admission> {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.closed {
+            return Err(HttpError::unavailable(STOPPED));
+        }
+        if state.active.is_some() {
+            return Err(HttpError::new(429, "MCP 테스트 사용 중: 진행 중인 연결 테스트가 끝난 뒤 다시 시도해 주세요."));
+        }
+        let (done, finished) = tokio::sync::watch::channel(false);
+        state.active = Some(finished);
+        Ok(Admission { probes: self.clone(), done })
+    }
+
+    pub(crate) fn stop(&self) {
+        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).closed = true;
+        self.stopping.send_replace(true);
+    }
+
+    /// Called independently of the app command queue, including when a disconnected HTTP future
+    /// has already been dropped. Shutdown must wait for the worker's kill + wait acknowledgement.
+    pub(crate) async fn wait(&self) {
+        let active = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).active.clone();
+        if let Some(mut active) = active {
+            let _ = active.wait_for(|done| *done).await;
+        }
+    }
+}
+
+pub(crate) struct Admission {
+    probes: Probes,
+    done: tokio::sync::watch::Sender<bool>,
+}
+
+impl Admission {
+    pub(crate) fn check_open(&self) -> HttpResult<()> {
+        if self.probes.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).closed { Err(HttpError::unavailable(STOPPED)) } else { Ok(()) }
+    }
+}
+
+impl Drop for Admission {
+    fn drop(&mut self) {
+        self.probes.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).active = None;
+        self.done.send_replace(true);
+    }
+}
+
+/// Never move the store, a model client, or the command queue into this worker.
+pub(crate) async fn test(server: ResolvedMcpServer, launch: crate::runtime::McpLaunchContext, admission: Admission) -> HttpResult<usize> {
+    admission.check_open()?;
+    let mut stopping = admission.probes.stopping.subscribe();
     let (mut result, receiver) = tokio::sync::oneshot::channel();
     std::thread::Builder::new()
         .name("mcp-draft-test".into())
         .spawn(move || {
             let _quiet = tracing::subscriber::set_default(tracing::subscriber::NoSubscriber::default());
             let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+                drop(admission);
                 let _ = result.send(Err(Failure::Connection.http()));
                 return;
             };
-            runtime.block_on(async {
+            let outcome = runtime.block_on(async {
                 let mut child = None;
                 let outcome = tokio::select! {
                     biased;
                     _ = result.closed() => None,
-                    // wait_for also handles a true value observed by a late subscriber. Keep
-                    // ownership here so the HTTP caller receives 503 only AFTER kill + wait.
+                    // Current-value-aware for late subscribers; acknowledgement follows cleanup.
                     _ = stopping.wait_for(|stopping| *stopping) => Some(Err(HttpError::unavailable(STOPPED))),
-                    outcome = tokio::time::timeout(BUDGET, discover(server.config, &mut child)) => {
+                    outcome = tokio::time::timeout(BUDGET, discover(server.config, launch, &mut child)) => {
                         Some(outcome.unwrap_or(Err(Failure::Timeout)).map_err(Failure::http))
                     }
                 };
-                // This is outside the cancelled/timeout future, so every exit reaps the process.
                 if let Some(mut child) = child {
                     child.stop().await;
                 }
-                if let Some(outcome) = outcome {
-                    let _ = result.send(outcome);
-                }
+                outcome
             });
-            // Drop also cancels any remaining SDK session/transport tasks. HTTP requests have their
-            // own deadlines and hold no application state or subprocesses.
+            // End SDK transport tasks before releasing admission or acknowledging shutdown.
+            drop(runtime);
+            drop(admission);
+            if let Some(outcome) = outcome {
+                let _ = result.send(outcome);
+            }
         })
         .map_err(|_| Failure::Connection.http())?;
     receiver.await.unwrap_or_else(|_| Err(Failure::Connection.http()))
@@ -114,18 +182,13 @@ fn client_info() -> ClientConfig {
         .with_protocol_version(ProtocolVersion::V_2025_11_25)
 }
 
-async fn discover(config: McpServerConfig, child: &mut Option<ProbeChild>) -> Result<usize, Failure> {
+async fn discover(config: McpServerConfig, launch: crate::runtime::McpLaunchContext, child: &mut Option<ProbeChild>) -> Result<usize, Failure> {
     let failure = Arc::new(AtomicU8::new(0));
     let service = match config {
         McpServerConfig::Stdio { command, args, env } => {
             let mut command = Command::new(command);
-            command
-                .args(args)
-                .envs(env.into_iter().map(|pair| (pair.name, pair.value)))
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
-                .kill_on_drop(true);
+            launch.apply(&mut command, &env);
+            command.args(args).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).kill_on_drop(true);
             #[cfg(unix)]
             command.process_group(0);
             *child = Some(ProbeChild::new(command.spawn().map_err(|_| Failure::Process)?));
@@ -468,9 +531,13 @@ setInterval(()=>{},1000);
         }
     }
 
+    async fn admitted_probe(probes: Probes, server: ResolvedMcpServer) -> HttpResult<usize> {
+        let admission = probes.admit()?;
+        test(server, crate::runtime::McpLaunchContext::capture()?, admission).await
+    }
+
     async fn probe(server: ResolvedMcpServer) -> HttpResult<usize> {
-        let (_sender, receiver) = tokio::sync::watch::channel(false);
-        test(server, receiver).await
+        admitted_probe(Probes::default(), server).await
     }
 
     async fn process_ids(marker: &Path) -> (i32, i32) {
@@ -516,6 +583,24 @@ setInterval(()=>{},1000);
     }
 
     #[tokio::test]
+    async fn shutdown_tracks_a_worker_after_its_http_future_is_dropped() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("dropped.json");
+        let probes = Probes::default();
+        let task = tokio::spawn(admitted_probe(probes.clone(), hanging_server(&marker, false)));
+        let (pid, child) = process_ids(&marker).await;
+        assert_eq!(probes.admit().err().unwrap().status, 429);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        probes.stop();
+        timeout(Duration::from_secs(3), probes.wait()).await.expect("shutdown tracks cleanup independently of HTTP future");
+        // SAFETY: signal 0 probes this fixture's direct child after the tracker acknowledged wait.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_stopped(pid, child).await;
+        assert_eq!(probes.admit().err().unwrap().status, 503);
+    }
+
+    #[tokio::test]
     async fn timed_out_probe_kills_and_reaps_its_stdio_process_group() {
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("timeout.json");
@@ -532,10 +617,10 @@ setInterval(()=>{},1000);
     async fn shutdown_probe_acknowledges_only_after_child_is_reaped() {
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("shutdown.json");
-        let (stop, stopping) = tokio::sync::watch::channel(false);
-        let task = tokio::spawn(test(hanging_server(&marker, false), stopping));
+        let probes = Probes::default();
+        let task = tokio::spawn(admitted_probe(probes.clone(), hanging_server(&marker, false)));
         let (pid, child) = process_ids(&marker).await;
-        stop.send_replace(true);
+        probes.stop();
         let error = timeout(Duration::from_secs(3), task).await.expect("shutdown interrupts startup").unwrap().unwrap_err();
         assert_eq!(error.status, 503);
         assert_eq!(error.message, STOPPED);
@@ -550,8 +635,10 @@ setInterval(()=>{},1000);
     async fn late_shutdown_subscriber_never_spawns_the_draft() {
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("never.json");
-        let stop = tokio::sync::watch::Sender::new(true);
-        let error = test(hanging_server(&marker, false), stop.subscribe()).await.unwrap_err();
+        let probes = Probes::default();
+        let admission = probes.admit().unwrap();
+        probes.stop();
+        let error = test(hanging_server(&marker, false), crate::runtime::McpLaunchContext::capture().unwrap(), admission).await.unwrap_err();
         assert_eq!(error.status, 503);
         assert!(!marker.exists());
     }
