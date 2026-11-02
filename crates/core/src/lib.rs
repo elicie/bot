@@ -14,6 +14,7 @@ mod computer_http;
 mod groups_http;
 pub mod http;
 mod http_bots;
+mod link_preview;
 mod main_bot;
 mod mcp_probe;
 pub mod permission_rules;

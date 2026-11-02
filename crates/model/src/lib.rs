@@ -677,6 +677,9 @@ pub struct DiskState {
     /// first bot; see `grok_bot_store::main_bot`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub main_bot_id: Option<String>,
+    /// Opt-in server-side link metadata downloads. Omitted while disabled for old state files.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub link_previews_enabled: bool,
 }
 
 /// Public snapshot sent to browsers over HTTP and SSE.
@@ -708,6 +711,9 @@ pub struct AppState {
     /// The chosen main bot, as stored in `state.json`. Absent: the first bot is the main bot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub main_bot_id: Option<String>,
+    /// Always present in Rust snapshots, including when disabled.
+    #[serde(default)]
+    pub link_previews_enabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

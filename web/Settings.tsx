@@ -151,6 +151,9 @@ export function Settings({
   onClose,
   onSave,
   onFiles,
+  linkPreviewsEnabled,
+  linkPreviewsSaving,
+  onLinkPreviewsChange,
 }: {
   data: AppState;
   tab: SettingsTab;
@@ -160,6 +163,9 @@ export function Settings({
   onClose: () => void;
   onSave: (input: SettingsInput) => Promise<boolean>;
   onFiles: () => void;
+  linkPreviewsEnabled: boolean;
+  linkPreviewsSaving: boolean;
+  onLinkPreviewsChange: (enabled: boolean) => Promise<void>;
 }) {
   const [form, dispatch] = useReducer(formReducer, data.settings, (settings): FormState => ({
     baseUrl: settings.baseUrl,
@@ -389,6 +395,21 @@ export function Settings({
                   <h3>대화</h3>
                   <div className="settings-card">
                     <div className="settings-row">
+                      <label className="settings-copy" htmlFor="settings-link-previews">
+                        <strong>링크 미리보기</strong>
+                        <span id="settings-link-previews-description">기본값은 꺼짐입니다. 켜면 완료된 봇 답변마다 링크를 최대 3개 미리 보여줍니다.</span>
+                        {typeof data.linkPreviewsEnabled !== 'boolean' && <span>이 서버에서는 지원하지 않습니다. Rust 서버에서 사용할 수 있습니다.</span>}
+                        {linkPreviewsSaving && <span role="status">서버에 저장 중…</span>}
+                      </label>
+                      <span className="settings-switch">
+                        <input id="settings-link-previews" type="checkbox" role="switch" aria-label="링크 미리보기"
+                          aria-describedby="settings-link-previews-description settings-link-previews-privacy"
+                          checked={linkPreviewsEnabled} disabled={busy || typeof data.linkPreviewsEnabled !== 'boolean'}
+                          onChange={event => void onLinkPreviewsChange(event.target.checked)} />
+                        <span aria-hidden="true" />
+                      </span>
+                    </div>
+                    <div className="settings-row">
                       <div className="settings-copy">
                         <strong>모델</strong>
                         <span>{data.settings.model || '아직 설정하지 않았습니다.'}</span>
@@ -409,6 +430,9 @@ export function Settings({
                       </button>
                     </div>
                   </div>
+                  <p className="settings-note" id="settings-link-previews-privacy">
+                    링크 미리보기를 켜면 서버가 외부 사이트에 접속해 페이지 정보와 이미지를 가져옵니다. 대상 사이트에는 서버의 IP 주소가 보입니다. 브라우저는 미리보기를 위해 외부 사이트에 직접 요청하지 않습니다. 이 설정은 서버에 즉시 저장됩니다.
+                  </p>
                 </section>
               </>
             )}
@@ -779,7 +803,7 @@ export function Settings({
               ) : dirty ? (
                 '저장하지 않은 변경 사항'
               ) : tab === 'general' ? (
-                '모양과 입력 설정은 이 브라우저에 적용됩니다'
+                '모양과 입력은 브라우저에, 링크 미리보기는 서버에 적용됩니다'
               ) : (
                 '모델과 작업 폴더 설정은 서버에 저장됩니다'
               )}

@@ -42,6 +42,13 @@ pub fn save_generated_image(data_dir: &Path, bytes: &[u8]) -> Result<String, Str
     Ok(id)
 }
 
+/// Discard an image owned by an expiring, non-persisted preview cache. Never accepts a path.
+pub fn discard_generated_image(data_dir: &Path, id: &str) {
+    if is_uuid(id) {
+        let _ = std::fs::remove_file(directory(data_dir).join(id));
+    }
+}
+
 /// Read one stored image and its MIME type (404 when missing or not a regular single-link file).
 pub fn read_generated_image(data_dir: &Path, id: &str) -> Result<(Vec<u8>, &'static str), HttpError> {
     let missing = || HttpError::not_found("Image does not exist.");

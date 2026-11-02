@@ -59,6 +59,7 @@ impl Backend {
             runtime: runtime.clone(),
             scheduler: scheduler.clone(),
             queue: queue.clone(),
+            link_previews: Arc::new(crate::link_preview::LinkPreviewService::new(store.clone())),
             allowed_hosts: default_allowed_hosts(&options.allowed_hosts),
             port: AtomicU16::new(0),
             closing: AtomicBool::new(false),

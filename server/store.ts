@@ -41,11 +41,14 @@ const diskSchema = z.object({
   version: z.literal(1), revision: z.number().int().nonnegative().default(0), settings: settingsSchema, bots: z.array(botSchema).min(1), conversations: z.array(conversationSchema),
   routines: z.array(routineSchema).max(MAX_ROUTINES).default([]), routineRuns: z.array(routineRunSchema).max(MAX_ROUTINE_RUNS).default([]),
   botExchanges: z.array(botExchangeSchema).max(MAX_BOT_DELIVERIES).default([]), botDeliveries: z.array(botDeliverySchema).max(MAX_BOT_DELIVERIES).default([]),
+  // Preserve the Rust-only preference when opening compatible state in the legacy backend.
+  linkPreviewsEnabled: z.boolean().optional(),
 }).strict();
 type DiskState = Pick<AppState, 'revision' | 'bots' | 'conversations' | 'routines' | 'routineRuns'> & {
   version: 1;
   botExchanges: BotExchange[];
   botDeliveries: BotDelivery[];
+  linkPreviewsEnabled?: boolean;
   settings: z.infer<typeof settingsSchema>;
 };
 export type PrivateSettings = DiskState['settings'];

@@ -27,6 +27,7 @@ import { activeRun, runLabels } from './state';
 import { Avatar, ErrorNotice, IconButton } from './ui';
 import { BotMessageLinks, BotReportMarker } from './BotChat';
 import { RichMarkdown } from './RichMarkdown';
+import { LinkPreviewGroup } from './LinkPreviews';
 import { TodoList } from './TodoList';
 import { AttachButton, AttachmentTray, DropOverlay, MessageAttachments, useFileDrop, type ComposerAttachments } from './Attachments';
 
@@ -99,7 +100,7 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
     </details>
   );
 }
-function MessageView({ message, bot, conversationId, named }: { message: Message; bot: Bot; conversationId?: string; named?: boolean }) {
+function MessageView({ message, bot, conversationId, named, settled }: { message: Message; bot: Bot; conversationId?: string; named?: boolean; settled: boolean }) {
   // Successful native plan updates are represented once by the latest checklist, not tool history.
   const tools = message.tools.filter(tool => tool.kind !== 'think' || tool.title !== 'Updating plan' || tool.status === 'failed');
   return (
@@ -122,6 +123,7 @@ function MessageView({ message, bot, conversationId, named }: { message: Message
             )}
           </div>
         )}
+        {message.role === 'assistant' && !!message.text && <LinkPreviewGroup text={message.text} settled={settled} />}
         {tools.length > 0 && (
           <div className="tool-stack">
             {tools.map((tool) => (
@@ -332,7 +334,7 @@ export function Transcript({
                   {message === tail && message.role === 'assistant' && !!conversation?.run.todos?.length && (
                     <TodoList key={`${conversationId}-${conversation.run.id}`} todos={conversation.run.todos} running={!!running} />
                   )}
-                  <MessageView message={message} bot={speakerFor?.(message) ?? bot} conversationId={conversation?.id} named={!!speakerFor} />
+                  <MessageView message={message} bot={speakerFor?.(message) ?? bot} conversationId={conversation?.id} named={!!speakerFor} settled={!running || message !== tail} />
                   {data && onBotChat && <BotMessageLinks message={message} data={data} onOpen={onBotChat} onCancelReports={onCancelReports} cancelReportsDisabled={cancelReportsDisabled} />}
                   {onRoutines && <RoutineLinks message={message} onOpen={onRoutines} />}
                   {messageExtras?.(message)}

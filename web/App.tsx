@@ -59,6 +59,7 @@ import { BotDeleteDialog, BotMenuExtras } from './BotMenu';
 import { MainBotDialog } from './MainBot';
 import { notificationDeniedText, notificationUnavailableText, requestNotificationPermission, useBotActivity } from './activity';
 import { admitFiles, uploads, type PendingAttachment } from './Attachments';
+import { LinkPreviewProvider } from './LinkPreviews';
 
 function historyPosition(): number {
   const position: unknown = window.history.state?.grokBotPosition;
@@ -98,6 +99,8 @@ export function App() {
   const globalRun = runningConversation(state.data);
   const busy = state.command !== null;
   const data = state.data;
+  const [linkPreviewsPaused, setLinkPreviewsPaused] = useState(false);
+  const linkPreviewsEnabled = data?.linkPreviewsEnabled === true && !linkPreviewsPaused;
   const queuedRun = queuedRoutineRun(data, conversation);
   const selectionKey = draftKey(state.selection);
   const draft = state.drafts[selectionKey] ?? '';
@@ -549,6 +552,24 @@ export function App() {
     });
     return result === true;
   };
+  const setLinkPreviews = async (enabled: boolean) => {
+    if (commandLock.current || typeof current.current.data?.linkPreviewsEnabled !== 'boolean') return;
+    // Privacy-first: hide and cancel immediately, even if saving the off preference fails.
+    // An explicit successful enable is required to resume after that failure.
+    if (!enabled) setLinkPreviewsPaused(true);
+    const saved = await command('link-preview-settings', async () => {
+      try {
+        const snapshot = await request<AppState>('/api/link-preview/settings', { method: 'PUT', body: { enabled } });
+        if (snapshot.linkPreviewsEnabled !== enabled) throw new Error('링크 미리보기 설정을 저장하지 못했습니다. 다시 시도해 주세요.');
+        dispatch({ type: 'snapshot', data: snapshot });
+        return true;
+      } catch (error) {
+        if (!enabled) throw new Error(`서버에 저장하지 못해 이 탭에서만 링크 미리보기를 꺼 두었습니다. ${errorText(error)}`);
+        throw error;
+      }
+    });
+    if (saved) setLinkPreviewsPaused(false);
+  };
   const toggleComputer = (open: boolean) => {
     if (!open && !confirmFileChange('파일 탐색기를 닫고 저장하지 않은 변경 사항을 버릴까요?'))
       return;
@@ -590,6 +611,7 @@ export function App() {
 
 
   return (
+    <LinkPreviewProvider enabled={linkPreviewsEnabled}>
     <div className={`app-shell ${state.computerOpen && state.surface.kind !== 'bot-chat' && state.surface.kind !== 'group' ? 'computer-is-open' : ''} ${threadId ? 'thread-is-open' : ''}`}>
       {state.sidebarOpen && (
         <button
@@ -830,6 +852,9 @@ export function App() {
           onClose={closeOverlay}
           onSave={saveSettings}
           onFiles={() => toggleComputer(true)}
+          linkPreviewsEnabled={linkPreviewsEnabled}
+          linkPreviewsSaving={state.command === 'link-preview-settings'}
+          onLinkPreviewsChange={setLinkPreviews}
         />
       )}
       {state.overlay?.kind === 'bot' && (
@@ -894,5 +919,6 @@ export function App() {
           onCreateWithBot={prepareSkillRequest} />
       )}
     </div>
+    </LinkPreviewProvider>
   );
 }

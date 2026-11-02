@@ -21,6 +21,7 @@ reqwest-mcp = { package = "reqwest", version = "=0.13.5", default-features = fal
 rmcp = { version = "=3.8.0", default-features = false, features = ["client", "transport-async-rw", "transport-streamable-http-client-reqwest", "reqwest"] }
 sse-stream = "0.2.4"
 tracing = "0.1"
+scraper = "=0.23.1"
 serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }
 sha2.workspace = true
