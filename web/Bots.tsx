@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState } from 'react';
-import { Clock3, Plus, X } from 'lucide-react';
+import { ArrowLeftRight, Clock3, Plus, X } from 'lucide-react';
 import type { AvatarShape, Bot, Conversation } from '../shared/types';
 import { activeRun, conversationPreview, runLabels } from './state';
 import { Avatar, avatarShapes, ErrorNotice, IconButton, Modal } from './ui';
@@ -158,11 +158,14 @@ export function History({
   onSelect,
   onNew,
   onClose,
+  requestFrom,
 }: {
   bot: Bot;
   conversations: Conversation[];
   selectedId: string | null;
   busy: boolean;
+  /** Name of the bot whose message opened this conversation (recipient conversations only). */
+  requestFrom?: (conversation: Conversation) => string | undefined;
   onSelect: (conversationId: string) => void;
   onNew: () => void;
   onClose: () => void;
@@ -208,6 +211,9 @@ export function History({
                 </time>
               </span>
               <span>{conversationPreview(conversation)}</span>
+              {requestFrom?.(conversation) && (
+                <small className="history-request"><ArrowLeftRight size={11} aria-hidden="true" />{requestFrom(conversation)}의 요청</small>
+              )}
               {activeRun(conversation.run.status) && (
                 <small className="blue-text">{runLabels[conversation.run.status]}</small>
               )}

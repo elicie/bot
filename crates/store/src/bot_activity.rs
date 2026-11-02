@@ -25,7 +25,7 @@
 
 use std::collections::HashSet;
 
-use grok_bot_model::{DeliveryStatus, HttpError, HttpResult};
+use grok_bot_model::{HttpError, HttpResult};
 
 use crate::State;
 use crate::bot_messages::chain_parent;
@@ -108,7 +108,7 @@ impl State {
                 break;
             }
         }
-        if disk.bot_deliveries.iter().any(|d| deliveries.contains(d.id.as_str()) && matches!(d.status, DeliveryStatus::Queued | DeliveryStatus::Running)) {
+        if disk.bot_deliveries.iter().any(|d| deliveries.contains(d.id.as_str()) && d.status.is_pending()) {
             return Err(HttpError::conflict(QUEUED_DELIVERIES));
         }
         let exchanges: HashSet<String> = disk.bot_deliveries.iter().filter(|d| deliveries.contains(d.id.as_str())).map(|d| d.exchange_id.clone()).collect();

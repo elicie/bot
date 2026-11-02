@@ -4,7 +4,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use grok_bot_model::Clock;
@@ -55,18 +55,14 @@ impl Backend {
         runtime.initialize().await;
         let scheduler_options = options.scheduler.unwrap_or(SchedulerOptions { now, ..SchedulerOptions::default() });
         let scheduler = RoutineScheduler::new(store.clone(), runtime.clone(), queue.clone(), scheduler_options);
-        let context = Arc::new(HttpContext {
-            store: store.clone(),
-            runtime: runtime.clone(),
-            scheduler: scheduler.clone(),
-            queue: queue.clone(),
-            allowed_hosts: default_allowed_hosts(&options.allowed_hosts),
-            port: AtomicU16::new(0),
-            closing: AtomicBool::new(false),
-            web_root: options.web_root,
-            mcp_test_stopping: tokio::sync::watch::Sender::new(false),
-            stopping: tokio::sync::watch::Sender::new(false),
-        });
+        let context = Arc::new(HttpContext::new(
+            store.clone(),
+            runtime.clone(),
+            scheduler.clone(),
+            queue.clone(),
+            default_allowed_hosts(&options.allowed_hosts),
+            options.web_root,
+        ));
         Ok(Self { store, runtime, scheduler, queue, context })
     }
 
@@ -84,11 +80,13 @@ impl Backend {
         let closer = tokio::spawn(async move {
             shutdown.await;
             context.closing.store(true, Ordering::SeqCst);
-            // Probes hold the command queue. Cancel them before draining it, while leaving SSE
-            // open until run cancellation and the final state flush below have completed.
-            context.mcp_test_stopping.send_replace(true);
+            // Probes run outside the app queue. Stop admission and cancel them immediately,
+            // then wait for their cleanup independently, including disconnected HTTP callers.
+            // SSE stays open until run cancellation and the final state flush below complete.
+            context.mcp_tests.stop();
             scheduler.close().await;
             queue.run(async {}).await;
+            context.mcp_tests.wait().await;
             runtime.shutdown().await;
             if let Some(computer) = runtime.computer() {
                 let _ = computer.stop(None).await;

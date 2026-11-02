@@ -4,7 +4,7 @@
 use super::*;
 use crate::computer::{ComputerObservation, ComputerScreenshot, ComputerService, ComputerState, ComputerStatus, VIEWPORT};
 use futures::future::BoxFuture;
-use grok_bot_model::{Conversation, WorkerBatch, system_clock};
+use grok_bot_model::{BotDelivery, BotInput, BotMessageInput, Conversation, WorkerBatch, system_clock};
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
 
@@ -21,7 +21,7 @@ impl Fixture {
         let runtime = Runtime::new(Arc::clone(&store), CommandQueue::new(), RuntimeOptions::new(directory.path().join("engine")));
         store
             .mutate(|state| {
-                state.set_runtime(RuntimeInfo { available: true, version: None, error: None });
+                state.set_runtime(RuntimeInfo { available: true, bot_message_chains: Some(true), version: None, error: None });
                 Ok(())
             })
             .await
@@ -36,32 +36,45 @@ impl Fixture {
             self.runtime.queue.clone(),
             crate::scheduler::SchedulerOptions { now: system_clock(), poll_interval: Duration::from_secs(3600), auto_start: false },
         );
-        crate::http::router(Arc::new(crate::http::HttpContext {
-            store: Arc::clone(&self.store),
-            runtime: Arc::clone(&self.runtime),
+        let ctx = crate::http::HttpContext::new(
+            Arc::clone(&self.store),
+            Arc::clone(&self.runtime),
             scheduler,
-            queue: self.runtime.queue.clone(),
-            allowed_hosts: crate::http::default_allowed_hosts(&[]),
-            port: std::sync::atomic::AtomicU16::new(3000),
-            closing: AtomicBool::new(false),
-            web_root: None,
-            mcp_test_stopping: watch::Sender::new(false),
-            stopping: watch::Sender::new(false),
-        }))
+            self.runtime.queue.clone(),
+            crate::http::default_allowed_hosts(&[]),
+            None,
+        );
+        ctx.port.store(3000, Ordering::SeqCst);
+        crate::http::router(Arc::new(ctx))
     }
 
     async fn run(&self, child: Option<(&str, &str)>) -> Arc<Run> {
-        let bot = self.store.read(|state| state.disk().bots[0].clone());
+        let bot_id = self.store.read(|state| state.disk().bots[0].id.clone());
         let conversation_id = match child {
             Some((id, _)) => id.to_owned(),
-            None => self.store.mutate(|state| state.add_conversation(&bot.id)).await.unwrap().id,
+            None => self.store.mutate(|state| state.add_conversation(&bot_id)).await.unwrap().id,
         };
+        self.run_in(&conversation_id, child.map(|(_, id)| id)).await
+    }
+
+    async fn run_in(&self, conversation_id: &str, worker_id: Option<&str>) -> Arc<Run> {
+        let bot = self.store.read(|state| state.bot(&state.conversation(conversation_id).unwrap().bot_id).unwrap().clone());
         let (run_id, message_id) = (new_id(), new_id());
         let now = iso(self.store.now());
         self.store
             .mutate(|state| {
-                let task = state.worker_for_conversation(&conversation_id).map(|(_, worker)| worker.task.clone()).unwrap_or_else(|| "A user task".into());
-                let conversation = state.conversation_mut(&conversation_id)?;
+                let inbound = state
+                    .disk()
+                    .bot_deliveries
+                    .iter()
+                    .find(|delivery| delivery.recipient_conversation_id == conversation_id)
+                    .map(|delivery| (delivery.from_bot_id.clone(), delivery.text.clone()));
+                let task = state
+                    .worker_for_conversation(conversation_id)
+                    .map(|(_, worker)| worker.task.clone())
+                    .or_else(|| inbound.as_ref().map(|(_, text)| text.clone()))
+                    .unwrap_or_else(|| "A user task".into());
+                let conversation = state.conversation_mut(conversation_id)?;
                 let message = |id, role, text| Message {
                     id,
                     role,
@@ -74,9 +87,11 @@ impl Fixture {
                     attachments: None,
                     report_delivery_ids: None,
                 };
-                conversation.messages = vec![message(new_id(), Role::User, task), message(message_id.clone(), Role::Assistant, String::new())];
+                let mut user = message(new_id(), Role::User, task);
+                user.source_bot_id = inbound.map(|(id, _)| id);
+                conversation.messages.extend([user, message(message_id.clone(), Role::Assistant, String::new())]);
                 conversation.run = RunState { id: run_id.clone(), status: RunStatus::Running, started_at: Some(now.clone()), ..RunState::idle() };
-                if let Some((_, worker_id)) = child {
+                if let Some(worker_id) = worker_id {
                     state.bind_worker_execution(worker_id, &run_id)?;
                 }
                 Ok(())
@@ -84,7 +99,7 @@ impl Fixture {
             .await
             .unwrap();
         let run = Arc::new(Run {
-            conversation_id,
+            conversation_id: conversation_id.to_owned(),
             run_id,
             message_id,
             settings: self.store.read(|state| state.settings().clone()),
@@ -98,7 +113,7 @@ impl Fixture {
             loaded_prompt: None,
             extra_rules: None,
             report_deliveries: Vec::new(),
-            worker_id: child.map(|(_, id)| id.to_owned()),
+            worker_id: worker_id.map(str::to_owned),
             worker_deadline: None,
             worker_report: None,
             keys: Vec::new(),
@@ -118,6 +133,22 @@ impl Fixture {
             self.store.mutate(|state| state.spawn_worker(&parent.conversation_id, &parent.message_id, &parent.run_id, task)).await.unwrap();
         }
         self.store.read(|state| state.disk().worker_batches[0].clone())
+    }
+
+    async fn delivery(&self, parent: &Run) -> BotDelivery {
+        self.store
+            .mutate(|state| {
+                let recipient =
+                    state.add_bot_from_run(BotInput { name: "Chain recipient".into(), instructions: None, color: None, shape: None, pinned: None })?;
+                state.queue_bot_message(
+                    &parent.conversation_id,
+                    &parent.run_id,
+                    &parent.message_id,
+                    BotMessageInput { to_bot_id: recipient.id, text: "A chat-only review".into(), request_id: None },
+                )
+            })
+            .await
+            .unwrap()
     }
 
     fn get(&self, run: &Run) -> Conversation {
@@ -436,6 +467,158 @@ async fn stop_resolves_a_child_admitted_under_the_queue_and_durable_cancellation
     assert!(batch.cancelled && batch.workers.iter().all(|worker| worker.status == DeliveryStatus::Cancelled));
     assert!(batch.report.is_none());
     assert!(recovered.read(|state| state.active().is_none()));
+}
+
+#[tokio::test]
+async fn root_stop_cancels_bot_chain_and_worker_batch_together_before_queue_admission() {
+    for active_worker in [false, true] {
+        let f = Fixture::new().await;
+        let parent = f.run(None).await;
+        let batch = f.batch(&parent).await;
+        let delivery = f.delivery(&parent).await;
+        f.runtime.finish(&parent, Outcome::default()).await;
+        let active = if active_worker {
+            f.run(Some((&batch.workers[0].conversation_id, &batch.workers[0].id))).await
+        } else {
+            f.run_in(&delivery.recipient_conversation_id, None).await
+        };
+        let (entered, held) = oneshot::channel();
+        let (release, wait) = oneshot::channel();
+        let queue = f.runtime.queue.clone();
+        let holder = tokio::spawn(async move {
+            queue
+                .run(async {
+                    entered.send(()).unwrap();
+                    wait.await.unwrap();
+                })
+                .await
+        });
+        held.await.unwrap();
+        let finish = f.finish_when_stopped(&active);
+        let cancel = f.runtime.cancel(&parent.conversation_id);
+        tokio::pin!(cancel);
+        assert!(futures::poll!(&mut cancel).is_pending());
+        stopped(&active).await;
+        assert!(!active_worker || active.flags().stop_chains.is_empty(), "worker ownership does not invent chain membership");
+        if !active_worker {
+            assert!(active.flags().stop_chains.contains(&delivery.chain_id));
+        }
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), &mut cancel).await.unwrap().unwrap();
+        settled(holder).await;
+        settled(finish).await;
+        assert!(*active.done.borrow());
+        let recovered = Store::open(f.store.data_dir(), system_clock()).await.unwrap();
+        recovered.read(|state| {
+            let batch = state.worker_batch(&batch.id).unwrap();
+            assert!(batch.cancelled && batch.workers.iter().all(|worker| worker.status == DeliveryStatus::Cancelled));
+            assert!(batch.report.as_ref().is_none_or(|report| report.status.is_terminal()));
+            let delivery = state.disk().bot_deliveries.iter().find(|item| item.id == delivery.id).unwrap();
+            assert_eq!(delivery.chain_termination.as_ref().unwrap().status, RunStatus::Cancelled);
+            assert_eq!(delivery.status, DeliveryStatus::Cancelled);
+            assert!(delivery.report.as_ref().is_none_or(|report| report.status.is_terminal()));
+            assert!(state.active().is_none());
+        });
+    }
+}
+
+#[tokio::test]
+async fn failed_chain_cascade_still_settles_the_recipient_and_cancels_queued_workers() {
+    let f = Fixture::new().await;
+    let parent = f.run(None).await;
+    let batch = f.batch(&parent).await;
+    let delivery = f.delivery(&parent).await;
+    f.runtime.finish(&parent, Outcome::default()).await;
+    let recipient = f.run_in(&delivery.recipient_conversation_id, None).await;
+    let blocked = BlockedWriter::new(&f.store);
+    let (entered, held) = oneshot::channel();
+    let (runtime, run) = (Arc::clone(&f.runtime), Arc::clone(&recipient));
+    let broker = tokio::spawn(async move {
+        let _call = run.broker.lock().await;
+        entered.send(()).unwrap();
+        run.stopped().await;
+        runtime.queue.run(async { assert!(run.inactive()) }).await;
+    });
+    held.await.unwrap();
+    let finish = f.finish_when_stopped(&recipient);
+    let error = tokio::time::timeout(Duration::from_secs(2), f.runtime.cancel(&parent.conversation_id)).await.unwrap().unwrap_err();
+    assert_eq!(error.status, 500, "return the original failed cascade, not finish's later 503");
+    assert!(*recipient.done.borrow());
+    stopped(&recipient).await;
+    settled(broker).await;
+    settled(finish).await;
+    f.store.read(|state| {
+        let batch = state.worker_batch(&batch.id).unwrap();
+        assert!(batch.cancelled && batch.workers.iter().all(|worker| worker.status == DeliveryStatus::Cancelled));
+        let root = state.disk().bot_deliveries.iter().find(|item| item.id == delivery.id).unwrap();
+        assert_eq!(root.chain_termination.as_ref().unwrap().status, RunStatus::Cancelled);
+    });
+    drop(blocked);
+    let recovered = Store::open(f.store.data_dir(), system_clock()).await.unwrap();
+    recovered.read(|state| {
+        assert!(!state.worker_batch(&batch.id).unwrap().cancelled, "failed cancellation is not claimed durable");
+        let root = state.disk().bot_deliveries.iter().find(|item| item.id == delivery.id).unwrap();
+        assert!(root.chain_termination.is_none());
+        assert_eq!(root.status, DeliveryStatus::Interrupted, "an unsaved Stop still cannot replay a started recipient");
+    });
+}
+
+#[tokio::test]
+async fn selected_queued_bot_report_cancellation_leaves_an_active_worker_and_sibling_untouched() {
+    let f = Fixture::new().await;
+    let parent = f.run(None).await;
+    let batch = f.batch(&parent).await;
+    let delivery = f.delivery(&parent).await;
+    f.runtime.finish(&parent, Outcome::default()).await;
+    let recipient = f.run_in(&delivery.recipient_conversation_id, None).await;
+    f.runtime.finish(&recipient, Outcome::default()).await;
+    let worker = f.run(Some((&batch.workers[0].conversation_id, &batch.workers[0].id))).await;
+    let selected = vec![delivery.id.clone()];
+    let cancelled = f.runtime.queue.run(f.store.mutate(|state| state.cancel_bot_reports(&parent.conversation_id, &selected))).await.unwrap();
+    assert_eq!(cancelled, selected);
+    assert!(!*worker.stop.borrow() && !worker.inactive(), "selected report cancellation is not whole-root Stop");
+    f.store.read(|state| {
+        let batch = state.worker_batch(&batch.id).unwrap();
+        assert!(!batch.cancelled);
+        assert_eq!(batch.workers[0].status, DeliveryStatus::Running);
+        assert_eq!(batch.workers[1].status, DeliveryStatus::Queued);
+    });
+    f.runtime.finish(&worker, Outcome::default()).await;
+}
+
+#[tokio::test]
+async fn a_fast_settling_user_stop_does_not_expand_to_an_unrelated_historical_bot_chain() {
+    let f = Fixture::new().await;
+    let parent = f.run(None).await;
+    let delivery = f.delivery(&parent).await;
+    f.runtime.finish(&parent, Outcome::default()).await;
+    let current = f.run_in(&parent.conversation_id, None).await;
+    let (entered, held) = oneshot::channel();
+    let (release, wait) = oneshot::channel();
+    let queue = f.runtime.queue.clone();
+    let holder = tokio::spawn(async move {
+        queue
+            .run(async {
+                entered.send(()).unwrap();
+                wait.await.unwrap();
+            })
+            .await
+    });
+    held.await.unwrap();
+    let finish = f.finish_when_stopped(&current);
+    let cancel = f.runtime.cancel(&current.conversation_id);
+    tokio::pin!(cancel);
+    assert!(futures::poll!(&mut cancel).is_pending());
+    settled(finish).await;
+    assert!(f.runtime.run_for_conversation(&parent.conversation_id).is_none());
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), &mut cancel).await.unwrap().unwrap();
+    settled(holder).await;
+    f.store.read(|state| {
+        let root = state.disk().bot_deliveries.iter().find(|item| item.id == delivery.id).unwrap();
+        assert_eq!(root.status, DeliveryStatus::Queued);
+        assert!(root.chain_termination.is_none(), "Stop must retain the selected user turn's ownership scope");
+    });
 }
 
 #[tokio::test]

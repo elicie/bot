@@ -1,0 +1,266 @@
+{
+  "before-main": {
+    "label": "before-main",
+    "mode": "complete",
+    "capturedAt": "2026-11-02T09:05:54.666Z",
+    "viewport": {
+      "width": 1280,
+      "height": 900
+    },
+    "mobileViewports": [
+      {
+        "width": 390,
+        "height": 844
+      },
+      {
+        "width": 320,
+        "height": 844
+      }
+    ],
+    "theme": "dark",
+    "locale": "ko-KR",
+    "timezone": "UTC",
+    "provenance": {
+      "baselineRevision": "576aa44ad864b306e51e13d6fead65c251f077df",
+      "revision": "576aa44ad864b306e51e13d6fead65c251f077df",
+      "sourceDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "workingTreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "applicationWorkingTreeClean": true,
+      "sourceTreeSha256": "28012c0e0ab43374d2e5a453f6d36a5eddef686d2dfd1a0443d8bd98c0c0f08c",
+      "sourceFileCount": 235,
+      "webBuildSha256": "e7ccc5f984de98961ee7fa047a93fc9d0fba9126443857d6503142e869e734c7",
+      "webBuildFileCount": 161,
+      "evidenceScriptSha256": "9ce82015c511b5111ff32fba87c09b7c71b8362c305b201101b9a5fc1774789a"
+    },
+    "binarySha256": "a97d4602eac2c4d03ddd15e7bcb44a45d86c0c5dae117e1f97bd959c6b36c7b5",
+    "dataWasDisposable": true,
+    "uiAndApiResponsesWereNotOverridden": true,
+    "providerWasLocalScriptedFixture": true,
+    "sourcePrompt": "B 검토자에게 재시도 정책 검토를 요청해 주세요. B는 C 전문가에게 대기 시간을 확인하고, C의 답을 반영해 정리한 뒤 최종 결과를 저에게 알려 주세요.",
+    "draft": "별도 질문 초안",
+    "messageAB": "C 전문가에게 재시도 대기 시간을 확인하고, 그 답을 반영한 최종 검토 결과를 알려 주세요.",
+    "messageBC": "재시도 정책의 권장 대기 시간을 확인하고 짧게 답해 주세요.",
+    "childAnswer": "C 검토 완료: 권장 재시도 대기 시간은 47초입니다.",
+    "approvalCount": 2,
+    "providerMainRequestCounts": {
+      "A": 4,
+      "B": 3,
+      "C": 1,
+      "U": 0
+    },
+    "finalAnswer": "B 검토자가 C 전문가에게 확인을 요청했습니다. 아직 C의 최종 결과는 받지 못했습니다.",
+    "finalDeliveries": [
+      {
+        "hop": 1,
+        "status": "completed",
+        "report": "completed"
+      },
+      {
+        "hop": 2,
+        "status": "completed",
+        "report": null
+      }
+    ],
+    "nestedCancel": null,
+    "pageErrors": [],
+    "mobileOverflow": {
+      "waiting-1280": false,
+      "waiting-390": false,
+      "waiting-320": false,
+      "final-1280": false,
+      "final-390": false,
+      "final-320": false
+    },
+    "stateFileMode": 384,
+    "waitingControls": {
+      "sendExists": true,
+      "sendEnabled": false,
+      "independentChainStop": false,
+      "activeRunStop": false,
+      "draft": "별도 질문 초안",
+      "explanation": "C owns the existing global engine slot. Send must remain disabled here; only the idle routed UI-contract test plus manual-scheduler runtime test cover enabled submission."
+    }
+  },
+  "after": {
+    "label": "after",
+    "mode": "complete",
+    "capturedAt": "2026-11-02T09:14:29.874Z",
+    "viewport": {
+      "width": 1280,
+      "height": 900
+    },
+    "mobileViewports": [
+      {
+        "width": 390,
+        "height": 844
+      },
+      {
+        "width": 320,
+        "height": 844
+      }
+    ],
+    "theme": "dark",
+    "locale": "ko-KR",
+    "timezone": "UTC",
+    "provenance": {
+      "baselineRevision": "576aa44ad864b306e51e13d6fead65c251f077df",
+      "revision": "4af531e7ffc12c09430c68d41ae3442363a072e3",
+      "sourceDiffSha256": "5fcbfbbb836f83da693d799e73c4f5ee4516e8c20e81eaf2c73ba1bd515917a0",
+      "workingTreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "applicationWorkingTreeClean": true,
+      "sourceTreeSha256": "79c6ff45c1a0900b2aee160fefbbd772f4b7d5c184611cdff92456089d04beca",
+      "sourceFileCount": 239,
+      "webBuildSha256": "8a1269282b53e7747682d0abc372c2d08755eea7de6471c61a55bee2f1283c0b",
+      "webBuildFileCount": 161,
+      "evidenceScriptSha256": "9ce82015c511b5111ff32fba87c09b7c71b8362c305b201101b9a5fc1774789a"
+    },
+    "binarySha256": "da67fe20178dfc1bebeb2c2eaec33e623f024259bf65f40181227bc17875ffd3",
+    "dataWasDisposable": true,
+    "uiAndApiResponsesWereNotOverridden": true,
+    "providerWasLocalScriptedFixture": true,
+    "sourcePrompt": "B 검토자에게 재시도 정책 검토를 요청해 주세요. B는 C 전문가에게 대기 시간을 확인하고, C의 답을 반영해 정리한 뒤 최종 결과를 저에게 알려 주세요.",
+    "draft": "별도 질문 초안",
+    "messageAB": "C 전문가에게 재시도 대기 시간을 확인하고, 그 답을 반영한 최종 검토 결과를 알려 주세요.",
+    "messageBC": "재시도 정책의 권장 대기 시간을 확인하고 짧게 답해 주세요.",
+    "childAnswer": "C 검토 완료: 권장 재시도 대기 시간은 47초입니다.",
+    "approvalCount": 2,
+    "providerMainRequestCounts": {
+      "A": 4,
+      "B": 4,
+      "C": 1,
+      "U": 0
+    },
+    "finalAnswer": "최종 검토 결과: 권장 재시도 대기 시간은 **47초**입니다.\n\nC 전문가의 답변을 B 검토자가 정리했고, 그 결과를 최종 답변에 반영했습니다.",
+    "finalDeliveries": [
+      {
+        "hop": 1,
+        "status": "completed",
+        "report": "completed"
+      },
+      {
+        "hop": 2,
+        "status": "completed",
+        "report": "completed"
+      }
+    ],
+    "nestedCancel": null,
+    "pageErrors": [],
+    "mobileOverflow": {
+      "waiting-1280": false,
+      "waiting-390": false,
+      "waiting-320": false,
+      "final-1280": false,
+      "final-390": false,
+      "final-320": false
+    },
+    "stateFileMode": 384,
+    "waitingControls": {
+      "sendExists": true,
+      "sendEnabled": false,
+      "independentChainStop": true,
+      "activeRunStop": false,
+      "draft": "별도 질문 초안",
+      "explanation": "C owns the existing global engine slot. Send must remain disabled here; only the idle routed UI-contract test plus manual-scheduler runtime test cover enabled submission."
+    }
+  },
+  "after-nested-cancel": {
+    "label": "after",
+    "mode": "nested-cancel",
+    "capturedAt": "2026-11-02T09:14:43.074Z",
+    "viewport": {
+      "width": 1280,
+      "height": 900
+    },
+    "mobileViewports": [
+      {
+        "width": 390,
+        "height": 844
+      },
+      {
+        "width": 320,
+        "height": 844
+      }
+    ],
+    "theme": "dark",
+    "locale": "ko-KR",
+    "timezone": "UTC",
+    "provenance": {
+      "baselineRevision": "576aa44ad864b306e51e13d6fead65c251f077df",
+      "revision": "4af531e7ffc12c09430c68d41ae3442363a072e3",
+      "sourceDiffSha256": "5fcbfbbb836f83da693d799e73c4f5ee4516e8c20e81eaf2c73ba1bd515917a0",
+      "workingTreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "applicationWorkingTreeClean": true,
+      "sourceTreeSha256": "79c6ff45c1a0900b2aee160fefbbd772f4b7d5c184611cdff92456089d04beca",
+      "sourceFileCount": 239,
+      "webBuildSha256": "8a1269282b53e7747682d0abc372c2d08755eea7de6471c61a55bee2f1283c0b",
+      "webBuildFileCount": 161,
+      "evidenceScriptSha256": "9ce82015c511b5111ff32fba87c09b7c71b8362c305b201101b9a5fc1774789a"
+    },
+    "binarySha256": "da67fe20178dfc1bebeb2c2eaec33e623f024259bf65f40181227bc17875ffd3",
+    "dataWasDisposable": true,
+    "uiAndApiResponsesWereNotOverridden": true,
+    "providerWasLocalScriptedFixture": true,
+    "sourcePrompt": "B 검토자에게 재시도 정책 검토를 요청해 주세요. B는 C 전문가에게 대기 시간을 확인하고, C의 답을 반영해 정리한 뒤 최종 결과를 저에게 알려 주세요.",
+    "draft": "별도 질문 초안",
+    "messageAB": "C 전문가에게 재시도 대기 시간을 확인하고, 그 답을 반영한 최종 검토 결과를 알려 주세요.",
+    "messageBC": "재시도 정책의 권장 대기 시간을 확인하고 짧게 답해 주세요.",
+    "childAnswer": "C 검토 완료: 권장 재시도 대기 시간은 47초입니다.",
+    "approvalCount": 2,
+    "providerMainRequestCounts": {
+      "A": 4,
+      "B": 3,
+      "C": 1,
+      "U": 1
+    },
+    "finalAnswer": "B 검토자의 후속 답변이 취소되어 최종 검토를 마치지 못했습니다. 중간 답변을 최종 결과로 전달하지 않았습니다.",
+    "finalDeliveries": [
+      {
+        "hop": 1,
+        "status": "cancelled",
+        "report": "completed"
+      },
+      {
+        "hop": 2,
+        "status": "completed",
+        "report": "cancelled"
+      }
+    ],
+    "nestedCancel": {
+      "rootStatusAfterCancel": "cancelled",
+      "childReportAfterCancel": "cancelled",
+      "rootExchangeMessageCount": 1,
+      "usedActualPr39SelectedReportButton": true,
+      "selectedDeliveryIds": [
+        "e813cdf5-b1b0-4304-b1f9-467decdbe16f"
+      ],
+      "cancelledDeliveryIds": [
+        "e813cdf5-b1b0-4304-b1f9-467decdbe16f"
+      ],
+      "cancelResponseWrappedState": true,
+      "unrelatedRoutineStillRunning": true,
+      "persistedReopenNoReplay": true
+    },
+    "pageErrors": [],
+    "mobileOverflow": {
+      "waiting-1280": false,
+      "waiting-390": false,
+      "waiting-320": false,
+      "queued-in-b-390": false,
+      "queued-in-b-320": false,
+      "cancelled-in-b-390": false,
+      "cancelled-in-b-320": false,
+      "final-1280": false,
+      "final-390": false,
+      "final-320": false
+    },
+    "stateFileMode": 384,
+    "waitingControls": {
+      "sendExists": true,
+      "sendEnabled": false,
+      "independentChainStop": true,
+      "activeRunStop": false,
+      "draft": "별도 질문 초안",
+      "explanation": "C owns the existing global engine slot. Send must remain disabled here; only the idle routed UI-contract test plus manual-scheduler runtime test cover enabled submission."
+    }
+  }
+}

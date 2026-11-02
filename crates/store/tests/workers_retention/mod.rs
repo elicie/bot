@@ -80,6 +80,7 @@ async fn install(f: &Fixture, batches: &[WorkerBatch], private_bytes: usize) {
                     thread: None,
                     group_round: None,
                     member_sessions: None,
+                    canvas: None,
                 };
                 if let Some(report) = &batch.report
                     && let Some(run_id) = &report.run_id

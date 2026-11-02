@@ -10,7 +10,7 @@ pub const MAX_PUBLIC_TEXT: usize = 200_000;
 pub const MAX_CONTINUATION_CONTEXT_BYTES: usize = 64 * 1024;
 /// Part of the session fingerprint. Changing it forces new sessions; `broker-v6` was the last tag of
 /// the per-process engine, so its sessions are never loaded by the in-process host.
-pub const BROKER_VERSION: &str = "broker-v12-scoped-workers";
+pub const BROKER_VERSION: &str = "broker-v13-scoped-workers-canvas-pages";
 
 /// `value.slice(0, max)` on a JavaScript string: cut after at most `max` UTF-16 code units, at a
 /// character boundary (a JS slice could split a surrogate pair; a Rust string cannot hold one).

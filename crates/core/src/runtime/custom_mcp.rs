@@ -13,12 +13,13 @@
 //! Startup problems never fail the turn: a server with a missing secret is skipped, and an engine
 //! `x.ai/mcp/server_status` report of an unavailable server becomes a failed tool activity.
 
-use std::collections::HashSet;
-use std::path::Path;
+use std::collections::{BTreeMap, HashSet};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol as acp;
-use grok_bot_model::{McpPair, McpServerConfig, PermissionOption, ToolActivity, ToolStatus, new_id};
+use grok_bot_model::{HttpError, HttpResult, McpPair, McpServerConfig, PermissionOption, ToolActivity, ToolStatus, new_id};
 use grok_bot_store::permissions::PermissionPolicy;
 use grok_bot_store::vault::{McpStartupFailure, ResolvedMcpServer};
 use serde_json::{Value, json};
@@ -35,6 +36,46 @@ const TOOL_TIMEOUT_MS: u64 = 25_000;
 /// Follow-up the engine adds as a user turn when the user declines a custom tool call.
 const DECLINED_FOLLOWUP: &str =
     "I declined that custom MCP tool call in the browser, so it did not run. Continue without it, and do not retry the same call unless I ask.";
+
+/// Launch context of the pinned in-process engine's custom MCP subprocesses. Upstream
+/// `servers::start_mcp_server` inherits process env/cwd, layers configured env, then sets
+/// GROK_SESSION_ID. Its shell-side `cwd` parameter resolves config only; it does NOT chdir to the
+/// ACP session's private workspace. The shell_environment_policy does not apply to MCP servers.
+/// Never Debug/serialize this: inherited values may contain credentials.
+pub(crate) struct McpLaunchContext {
+    cwd: PathBuf,
+    environment: BTreeMap<OsString, OsString>,
+    session_id: String,
+}
+
+impl McpLaunchContext {
+    pub(crate) fn capture() -> HttpResult<Self> {
+        Ok(Self {
+            cwd: std::env::current_dir().map_err(|_| HttpError::unavailable("MCP 실행 오류: 엔진 작업 폴더를 확인해 주세요."))?,
+            environment: std::env::vars_os().collect(),
+            // A probe has no persisted ACP session, but the same final env precedence applies.
+            session_id: new_id(),
+        })
+    }
+
+    pub(crate) fn apply(&self, command: &mut tokio::process::Command, configured: &[McpPair]) {
+        command
+            .current_dir(&self.cwd)
+            .env_clear()
+            .envs(&self.environment)
+            .envs(configured.iter().map(|pair| (&pair.name, &pair.value)))
+            .env("GROK_SESSION_ID", &self.session_id);
+    }
+
+    fn path(&self, configured: &[McpPair]) -> OsString {
+        configured
+            .iter()
+            .find(|pair| pair.name == "PATH")
+            .map(|pair| OsString::from(&pair.value))
+            .or_else(|| self.environment.get(std::ffi::OsStr::new("PATH")).cloned())
+            .unwrap_or_default()
+    }
+}
 
 /// The custom servers of one run.
 #[derive(Default)]
@@ -137,8 +178,10 @@ fn command_available(command: &str, env: &[McpPair]) -> bool {
     if command.starts_with('/') {
         return executable(Path::new(command));
     }
-    let search = env.iter().find(|pair| pair.name == "PATH").map(|pair| pair.value.clone()).or_else(|| std::env::var("PATH").ok()).unwrap_or_default();
-    search.split(':').filter(|directory| !directory.is_empty()).any(|directory| executable(&Path::new(directory).join(command)))
+    let Ok(launch) = McpLaunchContext::capture() else {
+        return false;
+    };
+    std::env::split_paths(&launch.path(env)).any(|directory| executable(&launch.cwd.join(directory).join(command)))
 }
 
 /// Session context fingerprint including the enabled custom server configurations (`None`: the

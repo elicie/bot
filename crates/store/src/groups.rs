@@ -154,6 +154,7 @@ fn new_conversation(bot_id: String, group_id: Option<String>, thread: Option<Thr
         thread,
         group_round: None,
         member_sessions: None,
+        canvas: None,
     }
 }
 

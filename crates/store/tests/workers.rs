@@ -474,6 +474,7 @@ async fn routine_group_thread_and_other_bot_report_sources_cannot_spawn_workers(
                         finished_at: None,
                         error: None,
                         report: None,
+                        chain_termination: None,
                     }),
                     "report" => state.disk_mut().conversations[0].messages[0].report_delivery_ids = Some(Vec::new()),
                     _ => unreachable!(),

@@ -163,6 +163,8 @@ mod tests {
             "delete_routine",
             "list_routines",
             "list_bots",
+            "read_canvas",
+            "replace_canvas_range",
             "future_mutating_tool",
             "custom__tool",
         ] {

@@ -90,7 +90,7 @@ pub(super) fn report_prompt(state: &State, batch_id: &str, conversation_id: &str
         || batch.released_at.is_none()
         || batch.report.as_ref().is_none_or(|report| report.status != ReportStatus::Queued)
         || batch.workers.is_empty()
-        || batch.workers.iter().any(|worker| matches!(worker.status, grok_bot_model::DeliveryStatus::Queued | grok_bot_model::DeliveryStatus::Running))
+        || batch.workers.iter().any(|worker| !worker.status.is_terminal())
     {
         return Err(HttpError::conflict("This worker batch is not waiting for a follow-up."));
     }

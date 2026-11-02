@@ -20,7 +20,7 @@ pub const MAX_WORKER_TASK_BYTES: usize = 16 * 1024;
 pub const MAX_WORKER_ANSWER_BYTES: usize = 48 * 1024;
 
 pub fn worker_terminal(status: DeliveryStatus) -> bool {
-    !matches!(status, DeliveryStatus::Queued | DeliveryStatus::Running)
+    status.is_terminal()
 }
 
 pub fn worker_batch_pending(batch: &WorkerBatch) -> bool {
@@ -182,6 +182,7 @@ pub(crate) fn schema_valid(disk: &DiskState) -> bool {
                                     && worker.error.is_none()
                                     && worker.answer.is_none()
                             }
+                            DeliveryStatus::WaitingChildren => false,
                             DeliveryStatus::Completed => {
                                 worker.execution_run_id.is_some()
                                     && worker.started_at.is_some()
@@ -385,40 +386,7 @@ pub(crate) fn authorization_valid(disk: &DiskState, data_dir: &Path) -> bool {
     disk.worker_batches.iter().all(|batch| batch.authorized_workspace.as_deref().is_none_or(|workspace| authorized_workspace_valid(workspace, Some(data_dir))))
 }
 
-fn slice_empty<T>(value: &&[T]) -> bool {
-    value.is_empty()
-}
-
-/// Additional persisted fields the pre-worker generic capacity estimator intentionally omits.
-/// Measure them for worker admission only, retaining the original estimator for unrelated features.
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WorkerCapacityMetadata<'a> {
-    #[serde(skip_serializing_if = "slice_empty")]
-    permission_rules: &'a [PermissionRule],
-    #[serde(skip_serializing_if = "slice_empty")]
-    groups: &'a [Group],
-    #[serde(skip_serializing_if = "slice_empty")]
-    secrets: &'a [VaultSecret],
-    #[serde(skip_serializing_if = "slice_empty")]
-    mcp_servers: &'a [McpServerRecord],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    main_bot_id: Option<&'a str>,
-}
-
 impl State {
-    fn worker_capacity_metadata_bytes(&self) -> usize {
-        let bytes = crate::json_bytes(&WorkerCapacityMetadata {
-            permission_rules: &self.disk.permission_rules,
-            groups: &self.disk.groups,
-            secrets: &self.disk.secrets,
-            mcp_servers: &self.disk.mcp_servers,
-            main_bot_id: self.disk.main_bot_id.as_deref(),
-        });
-        // Remove braces and add the comma joining these fields to the prospective object.
-        if bytes > 2 { bytes - 1 } else { 0 }
-    }
-
     /// Bound terminal worker details, never user-authored messages or synthesized assistant replies.
     /// Call as a standalone maintenance mutation BEFORE admission/count/byte checks. Returning an
     /// error after applying this change would not roll it back (`Store::mutate` is not transactional).
@@ -606,6 +574,7 @@ impl State {
             thread: None,
             group_round: None,
             member_sessions: None,
+            canvas: None,
         };
         let worker = WorkerTask {
             id: new_id(),
@@ -642,7 +611,8 @@ impl State {
             Some(index) => prospect.worker_batches[index] = &batch,
             None => prospect.worker_batches.push(&batch),
         }
-        Self::check_capacity_with_extra(&prospect, self.worker_capacity_metadata_bytes())?;
+        // Main's prospective serializer includes all metadata; count it exactly once.
+        Self::check_capacity(&prospect)?;
         let disk = self.disk_mut();
         disk.conversations.push(conversation);
         match existing {

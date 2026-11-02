@@ -9,7 +9,10 @@ use grok_bot_model::{
     BotDelivery, BotInput, BotMessageInput, HttpError, HttpResult, PendingPermission, PermissionCategory, PermissionOption, SkillInput, ToolActivity,
     ToolStatus, new_id,
 };
-use grok_bot_store::bot_messages::{MAX_BOT_HOPS, MAX_BOT_MESSAGE_BYTES, bot_delivery_receipt, chain_parent, validate_bot_message_input};
+use grok_bot_store::bot_messages::{
+    BOT_CHAIN_CAPACITY_ERROR, BOT_CHAIN_TIMEOUT_ERROR, MAX_BOT_DELIVERIES_PER_CHAIN, MAX_BOT_HOPS, MAX_BOT_MESSAGE_BYTES, bot_delivery_receipt, chain_parent,
+    validate_bot_message_input,
+};
 use grok_bot_store::skills::{MAX_SKILL_RESPONSE_BYTES, skill_response_text, validate_skill_input};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -18,6 +21,7 @@ use super::text::utf16_len;
 use super::{Run, Runtime, message_mut};
 
 pub(super) mod bot_data;
+pub(super) mod canvas;
 pub(super) mod computer;
 pub(super) mod routines;
 mod workers;
@@ -60,6 +64,7 @@ pub fn broker_tools() -> Value {
         list.splice(3..3, computer::tools());
         list.extend(bot_data::tools());
         list.extend(routines::tools());
+        list.extend(canvas::tools());
         list.push(workers::tool());
     }
     tools
@@ -74,6 +79,7 @@ enum ToolCall {
     CreateBot(BotInput),
     SpawnWorker { task: String },
     BotData(bot_data::Call),
+    Canvas(canvas::Call),
     Computer(computer::Call),
     Routine(routines::Call),
     ListFiles { path: String },
@@ -108,6 +114,9 @@ fn parse_call(params: &Value) -> BrokerResult<ToolCall> {
     let arguments = params.get("arguments").and_then(Value::as_object).ok_or(BrokerError::Invalid)?;
     if let Some(call) = bot_data::parse(name, arguments) {
         return call.map(ToolCall::BotData);
+    }
+    if let Some(call) = canvas::parse(name, arguments) {
+        return call.map(ToolCall::Canvas);
     }
     if let Some(call) = routines::parse(name, arguments) {
         return call.map(ToolCall::Routine);
@@ -233,7 +242,7 @@ impl Runtime {
             "tools/call" => {
                 // Tool calls of one run execute in order; finishing waits for the one in progress.
                 let _turn = run.broker.lock().await;
-                let skill_result = matches!(params.get("name").and_then(Value::as_str), Some("list_skills" | "read_skill"))
+                let skill_result = matches!(params.get("name").and_then(Value::as_str), Some("list_skills" | "read_skill" | "read_canvas"))
                     || params.get("name").and_then(Value::as_str).is_some_and(|name| bot_data::NAMES.contains(&name));
                 match self.broker_call(&run, &params).await {
                     Ok(output) => {
@@ -338,6 +347,7 @@ impl Runtime {
             ToolCall::CreateBot(input) => self.create_bot(run, input).await,
             ToolCall::SpawnWorker { task } => self.spawn_worker(run, task).await,
             ToolCall::BotData(call) => self.bot_data_call(run, call).await,
+            ToolCall::Canvas(call) => self.canvas_call(run, call).await,
             ToolCall::Routine(call) => self.routine_call(run, call).await,
             ToolCall::Computer(call) => self.computer_call(run, call).await,
             call => self.file_call(run, call).await,
@@ -443,6 +453,17 @@ impl Runtime {
             let recipient = state.bot(&input.to_bot_id)?;
             // A report turn's message continues the reported delivery's chain (see `chain_parent`).
             let parent = chain_parent(&state.disk().bot_deliveries, state.conversation(&run.conversation_id)?, &run.message_id);
+            if let Some(parent) = parent {
+                if state.disk().bot_deliveries.iter().filter(|delivery| delivery.chain_id == parent.chain_id).count() >= MAX_BOT_DELIVERIES_PER_CHAIN {
+                    return Err(HttpError::conflict(BOT_CHAIN_CAPACITY_ERROR));
+                }
+                if state.expired_bot_chains(state.now()).contains(&parent.chain_id) {
+                    return Err(HttpError::conflict(BOT_CHAIN_TIMEOUT_ERROR));
+                }
+                if state.disk().bot_deliveries.iter().any(|delivery| delivery.id == parent.chain_id && delivery.chain_termination.is_some()) {
+                    return Err(HttpError::conflict("This bot message chain was stopped."));
+                }
+            }
             Ok((recipient.id.clone(), recipient.name.clone(), parent.map(|d| d.hop).unwrap_or(0)))
         })?;
         if recipient_id == run.bot.id {
@@ -685,6 +706,8 @@ mod tests {
                 "save_routine",
                 "set_routine_enabled",
                 "delete_routine",
+                "read_canvas",
+                "replace_canvas_range",
                 "spawn_worker"
             ]
         );

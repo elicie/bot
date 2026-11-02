@@ -36,6 +36,10 @@ export interface VaultAccess {
 export interface McpConfigDocument {
   json: string;
 }
+/** `PUT /api/bots/:botId/mcp-servers`: optional new secrets commit with the document. */
+export interface McpConfigInput extends McpConfigDocument {
+  secrets?: SecretInput[];
+}
 /** `POST /api/bots/:botId/mcp-servers/test` (loopback only, never persists). */
 export interface McpConnectionTestInput {
   /** Exactly one server in the same JSON format used by configuration storage. */

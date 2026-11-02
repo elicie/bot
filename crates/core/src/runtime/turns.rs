@@ -270,7 +270,7 @@ const REPORT_MESSAGE_BYTES: usize = 8 * 1024;
 /// An automatic follow-up ("report") turn: the sender bot continues its conversation with the
 /// results of the deliveries it sent from there.
 pub(crate) struct ReportTurn {
-    /// The reported deliveries (all queued reports of the conversation, oldest first).
+    /// The reported deliveries (queued reports of the oldest chain in the conversation).
     pub delivery_ids: Vec<String>,
     /// The hidden user input: the results as quoted JSON conversation data. It carries the turn's
     /// guidance itself: a loaded engine session keeps the system prompt it was created with.
@@ -280,10 +280,11 @@ pub(crate) struct ReportTurn {
 /// Plan the report turn of `conversation_id` from its queued reports.
 pub(crate) fn report(state: &State, conversation_id: &str) -> HttpResult<ReportTurn> {
     let disk = state.disk();
-    let queued = grok_bot_store::bot_messages::queued_reports(&disk.bot_deliveries, conversation_id);
-    if queued.is_empty() {
-        return Err(HttpError::conflict("No bot reply is waiting for a follow-up in this conversation."));
-    }
+    let mut queued = grok_bot_store::bot_messages::queued_reports(&disk.bot_deliveries, conversation_id);
+    let chain_id = queued.first().ok_or_else(|| HttpError::conflict("No bot reply is waiting for a follow-up in this conversation."))?.chain_id.clone();
+    // One turn belongs to one chain: Stop, deadline, and outbound lineage must never couple
+    // unrelated requests merely because their answers arrived in the same conversation.
+    queued.retain(|delivery| delivery.chain_id == chain_id);
     let key = state.redaction_keys();
     let mut names: Vec<String> = Vec::new();
     let replies: Vec<Value> = queued

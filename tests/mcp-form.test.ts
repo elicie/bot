@@ -24,10 +24,15 @@ test('HTTP draft references the vault and keeps direct values out of JSON', () =
   assert.ok(!input.json.includes('write-only-value'));
 });
 
-test('stdio arguments are literal argv entries, including spaces, quotes and empty strings', () => {
-  const draft = { ...emptyMcpDraft(), name: 'local', command: ' node ', args: ['a b', '"quoted"', ''], env: [pair({ name: 'API_TOKEN', prefix: 'ignored' })] };
+test('stdio arguments keep literal spaces and quotes but reject empty form rows', () => {
+  const draft = { ...emptyMcpDraft(), name: 'local', command: ' node ', args: ['a b', '"quoted"'], env: [pair({ name: 'API_TOKEN', prefix: 'ignored' })] };
   assert.deepEqual(mcpDraftProblems(draft, [], [secret('TOKEN')]), {});
-  assert.deepEqual(JSON.parse(buildMcpDraft(draft, 'bot').json), { mcpServers: { local: { command: 'node', args: ['a b', '"quoted"', ''], env: { API_TOKEN: '${secret:TOKEN}' } } } });
+  assert.deepEqual(JSON.parse(buildMcpDraft(draft, 'bot').json), { mcpServers: { local: { command: 'node', args: ['a b', '"quoted"'], env: { API_TOKEN: '${secret:TOKEN}' } } } });
+  for (const blank of ['', '   ', '\t']) {
+    const problems = mcpDraftProblems({ ...draft, args: ['valid', blank] }, [], [secret('TOKEN')]);
+    assert.equal(problems['arg-0'], undefined);
+    assert.equal(problems['arg-1'], '빈 인자 칸은 삭제하거나 값을 입력해 주세요.');
+  }
 });
 
 test('name, URL, command, argument and per-bot limits give field errors', () => {

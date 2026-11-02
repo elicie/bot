@@ -112,6 +112,12 @@
 .bot-report-marker svg { color: var(--muted); flex: none; }
 .bot-report-marker .text-button { font-size: 11px; }
 .pair-report { display: flex; align-items: center; gap: 6px; justify-content: center; margin-top: 10px; color: var(--secondary); font-size: 11px; }
+.pair-execution { display: flex; justify-content: center; margin-top: 8px; font-size: 11px; }
+.bot-request-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin: 0 0 14px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--secondary); font-size: 12px; }
+.bot-request-banner > svg { color: var(--muted); flex: none; }
+.bot-request-banner strong { color: var(--text, #f2f2f2); font-weight: 500; }
+.bot-request-banner .text-button { margin-left: auto; }
+.history-item .history-request { display: inline-flex; align-items: center; gap: 4px; color: var(--secondary); }
 .pair-header { display: flex; align-items: center; justify-content: center; gap: 12px; min-height: 60px; font-size: 14px; }
 .pair-header > span { display: flex; align-items: center; gap: 7px; }.pair-header > svg { color: var(--muted); }
 .pair-transcript { flex: 1; overflow-y: auto; padding: 24px; }.pair-transcript > div { max-width: 760px; margin: 0 auto; }
