@@ -22,6 +22,9 @@ const cases: [string, string, string][] = [
   ['placeholder collision', 'PREVIEWMATH0END \\(x\\)', 'PREVIEWMATH0END x'],
   ['encoded placeholder collision', '&#80;REVIEWMATH0END \\(x\\)', 'PREVIEWMATH0END x'],
   ['formatted placeholder collision', 'PREVIEW**MATH**0END \\(x\\)', 'PREVIEWMATH0END x'],
+  ['private-use placeholder collision', '\ue000 &#57345; \\(x\\)', '\ue000 \ue001 x'],
+  ['unmatched currency before math', 'price $5 then \\(a_i * b_j\\)', 'price $5 then a_i * b_j'],
+  ['unmatched opener before display math', 'start \\( unmatched then \\[a_i * b_j\\]', 'start ( unmatched then a_i * b_j'],
   ['quoted display math', '> \\[\n> x_i = y_j\n> \\]', 'x_i = y_j'],
   ['quoted comparison operator', '> \\[\n> x > y\n> \\]', 'x > y'],
   ['leading quoted inline comparison', '> \\(> 10\\)', '> 10'],
@@ -71,6 +74,20 @@ test('conversation preview formats the latest visible message without mutating s
   assert.equal(conversationPreview(conversation([message('**사용자**', { role: 'user' })])), '사용자');
 });
 
+test('nonempty HTML/format-only messages never claim the conversation is empty', () => {
+  for (const text of ['<div>보이는 내용</div>', '<p>Visible answer</p>', '---']) {
+    assert.equal(conversationPreview(conversation([message(text)])), '메시지');
+  }
+});
+
+test('math delimiters cannot consume code blocks or use a closing delimiter inside code', () => {
+  const source = '앞 \\(x\n\n```ts\nconst marker = "\\)";\n```\n\n뒤';
+  const result = previewText(source);
+  assert.equal(result, '앞 (x 코드 뒤');
+  assert.equal(previewText('앞 \\[x\n\n~~~ts\nconst marker = "\\]";\n~~~\n\n뒤'), '앞 [x 코드 뒤');
+  assert.equal(previewText('앞 \\(x `\\)` 뒤'), '앞 (x \\) 뒤');
+});
+
 test('conversation preview retains active, error, and empty state copy', () => {
   for (const status of ['starting', 'running', 'awaiting_permission'] as const) {
     assert.equal(conversationPreview(conversation([message('**이전**')], status)), runLabels[status]);
@@ -80,7 +97,7 @@ test('conversation preview retains active, error, and empty state copy', () => {
   failed.run.error = '실제 오류';
   assert.equal(conversationPreview(failed), '실제 오류');
   assert.equal(conversationPreview(undefined), '새 대화를 시작해 보세요');
-  for (const messages of [[], [message('  ')], [message('---')], [message('숨김', { reportDeliveryIds: [] })]]) {
+  for (const messages of [[], [message('  ')], [message('숨김', { reportDeliveryIds: [] })]]) {
     assert.equal(conversationPreview(conversation(messages)), '아직 메시지가 없습니다');
   }
 });

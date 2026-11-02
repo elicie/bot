@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -16,6 +16,7 @@ const examples = [
   { name: '차트', text: '```visualization\n<svg><text>차트 내용</text></svg>\n```', preview: '차트' },
   { name: '이미지', text: `![생성 결과](${image})`, preview: '이미지' },
   { name: '이미지 링크', text: image, preview: '이미지' },
+  { name: 'HTML', text: '<div>보이는 내용</div>', preview: '메시지' },
 ];
 
 test('sidebar previews show plain text and short media labels without changing stored messages', async ({ page }, testInfo) => {
@@ -61,6 +62,65 @@ test('sidebar previews show plain text and short media labels without changing s
     await page.getByRole('button', { name: '봇 목록 열기', exact: true }).click();
     for (const example of examples) await expect(preview(example.name)).toHaveText(example.preview);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect(errors).toEqual([]);
+  } finally {
+    await app?.stop();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('large history stays usable across fresh SSE snapshots and composer input', async ({ page }, testInfo) => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'grok-bot-preview-history-'));
+  let app: Awaited<ReturnType<typeof startTestApp>> | undefined;
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    const store = await Store.open(dataDir);
+    const bot = await store.addBot({ name: '긴 대화', color: '#75a9c0', instructions: '', shape: 'blob', pinned: false });
+    const sources = Array.from({ length: 120 }, (_, index) => `**대화 ${index}** \\(23 = 20 + 3\\)\n\n${'내용과 [문서](https://example.com)입니다. '.repeat(100)}`);
+    sources[117] += '긴 답변 '.repeat(50_000);
+    sources[118] = '> '.repeat(4096) + '중첩된 인용문';
+    sources[119] = '\\('.repeat(30_000);
+    for (const [index, text] of sources.entries()) {
+      store.conversations.push({
+        id: randomUUID(), botId: bot.id, title: `대화 ${index}`, updatedAt: '2026-11-02T00:00:00Z', run: { id: '', status: 'completed' },
+        messages: [{ id: randomUUID(), role: 'assistant', text, tools: [], createdAt: '2026-11-02T00:00:00Z' }],
+      });
+    }
+    await store.changed();
+    app = await startTestApp({ env: { GROK_BOT_DATA_DIR: dataDir } });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${app.url}?bot=${bot.id}`);
+    await expect(page.getByRole('heading', { name: '긴 대화', exact: true })).toBeVisible();
+    const history = page.getByRole('dialog', { name: '대화 기록', exact: true });
+    const timings: number[] = [];
+    for (let pass = 0; pass < 3; pass++) {
+      const elapsed = await page.evaluate(() => {
+        const start = performance.now();
+        document.querySelector<HTMLButtonElement>('button[aria-label="대화 기록"]')!.click();
+        return new Promise<number>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(performance.now() - start))));
+      });
+      timings.push(elapsed);
+      await expect(history.locator('.history-item')).toHaveCount(120);
+      await expect(history.locator('.history-item > span:last-of-type').first()).toContainText('대화 0');
+      expect(await history.locator('.history-item > span:last-of-type').evaluateAll(elements => Math.max(...elements.map(element => element.textContent?.length ?? 0)))).toBeLessThanOrEqual(280);
+      // A real server update delivers fresh message objects to all 120 open history rows.
+      await page.evaluate(async ({ botId, pass }) => {
+        const response = await fetch(`/api/bots/${botId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', 'X-Grok-Bot': '1' }, body: JSON.stringify({ name: `긴 대화 ${pass + 1}` }) });
+        if (!response.ok) throw new Error(await response.text());
+      }, { botId: bot.id, pass });
+      await expect(history).toContainText(`긴 대화 ${pass + 1}의 대화`);
+      if (pass === 2) await page.screenshot({ path: testInfo.outputPath('history-previews.png') });
+      await history.getByRole('button', { name: '대화 기록 닫기', exact: true }).click();
+    }
+    const composer = page.getByLabel('메시지', { exact: true });
+    await composer.pressSequentially('미리보기를 다시 계산하지 않는 입력');
+    await expect(composer).toHaveValue('미리보기를 다시 계산하지 않는 입력');
+    const saved = await page.evaluate(async () => (await fetch('/api/state')).json());
+    expect(saved.conversations.map((conversation: { messages: { text: string }[] }) => conversation.messages[0].text)).toEqual(sources);
+    const timingPath = testInfo.outputPath('history-frame-times.json');
+    await writeFile(timingPath, JSON.stringify({ historyOpenToSecondFrameMs: timings }));
+    await testInfo.attach('history-frame-times.json', { path: timingPath, contentType: 'application/json' });
     expect(errors).toEqual([]);
   } finally {
     await app?.stop();

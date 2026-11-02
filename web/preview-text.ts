@@ -2,67 +2,101 @@ import type { Nodes } from 'mdast';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
 import remarkCjkFriendly from 'remark-cjk-friendly';
-import remarkMath from 'remark-math';
 import { visualizationLanguages } from './visualization-document';
 
-const parser = unified().use(remarkParse).use(remarkCjkFriendly).use(remarkMath);
+const parser = unified().use(remarkParse).use(remarkCjkFriendly);
+export const MAX_PREVIEW_SOURCE = 2048;
+const maxPreviewLength = 280;
+const cache = new Map<string, { source: string; result: string }>();
+const maxCachedMessages = 2048;
 const generatedImage = /(?:https?:\/\/[^\s/<>]+)?\/api\/generated-images\/[\w-]+(?:[?#][^\s<>]*)?/g;
 const generatedImageLink = /^(?:https?:\/\/[^/]+)?\/api\/generated-images\//;
-// Sidebar rerenders while typing and SSE replaces message objects. Cache by source, with bounded memory.
-const cache = new Map<string, string>();
-const maxCachedCharacters = 200_000;
-let cachedCharacters = 0;
 
+type Range = { start: number; end: number; block?: boolean };
 function visit(node: Nodes, callback: (node: Nodes) => void) {
   callback(node);
   if ('children' in node) node.children.forEach(child => visit(child, callback));
 }
 
-/** Protect TeX-style math from Markdown, without touching code or existing dollar math. */
+// Even a short source can contain pathological nesting. Reject it before entering Markdown.
+function deepContainers(source: string): boolean {
+  return source.split('\n').some(line => {
+    let rest = line.trimStart();
+    for (let depth = 0; ; depth++) {
+      const marker = /^(?:>|[-+*](?=[ \t])|\d{1,9}[.)](?=[ \t]))/.exec(rest);
+      if (!marker) return false;
+      if (depth >= 16) return true;
+      rest = rest.slice(marker[0].length).trimStart();
+    }
+  });
+}
+
+/** A single forward scan: unmatched openers never search the remaining source repeatedly. */
 function parsePreview(text: string) {
   const tree = parser.parse(text);
-  const math: string[] = [];
-  let prefix = 'PREVIEWMATH';
-  if (!/\\[([]/.test(text)) return { tree, math, prefix };
-  const literals: { start: number; end: number }[] = [];
-  const quotes: { start: number; end: number }[] = [];
-  const visibleText = plainText(tree, new Map());
+  const math = new Map<string, string>();
+  if (!/[\\$]/.test(text)) return { tree, math };
+  const literals: Range[] = [];
+  const quotes: Range[] = [];
   visit(tree, node => {
     if (!node.position) return;
-    const range = { start: node.position.start.offset!, end: node.position.end.offset! };
-    if (['code', 'inlineCode', 'math', 'inlineMath'].includes(node.type)) literals.push(range);
+    const range = { start: node.position.start.offset!, end: node.position.end.offset!, block: node.type === 'code' };
+    if (['code', 'inlineCode', 'html'].includes(node.type)) literals.push(range);
     if (node.type === 'blockquote') quotes.push(range);
   });
-  while (text.includes(prefix) || visibleText.includes(prefix)) prefix += 'X';
-  const pattern = /\\\(([\s\S]*?)\\\)|\\\[([\s\S]*?)\\\]/g;
-  const parts: string[] = [];
-  let end = 0;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(text))) {
-    const offset = match.index;
-    if (literals.some(range => offset >= range.start && offset < range.end)) {
-      // Do not let a literal opener consume a later, genuine formula's closing delimiter.
-      pattern.lastIndex = offset + 2;
+  const occupied = new Set(text + plainText(tree, new Map()));
+  const tokens: { index: number; token: string; block?: boolean }[] = [];
+  const lastClose = new Map<string, number>();
+  let literalIndex = 0;
+  for (let index = 0; index < text.length;) {
+    while (literals[literalIndex]?.end <= index) literalIndex++;
+    const literal = literals[literalIndex];
+    if (literal && literal.start <= index) {
+      if (literal.block) tokens.push({ index, token: '', block: true });
+      index = literal.end;
       continue;
     }
-    let value = match[1] ?? match[2];
-    const depth = quotes.filter(range => offset >= range.start && offset < range.end).length;
-    if (depth) value = value.replace(new RegExp(`\n(?:[ \\t]*>[ \\t]?){${depth}}`, 'g'), '\n');
-    // Collision-free plain tokens also handle adjacent formulas and blank-line display math.
-    math.push(value);
-    parts.push(text.slice(end, offset), `${prefix}${math.length - 1}END`);
-    end = pattern.lastIndex;
+    let token = text[index];
+    if (token === '\\') token = text.slice(index, index + 2);
+    else if (token === '$') while (text[index + token.length] === '$') token += '$';
+    if (token.startsWith('\\') || token.startsWith('$')) {
+      tokens.push({ index, token });
+      if (token === '\\)' || token === '\\]' || token.startsWith('$')) lastClose.set(token, index);
+    }
+    index += token.length;
+  }
+  const parts: string[] = [];
+  let end = 0;
+  let marker = 0xe000;
+  let open: { start: number; body: number; close: string } | undefined;
+  for (const { index, token, block } of tokens) {
+    if (block) { open = undefined; continue; } // Never consume a fenced/indented code block.
+    if (open && token === open.close) {
+      let value = text.slice(open.body, index);
+      const depth = quotes.filter(range => open!.start >= range.start && open!.start < range.end).length;
+      if (depth) value = value.replace(new RegExp(`\n(?:[ \\t]*>[ \\t]?){${depth}}`, 'g'), '\n');
+      if (token !== '$' || !/\n[ \t]*\n/.test(value)) {
+        while (occupied.has(String.fromCharCode(marker))) marker++;
+        const placeholder = String.fromCharCode(marker++);
+        math.set(placeholder, value);
+        parts.push(text.slice(end, open.start), placeholder);
+        end = index + token.length;
+      }
+      open = undefined;
+    } else if (!open && (token === '\\(' || token === '\\[' || token.startsWith('$'))) {
+      const close = token === '\\(' ? '\\)' : token === '\\[' ? '\\]' : token;
+      // Unmatched currency/openers must not hide a later, differently-delimited formula.
+      if ((lastClose.get(close) ?? -1) > index) open = { start: index, body: index + token.length, close };
+    }
   }
   parts.push(text.slice(end));
-  return { tree: math.length ? parser.parse(parts.join('')) : tree, math, prefix };
+  return { tree: math.size ? parser.parse(parts.join('')) : tree, math };
 }
 
 function plainText(node: Nodes, definitions: ReadonlyMap<string, string>): string {
   switch (node.type) {
     case 'text': return node.value.replace(generatedImage, '이미지');
-    case 'inlineCode':
-    case 'inlineMath': return node.value;
-    case 'math': return ` ${node.value} `;
+    case 'inlineCode': return node.value;
     case 'code': {
       const language = node.lang?.toLowerCase() ?? '';
       return language === 'mermaid' || Object.hasOwn(visualizationLanguages, language) ? ' 차트 ' : ' 코드 ';
@@ -85,24 +119,28 @@ function plainText(node: Nodes, definitions: ReadonlyMap<string, string>): strin
   return node.children.map(child => plainText(child, definitions)).join(separator);
 }
 
-/** Plain, single-line conversation copy only; never renders HTML or changes stored messages. */
-export function previewText(text: string): string {
-  const cached = cache.get(text);
-  if (cached !== undefined) return cached;
-  const { tree, math, prefix } = parsePreview(text);
-  const definitions = new Map<string, string>();
-  visit(tree, node => { if (node.type === 'definition' && !definitions.has(node.identifier)) definitions.set(node.identifier, node.url); });
-  const result = plainText(tree, definitions)
-    .replace(new RegExp(`${prefix}(\\d+)END`, 'g'), (token, index: string) => math[Number(index)] ?? token)
-    .replace(/\s+/g, ' ').trim();
-  if (text.length <= maxCachedCharacters) {
-    while (cache.size >= 100 || cachedCharacters + text.length > maxCachedCharacters) {
-      const oldest = cache.keys().next().value!;
-      cache.delete(oldest);
-      cachedCharacters -= oldest.length;
+/** Bounded plain-text copy. The message-ID cache survives fresh SSE objects without retaining full replies. */
+export function previewText(text: string, messageId?: string): string {
+  let source = text.slice(0, MAX_PREVIEW_SOURCE);
+  const cached = messageId ? cache.get(messageId) : undefined;
+  if (cached?.source === source) return cached.result;
+  // Copy only on a miss so engines cannot retain a full reply behind a cached substring.
+  source = source.split('').join('');
+  let result = '메시지';
+  try {
+    if (!deepContainers(source)) {
+      const { tree, math } = parsePreview(source);
+      const definitions = new Map<string, string>();
+      visit(tree, node => { if (node.type === 'definition' && !definitions.has(node.identifier)) definitions.set(node.identifier, node.url); });
+      result = plainText(tree, definitions)
+        .replace(/[\ue000-\uf8ff]/g, token => math.get(token) ?? token)
+        .replace(/\s+/g, ' ').trim().slice(0, maxPreviewLength);
     }
-    cache.set(text, result);
-    cachedCharacters += text.length;
+  } catch { /* A malformed message must not prevent the sidebar/history from opening. */ }
+  if (messageId) {
+    cache.delete(messageId);
+    if (cache.size >= maxCachedMessages) cache.delete(cache.keys().next().value!);
+    cache.set(messageId, { source, result });
   }
   return result;
 }
