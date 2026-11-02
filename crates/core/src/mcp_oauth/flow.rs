@@ -279,7 +279,10 @@ pub(super) fn credential_valid(value: &str) -> bool {
 }
 
 pub(super) fn bearer_valid(value: &str) -> bool {
-    credential_valid(value) && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-._~+/=".contains(&byte))
+    // OAuth access tokens are opaque. Some deployed MCP providers use colon-delimited tokens
+    // rather than RFC 6750's b64token alphabet. Keep the header unambiguous and injection-safe:
+    // bounded visible ASCII with no whitespace, controls, quoted/list syntax or escape character.
+    credential_valid(value) && !value.bytes().any(|byte| matches!(byte, b'"' | b',' | b'\\'))
 }
 
 pub(super) async fn register(network: &dyn Network, metadata: &Metadata, redirect: &str) -> Result<String, Error> {
@@ -696,6 +699,38 @@ mod tests {
             assert!(!error.message().contains("canary"));
         }
         assert_eq!(parse_tokens(Reply { status: 200, json: true, body: Zeroizing::new(vec![b' '; MAX_BODY + 1]) }, 0, None).err(), Some(Error::Invalid));
+    }
+
+    #[test]
+    fn colon_delimited_opaque_tokens_survive_exchange_and_refresh_but_reject_header_syntax() {
+        let access = "userId:grantId:secret";
+        let refresh = "userId:grantId:refreshSecret";
+        let tokens =
+            parse_tokens(reply(200, json!({"access_token":access,"refresh_token":refresh,"token_type":"Bearer","expires_in":3600})), 100, None).unwrap();
+        assert_eq!(tokens.access, access);
+        assert_eq!(tokens.refresh.as_deref(), Some(refresh));
+        assert!(credential_valid(refresh));
+        let rotated = parse_tokens(
+            reply(200, json!({"access_token":"userId:grantId:rotatedSecret","token_type":"bearer","expires_in":3600})),
+            200,
+            tokens.refresh.as_deref(),
+        )
+        .unwrap();
+        assert_eq!(rotated.access, "userId:grantId:rotatedSecret");
+        assert_eq!(rotated.refresh.as_deref(), Some(refresh));
+        for rejected in [
+            "user id:grant:secret",
+            "user\tid:grant:secret",
+            "user\r\nid:grant:secret",
+            "user:id:sec\"ret",
+            "user:id:sec,ret",
+            "user:id:sec\\ret",
+            "user:id:secrét",
+            "short",
+        ] {
+            assert!(!bearer_valid(rejected));
+            assert_eq!(parse_tokens(reply(200, json!({"access_token":rejected,"token_type":"Bearer"})), 100, None).err(), Some(Error::Invalid));
+        }
     }
 
     #[test]

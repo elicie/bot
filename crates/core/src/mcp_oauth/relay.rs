@@ -230,11 +230,7 @@ fn configuration(headers: Vec<McpPair>, mut keys: Vec<String>) -> HttpResult<(He
         value.set_sensitive(true);
         if name == header::AUTHORIZATION {
             let Some((scheme, token)) = pair.value.split_once(' ') else { return Err(invalid()) };
-            if !scheme.eq_ignore_ascii_case("Bearer")
-                || token.is_empty()
-                || !token.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-._~+/=".contains(&byte))
-                || authorization.is_some()
-            {
+            if !scheme.eq_ignore_ascii_case("Bearer") || !super::flow::bearer_valid(token) || authorization.is_some() {
                 return Err(invalid());
             }
             keys.push(token.to_owned());
@@ -884,7 +880,7 @@ mod tests {
 
     // Synthetic, non-account fixtures. Assertions deliberately report booleans/counters rather
     // than formatting bearer values, upstream bodies, or requests on failure.
-    const TOKEN: &str = "relay-fixture-bearer-84";
+    const TOKEN: &str = "relay-userId:relay-grantId:relay-secret";
     const VAULT_KEY: &str = "relay-fixture-vault-39";
     const REMOTE: &str = "https://relay.example/resource/mcp?fixed=1";
     const TEST_WAIT: Duration = Duration::from_secs(3);
@@ -953,6 +949,23 @@ mod tests {
             let address = address.parse().unwrap();
             assert!(validate_addresses(&[public, address]).is_err());
             assert!(validate_addresses(&[address, public]).is_err());
+        }
+    }
+
+    #[test]
+    fn opaque_bearer_header_and_redaction_share_the_exchange_validator() {
+        let access = "userId:grantId:secret";
+        let pairs = vec![McpPair { name: "Authorization".into(), value: format!("Bearer {access}") }];
+        let (_, header, redactor) = configuration(pairs, vec![]).unwrap();
+        assert!(header.is_sensitive());
+        assert!(header.as_bytes() == format!("Bearer {access}").as_bytes());
+        let body = redactor.json(serde_json::to_string(&serde_json::json!({"text":access})).unwrap().as_bytes(), MAX_BODY).unwrap();
+        assert!(!String::from_utf8(body).unwrap().contains(access));
+        for rejected in ["user id:grant:secret", "user\tid:grant:secret", "user:id:sec\"ret", "user:id:sec,ret", "user:id:sec\\ret", "user:id:secrét", "short"]
+        {
+            assert!(!super::super::flow::bearer_valid(rejected));
+            let pairs = vec![McpPair { name: "Authorization".into(), value: format!("Bearer {rejected}") }];
+            assert!(configuration(pairs, vec![]).is_err());
         }
     }
 

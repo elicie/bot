@@ -18,8 +18,8 @@ use crate::mcp_oauth::{LoginInput, OAuthService, flow};
 
 // Deliberately overlap ordinary tool-name suffixes (`search_tool`, `todo_write`). Native engine
 // function names overwrite, rather than append: withholding their suffix would corrupt tool calls.
-pub(crate) const ACCESS: &str = "tool-secret-credential";
-pub(crate) const REFRESH: &str = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJzeW50aGV0aWMifQ.synthetic-signature";
+pub(crate) const ACCESS: &str = "tool-secret-credential:grantId:secret";
+pub(crate) const REFRESH: &str = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJzeW50aGV0aWMifQ.synthetic-signature:grantId:refreshSecret";
 pub(crate) const REMOTE: &str = "https://runtime-oauth.example/mcp";
 const ISSUER: &str = "https://runtime-issuer.example";
 const CLIENT: &str = "synthetic-runtime-public-client";
