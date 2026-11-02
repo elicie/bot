@@ -47,6 +47,32 @@ pub struct HttpContext {
     pub stopping: tokio::sync::watch::Sender<bool>,
 }
 
+impl HttpContext {
+    /// Compose an HTTP adapter around existing app services while keeping probe lifecycle state
+    /// private. Alternate in-process adapters use the same safe initialization as Backend.
+    pub fn new(
+        store: Arc<Store>,
+        runtime: Arc<Runtime>,
+        scheduler: Arc<RoutineScheduler>,
+        queue: CommandQueue,
+        allowed_hosts: HashSet<String>,
+        web_root: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            store,
+            runtime,
+            scheduler,
+            queue,
+            allowed_hosts,
+            port: AtomicU16::new(0),
+            closing: AtomicBool::new(false),
+            web_root,
+            mcp_tests: crate::mcp_probe::Probes::default(),
+            stopping: tokio::sync::watch::Sender::new(false),
+        }
+    }
+}
+
 pub(crate) type Ctx = Arc<HttpContext>;
 
 pub fn normalize_host(value: &str) -> String {
