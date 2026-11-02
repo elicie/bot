@@ -41,7 +41,9 @@ pub struct HttpContext {
     pub closing: AtomicBool,
     /// Built frontend (`dist/`). `None` serves the API only.
     pub web_root: Option<PathBuf>,
-    /// Flips to `true` on shutdown; open SSE streams end so graceful shutdown can finish.
+    /// Cancels disposable MCP probes before the command queue is drained on shutdown.
+    pub mcp_test_stopping: tokio::sync::watch::Sender<bool>,
+    /// Flips to `true` after final state flush; open SSE streams can then finish.
     pub stopping: tokio::sync::watch::Sender<bool>,
 }
 

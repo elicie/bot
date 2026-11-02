@@ -8,10 +8,11 @@
 //! only.
 
 use axum::Router;
-use axum::extract::{ConnectInfo, Path, State};
+use axum::extract::{ConnectInfo, FromRequest, Path, Request, State};
 use axum::http::StatusCode;
 use axum::routing::{get, patch, post, put};
 use grok_bot_model::{HttpError, McpConfigInput, McpEnabledInput, SecretInput, SecretValueInput};
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::http::{ApiResult, Ctx, Empty, JsonBody, Remote, is_local, reply, state_reply};
@@ -23,6 +24,7 @@ pub(crate) fn routes() -> Router<Ctx> {
         .route("/secrets/{id}", put(replace_secret).delete(delete_secret))
         .route("/bots/{bot_id}/mcp-servers", get(read_mcp).put(save_mcp))
         .route("/bots/{bot_id}/mcp-servers/{name}", patch(toggle_mcp))
+        .route("/bots/{bot_id}/mcp-servers/test", post(test_mcp).patch(toggle_test_named_server))
 }
 
 /// `{ canEdit }`: whether this client may change secrets and custom MCP servers.
@@ -61,6 +63,53 @@ async fn save_mcp(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(bot_
     let (store, local) = (ctx.store.clone(), is_local(&remote));
     ctx.queue.run(async move { store.mutate(move |s| s.set_mcp_servers(&bot_id, &input.json, local)).await }).await?;
     Ok(state_reply(&ctx, StatusCode::OK, &remote))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpTestInput {
+    json: String,
+    #[serde(default)]
+    secrets: Vec<SecretInput>,
+}
+
+/// A real, disposable MCP handshake and tools/list; unlike PUT this never saves anything.
+async fn test_mcp(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(bot_id): Path<String>, request: Request) -> ApiResult {
+    // Do not deserialize even the outer body for LAN callers: stdio can execute commands.
+    if !is_local(&remote) {
+        return Err(HttpError::forbidden(grok_bot_store::vault::MCP_REQUIRES_LOOPBACK).into());
+    }
+    let JsonBody(input) = JsonBody::<McpTestInput>::from_request(request, &ctx)
+        .await
+        .map_err(|error| crate::http::ApiError(HttpError::new(error.0.status, "MCP 요청 오류: json 문자열과 선택적인 secrets 목록을 확인해 주세요.")))?;
+    let store = ctx.store.clone();
+    let stopping = ctx.mcp_test_stopping.subscribe();
+    let count = ctx
+        .queue
+        .run(async move {
+            // A queued request may acquire the turn after shutdown already started. Inspect the
+            // current value, not just a future change, before preparing or spawning any draft.
+            if *stopping.borrow() {
+                return Err(HttpError::unavailable(crate::mcp_probe::STOPPED));
+            }
+            // Copy only the resolved draft out of the read lock before any network/process await.
+            let server = store.read(|state| state.resolve_mcp_draft(&bot_id, &input.json, &input.secrets, true))?;
+            // The worker observes shutdown itself and acknowledges it only after child cleanup.
+            // Do not drop this future on shutdown: the queue must stay held until kill + wait.
+            crate::mcp_probe::test(server, stopping).await
+        })
+        .await?;
+    Ok(reply(StatusCode::OK, json!({ "toolCount": count }), &remote))
+}
+
+// The literal probe route must not shadow PATCH for an existing server named "test".
+async fn toggle_test_named_server(
+    State(ctx): State<Ctx>,
+    ConnectInfo(remote): Remote,
+    Path(bot_id): Path<String>,
+    input: JsonBody<McpEnabledInput>,
+) -> ApiResult {
+    toggle_mcp(State(ctx), ConnectInfo(remote), Path((bot_id, "test".into())), input).await
 }
 
 async fn toggle_mcp(
