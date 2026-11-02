@@ -76,7 +76,8 @@ export const pendingWorkerBatch = (data: AppState | null | undefined, conversati
 export const runningConversation = (data: AppState | null) => {
   const active = data?.conversations.find(conversation => activeRun(conversation.run.status));
   if (active) return active;
-  const batch = data?.workerBatches?.find(workerBatchPending);
+  // Queued work has no execution slot yet: other conversations can still start a user turn.
+  const batch = data?.workerBatches?.find(batch => batch.workers.some(worker => worker.status === 'running') || batch.report?.status === 'running');
   return batch && data?.conversations.find(conversation => conversation.id === batch.parentConversationId);
 };
 export const queuedRoutineRun = (data: AppState | null, conversation: Conversation | undefined) =>

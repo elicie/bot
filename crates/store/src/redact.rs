@@ -179,6 +179,7 @@ impl Redactor<'_> {
         }
         self.text(&mut batch.created_at);
         self.optional(&mut batch.released_at);
+        self.optional(&mut batch.authorized_workspace);
         self.optional_id(&mut batch.report_input_id);
         self.optional_id(&mut batch.report_message_id);
         for worker in &mut batch.workers {

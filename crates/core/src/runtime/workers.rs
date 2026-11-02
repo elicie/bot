@@ -6,7 +6,56 @@ use grok_bot_store::State;
 use grok_bot_store::skills::skill_response_text;
 use serde_json::{Value, json};
 
-use super::{Run, text::redact};
+use super::{Run, Runtime, text::redact};
+use std::collections::HashSet;
+
+impl Runtime {
+    /// Availability describes this turn's authority, not quota, writable state, or a particular task.
+    /// The same predicate gates guidance, discovery, and invocation.
+    pub(super) fn worker_spawn_allowed(&self, run: &Run) -> bool {
+        run.worker_id.is_none()
+            && run.worker_report.is_none()
+            && run.report_deliveries.is_empty()
+            && self.store.read(|state| state.worker_source_eligible(&run.conversation_id, &run.message_id, &run.run_id))
+    }
+}
+
+impl Runtime {
+    /// Persist retention first; filesystem work runs after releasing admission so Stop never waits
+    /// behind cache deletion. UUID-owned directories cannot be re-admitted or reused by a new turn.
+    pub(super) async fn maintain_worker_history(&self, sweep_orphans: bool) -> HttpResult<()> {
+        self.prune_worker_cache(sweep_orphans, false).await
+    }
+
+    pub(super) async fn reclaim_worker_capacity(&self) -> HttpResult<()> {
+        self.prune_worker_cache(false, true).await
+    }
+
+    async fn prune_worker_cache(&self, sweep_orphans: bool, pressure: bool) -> HttpResult<()> {
+        let (removed, retained) = self
+            .queue
+            .run(async {
+                let removed =
+                    self.store.mutate(|state| if pressure { state.prune_worker_history_for_capacity() } else { state.prune_worker_history() }).await?;
+                let retained = self.store.read(|state| state.disk().conversations.iter().map(|conversation| conversation.id.clone()).collect::<HashSet<_>>());
+                Ok::<_, HttpError>((removed, retained))
+            })
+            .await?;
+        if removed.is_empty() && !sweep_orphans {
+            return Ok(());
+        }
+        let data_dir = self.store.data_dir().to_path_buf();
+        let engine_root = self.options.engine_root.clone();
+        let cleaned = tokio::task::spawn_blocking(move || super::worker_cleanup::cleanup(&data_dir, &engine_root, &removed, &retained, sweep_orphans)).await;
+        if !matches!(cleaned, Ok(Ok(()))) {
+            // State is already durable and usable. A later startup sweep retries orphaned caches.
+            eprintln!("Worker cache cleanup could not finish; it will be retried at startup.");
+        }
+        Ok(())
+    }
+}
+
+pub(super) const SPAWN_GUIDANCE: &str = "Only when splitting the user's task into independent read-only subtasks would materially help, you may discover workspace__spawn_worker and propose a self-contained task. Answer ordinary questions and small tasks directly; do not delegate merely because the tool exists. Each new worker needs explicit one-use approval. At most three distinct tasks per originating turn, depth one, and only one run executes globally. Retrying the exact same task returns its prior receipt without another approval. Workers start only after your current answer finishes; do not wait or poll. When all siblings finish, the app runs one automatic follow-up here to synthesize them.";
 
 pub(super) const DEADLINE_ERROR: &str = "Worker exceeded its absolute execution deadline.";
 
@@ -73,7 +122,10 @@ pub(super) fn rules(run: &Run) -> String {
     let workspace = if run.settings.workspace.is_empty() {
         "No file workspace is connected. Do not call file tools.".to_owned()
     } else {
-        format!("The user-selected workspace is {}. Broker paths are relative to it, not this session's current directory.", run.settings.workspace)
+        format!(
+            "The read-only workspace authorized for this task is {}. Broker paths are relative to it, not this session's current directory; later settings changes grant no different directory.",
+            run.settings.workspace
+        )
     };
     let mut lines = vec![
         "You are an app-managed read-only worker of the same local bot. Work in this separate conversation on the one delegated task, then return one final answer to the parent. The app reports all siblings together automatically; never wait or poll.".to_owned(),

@@ -10,15 +10,16 @@ use super::{BrokerResult, approval_options, conflict_finished};
 use crate::runtime::{Run, Runtime, workers::receipt};
 
 pub(super) fn tool() -> Value {
-    json!({ "name": "spawn_worker", "description": "Queue one separate read-only worker of this same bot for a self-contained task. Each new task requires explicit one-use browser approval. At most three distinct tasks per ordinary 1:1 turn, depth one, and one globally active run. Exact task retries return the original receipt without approval. Workers run after this turn ends; all siblings are reported together in one automatic follow-up. Never wait or poll. Workers cannot write, message bots, use computers/custom MCP servers, or spawn more workers.", "inputSchema": { "type": "object", "properties": { "task": { "type": "string", "minLength": 1, "maxLength": 4000 } }, "required": ["task"], "additionalProperties": false } })
+    json!({ "name": "spawn_worker", "description": "Optionally delegate a self-contained read-only subtask to this same bot only when splitting the user's task would materially help. Answer ordinary questions directly. Each new task requires explicit one-use browser approval. At most three distinct tasks per ordinary 1:1 turn, depth one, and one globally active run. Exact task retries return the original receipt without approval. Workers run after this turn ends; all siblings are reported together in one automatic follow-up. Never wait or poll. Workers cannot write, message bots, use computers/custom MCP servers, or spawn more workers.", "inputSchema": { "type": "object", "properties": { "task": { "type": "string", "minLength": 1, "maxLength": 4000 } }, "required": ["task"], "additionalProperties": false } })
 }
 
 impl Runtime {
     pub(super) async fn spawn_worker(&self, run: &Arc<Run>, task: String) -> BrokerResult<Value> {
         // These flags also reject report turns before they have any durable child record.
-        if run.worker_id.is_some() || run.worker_report.is_some() || !run.report_deliveries.is_empty() {
+        if !self.worker_spawn_allowed(run) {
             return Err(HttpError::forbidden("Workers and automatic follow-up turns cannot spawn workers (maximum depth one).").into());
         }
+        self.maintain_worker_history(false).await?;
         let existing = self.store.read(|state| {
             state.validate_worker_source(&run.conversation_id, &run.message_id, &run.run_id, &task)?;
             Ok::<_, HttpError>(
@@ -29,8 +30,13 @@ impl Runtime {
             return Ok(existing);
         }
         let title = "Spawn read-only worker".to_owned();
+        let workspace = if run.settings.workspace.is_empty() {
+            "No file workspace authorized.".to_owned()
+        } else {
+            format!("Authorized read-only workspace (fixed for this task): {}", run.settings.workspace)
+        };
         let description = run.redact_all(&format!(
-            "Delegate this task to a separate read-only worker of {}. It can read this bot's skills, memories, knowledge, and connected workspace; no writes, computer access, custom MCP servers, or further delegation. It runs after this turn and all sibling results return in one automatic follow-up.\n\n{task}",
+            "Delegate this task to a separate read-only worker of {}. It can read this bot's skills, memories and knowledge. {workspace} No writes, computer access, custom MCP servers, or further delegation. It runs after this turn and all sibling results return in one automatic follow-up.\n\n{task}",
             run.bot.name
         ));
         let tool = ToolActivity {
@@ -54,21 +60,31 @@ impl Runtime {
             self.settle_tool(run, &tool_id, ToolStatus::Failed, Some(message.into())).await;
             return Err(HttpError::forbidden(message).into());
         }
-        let queued = {
-            let (store, run) = (Arc::clone(&self.store), Arc::clone(run));
-            self.queue
-                .run(async move {
-                    store
-                        .mutate(move |state| {
-                            if run.inactive() {
-                                return Err(conflict_finished());
-                            }
-                            state.spawn_worker(&run.conversation_id, &run.message_id, &run.run_id, &task)
-                        })
-                        .await
-                })
-                .await
+        let queue_task = || {
+            let (store, run, task) = (Arc::clone(&self.store), Arc::clone(run), task.clone());
+            self.queue.run(async move {
+                store
+                    .mutate(move |state| {
+                        if run.inactive() {
+                            return Err(conflict_finished());
+                        }
+                        if state.settings().workspace != run.settings.workspace {
+                            return Err(HttpError::conflict("The authorized workspace changed. Submit and approve a new task."));
+                        }
+                        state.spawn_worker(&run.conversation_id, &run.message_id, &run.run_id, &task)
+                    })
+                    .await
+            })
         };
+        let mut queued = queue_task().await;
+        if queued.as_ref().is_err_and(|error| error.status == 413) && !run.inactive() {
+            // Admission failed before mutation. Reclaim only terminal private cache in a separate
+            // durable maintenance write, then retry the already-approved task exactly once.
+            queued = match self.reclaim_worker_capacity().await {
+                Ok(()) => queue_task().await,
+                Err(error) => Err(error),
+            };
+        }
         match queued {
             Ok((batch, worker)) => {
                 self.settle_tool(run, &tool_id, ToolStatus::Completed, Some(run.redact(&format!("Queued worker {}.", worker.id)))).await;

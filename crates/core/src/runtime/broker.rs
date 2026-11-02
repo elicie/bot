@@ -221,10 +221,12 @@ impl Runtime {
             "ping" => json!({}),
             "tools/list" => {
                 let mut tools = broker_tools();
-                if run.worker_id.is_some()
-                    && let Some(tools) = tools.as_array_mut()
-                {
-                    tools.retain(|tool| tool["name"].as_str().is_some_and(|name| super::workers::READ_TOOLS.contains(&name)));
+                if let Some(tools) = tools.as_array_mut() {
+                    if run.worker_id.is_some() {
+                        tools.retain(|tool| tool["name"].as_str().is_some_and(|name| super::workers::READ_TOOLS.contains(&name)));
+                    } else if !self.worker_spawn_allowed(&run) {
+                        tools.retain(|tool| tool["name"].as_str() != Some("spawn_worker"));
+                    }
                 }
                 json!({"tools": tools})
             }

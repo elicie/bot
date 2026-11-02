@@ -96,6 +96,8 @@ export interface WorkerBatch {
   parentConversationId: string;
   sourceMessageId: string;
   sourceRunId: string;
+  /** The read-only file workspace explicitly authorized at spawn; absent legacy tasks get none. */
+  authorizedWorkspace?: string;
   createdAt: string;
   releasedAt?: string;
   cancelled: boolean;

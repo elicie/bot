@@ -34,6 +34,10 @@ pub struct WorkerBatch {
     pub parent_conversation_id: String,
     pub source_message_id: String,
     pub source_run_id: String,
+    /// Workspace authorized by the spawning turn. `Some("")` explicitly allows no file access;
+    /// legacy batches without this field must not inherit a later workspace selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorized_workspace: Option<String>,
     pub created_at: String,
     /// Set only after the spawning parent turn completed successfully.
     #[serde(default, skip_serializing_if = "Option::is_none")]

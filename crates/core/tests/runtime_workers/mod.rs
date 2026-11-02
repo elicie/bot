@@ -290,6 +290,59 @@ pub(super) async fn worker_cancellation(f: &Fixture) {
     dispatcher.close().await;
 }
 
+/// File authority is fixed by the originating approval; a later folder selection grants no new
+/// workspace to queued or legacy workers.
+pub(super) async fn worker_workspace_authorization(f: &Fixture) {
+    let dispatcher = scheduler(f);
+    let parent = f.conversation(&f.bot_id()).await;
+    let approved = queue(f, &parent, &["Read the approved notes only"]).await;
+    assert_eq!(approved.authorized_workspace.as_deref(), Some(f.workspace.to_str().unwrap()));
+    let later = f.root.join("later-workspace");
+    std::fs::create_dir_all(&later).unwrap();
+    std::fs::write(later.join("notes.txt"), "UNAUTHORIZED_LATER_WORKSPACE_CANARY").unwrap();
+    f.store
+        .mutate(|state| {
+            state.update_settings(grok_bot_model::SettingsInput {
+                base_url: f.base_url.clone(),
+                model: "local-test-model".into(),
+                workspace: later.to_string_lossy().into_owned(),
+                api_key: None,
+                clear_api_key: None,
+            })
+        })
+        .await
+        .unwrap();
+    f.provider.clear();
+    f.provider.plan(vec![use_tool("read_file", json!({"path": "notes.txt"})), text("Used the approved folder.")]);
+    dispatcher.tick().await.unwrap();
+    f.completed(&approved.workers[0].conversation_id).await;
+    let outcomes = tool_outcomes(&f.provider.inference());
+    assert!(outcomes.iter().any(|output| output.contains("original")), "{outcomes:?}");
+    assert!(outcomes.iter().all(|output| !output.contains("UNAUTHORIZED_LATER_WORKSPACE_CANARY")));
+    f.provider.plan(vec![text("One grouped authorized result.")]);
+    dispatcher.tick().await.unwrap();
+    f.completed(&parent).await;
+
+    let legacy_parent = f.conversation(&f.bot_id()).await;
+    let legacy = queue(f, &legacy_parent, &["An old queued task has no saved folder authorization"]).await;
+    f.store
+        .mutate(|state| {
+            state.disk_mut().worker_batches.iter_mut().find(|batch| batch.id == legacy.id).unwrap().authorized_workspace = None;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    f.provider.clear();
+    f.provider.plan(vec![use_tool("read_file", json!({"path": "notes.txt"})), text("Legacy worker did not access files.")]);
+    dispatcher.tick().await.unwrap();
+    f.completed(&legacy.workers[0].conversation_id).await;
+    let outcomes = tool_outcomes(&f.provider.inference());
+    assert!(outcomes.iter().any(|output| output.contains("Choose a workspace")), "{outcomes:?}");
+    assert!(outcomes.iter().all(|output| !output.contains("UNAUTHORIZED_LATER_WORKSPACE_CANARY")));
+    f.runtime.cancel(&legacy_parent).await.unwrap();
+    dispatcher.close().await;
+}
+
 /// The worker deadline is absolute and shorter here than the idle timeout. A failed worker is
 /// included in the grouped result, and a report that cannot start is final rather than retried.
 pub(super) async fn worker_deadline(f: &Fixture) {

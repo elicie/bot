@@ -405,6 +405,7 @@ export function App() {
       (!text && !files.length) ||
       runningConversation(before.data) ||
       queuedRoutineRun(before.data, selectedConversation(before)) ||
+      pendingWorkerBatch(before.data, before.selection.conversationId ?? undefined) ||
       commandLock.current
     )
       return;
@@ -765,7 +766,7 @@ export function App() {
               onFiles={() => toggleComputer(true)}
               onCancel={() => void cancel()}
               running={!!queuedRun || (!!conversation && (activeRun(conversation.run.status) || !!pendingWorkerBatch(data, conversation.id)))}
-              disabled={state.connection !== 'online' || !!globalRun || !!queuedRun}
+              disabled={state.connection !== 'online' || !!globalRun || !!queuedRun || !!pendingWorkerBatch(data, conversation?.id)}
               busy={busy}
               model={data.settings.model}
               attachments={{

@@ -1,6 +1,8 @@
 //! Same-bot worker admission, lifecycle, public-state hiding, recovery, and persistence integrity.
 
 mod common;
+#[path = "workers_retention/mod.rs"]
+mod retention;
 
 use common::{Fixture, assert_load_rejected, write_json};
 use grok_bot_model::*;

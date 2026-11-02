@@ -1,7 +1,8 @@
 //! Bounded, read-only same-bot workers. Each approved task owns one hidden conversation. A batch
 //! releases only after its source turn succeeds and produces one grouped, non-retried report.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::{Component, Path};
 
 use chrono::{DateTime, Utc};
 use grok_bot_model::*;
@@ -11,6 +12,9 @@ use crate::validate::{Issues, is_timestamp, is_uuid, js_len, js_slice, js_trim};
 
 pub const MAX_WORKERS_PER_BATCH: usize = 3;
 pub const MAX_WORKER_BATCHES: usize = 1000;
+/// Terminal detail retention is separate from the hard ceiling for pending work.
+pub const MAX_TERMINAL_WORKER_BATCHES: usize = 100;
+pub const MAX_TERMINAL_WORKER_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_WORKER_TASK_CHARACTERS: usize = 4000;
 pub const MAX_WORKER_TASK_BYTES: usize = 16 * 1024;
 pub const MAX_WORKER_ANSWER_BYTES: usize = 48 * 1024;
@@ -128,12 +132,28 @@ fn optional_timestamp(value: &Option<String>) -> bool {
     value.as_deref().is_none_or(is_timestamp)
 }
 
+/// Validate persisted authorization without touching the filesystem. A moved/deleted workspace
+/// must not make otherwise valid history unloadable; the confined file broker checks it on use.
+fn authorized_workspace_valid(workspace: &str, data_dir: Option<&Path>) -> bool {
+    if workspace.is_empty() {
+        return true;
+    }
+    let path = Path::new(workspace);
+    js_len(workspace) <= 4096
+        && !workspace.contains('\0')
+        && path.is_absolute()
+        && path != Path::new("/")
+        && path.components().all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
+        && data_dir.is_none_or(|data_dir| !path.starts_with(data_dir) && !data_dir.starts_with(path))
+}
+
 pub(crate) fn schema_valid(disk: &DiskState) -> bool {
     disk.worker_batches.len() <= MAX_WORKER_BATCHES
         && disk.worker_batches.iter().all(|batch| {
             [&batch.id, &batch.bot_id, &batch.parent_conversation_id, &batch.source_message_id, &batch.source_run_id].iter().all(|id| is_uuid(id))
                 && is_timestamp(&batch.created_at)
                 && optional_timestamp(&batch.released_at)
+                && batch.authorized_workspace.as_deref().is_none_or(|workspace| authorized_workspace_valid(workspace, None))
                 && batch.report_input_id.as_deref().is_none_or(is_uuid)
                 && batch.report_message_id.as_deref().is_none_or(is_uuid)
                 && (1..=MAX_WORKERS_PER_BATCH).contains(&batch.workers.len())
@@ -196,6 +216,14 @@ fn plain_parent(disk: &DiskState, parent: &Conversation) -> bool {
 }
 
 pub(crate) fn references_valid(disk: &DiskState) -> bool {
+    if disk.worker_batches.is_empty() {
+        return true;
+    }
+    let conversations: HashMap<&str, &Conversation> = disk.conversations.iter().map(|conversation| (conversation.id.as_str(), conversation)).collect();
+    let mut message_counts: HashMap<&str, usize> = HashMap::new();
+    for message in disk.conversations.iter().flat_map(|conversation| &conversation.messages) {
+        *message_counts.entry(message.id.as_str()).or_default() += 1;
+    }
     let hidden: HashSet<&str> = disk.worker_batches.iter().flat_map(|batch| batch.workers.iter().map(|worker| worker.conversation_id.as_str())).collect();
     let mut ids: HashSet<&str> = disk
         .bots
@@ -215,7 +243,7 @@ pub(crate) fn references_valid(disk: &DiskState) -> bool {
     let mut reports = HashSet::new();
     let mut running = 0;
     for batch in &disk.worker_batches {
-        let Some(parent) = disk.conversations.iter().find(|conversation| conversation.id == batch.parent_conversation_id) else { return false };
+        let Some(parent) = conversations.get(batch.parent_conversation_id.as_str()) else { return false };
         let Some(source) = parent.messages.iter().find(|message| message.id == batch.source_message_id) else { return false };
         if !ids.insert(&batch.id)
             || !sources.insert((&batch.parent_conversation_id, &batch.source_message_id))
@@ -238,7 +266,7 @@ pub(crate) fn references_valid(disk: &DiskState) -> bool {
         }
         let mut tasks = HashSet::new();
         for worker in &batch.workers {
-            let Some(child) = disk.conversations.iter().find(|conversation| conversation.id == worker.conversation_id) else { return false };
+            let Some(child) = conversations.get(worker.conversation_id.as_str()) else { return false };
             if !ids.insert(&worker.id)
                 || !children.insert(&worker.conversation_id)
                 || !tasks.insert(&worker.task)
@@ -306,8 +334,8 @@ pub(crate) fn references_valid(disk: &DiskState) -> bool {
                     || input.source_bot_id.is_some()
                     || input.report_delivery_ids.is_some()
                     || parent.messages.get(index + 1).is_none_or(|message| message.id != *answer_id || message.role != Role::Assistant)
-                    || disk.conversations.iter().flat_map(|conversation| &conversation.messages).filter(|message| message.id == *input_id).count() != 1
-                    || disk.conversations.iter().flat_map(|conversation| &conversation.messages).filter(|message| message.id == *answer_id).count() != 1
+                    || message_counts.get(input_id.as_str()) != Some(&1)
+                    || message_counts.get(answer_id.as_str()) != Some(&1)
                     || (report.status == ReportStatus::Running && (parent.run.id != *run_id || !parent.run.status.is_active()))
                     || (parent.run.id == *run_id && report.status != ReportStatus::Running && report_status(parent.run.status) != Some(report.status))
                 {
@@ -326,7 +354,146 @@ pub(crate) fn references_valid(disk: &DiskState) -> bool {
     running <= 1 && hidden.len() == children.len()
 }
 
+/// Only settled batches are disposable. In particular, `report: None` is not terminal unless
+/// cancellation suppressed that report, and a cancelled batch can still own a running report.
+fn batch_cleanup_ready(batch: &WorkerBatch, conversations: &HashMap<&str, &Conversation>) -> bool {
+    batch
+        .workers
+        .iter()
+        .all(|worker| worker_terminal(worker.status) && conversations.get(worker.conversation_id.as_str()).is_some_and(|child| !child.run.status.is_active()))
+        && (batch.report.as_ref().is_some_and(|report| report.status.is_terminal()) || (batch.cancelled && batch.report.is_none()))
+        && conversations.get(batch.parent_conversation_id.as_str()).is_some_and(|parent| {
+            !parent.run.status.is_active()
+                || (parent.run.id != batch.source_run_id && batch.report.as_ref().and_then(|report| report.run_id.as_deref()) != Some(parent.run.id.as_str()))
+        })
+}
+
+/// Final status time, not the source's creation time: long-running batches retain their details
+/// ahead of work that settled earlier. The insertion position deterministically breaks ties.
+fn batch_finished_at(batch: &WorkerBatch) -> i64 {
+    batch
+        .workers
+        .iter()
+        .filter_map(|worker| worker.finished_at.as_deref())
+        .chain(batch.report.iter().filter_map(|report| report.finished_at.as_deref()))
+        .filter_map(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok().map(|timestamp| timestamp.timestamp_millis()))
+        .max()
+        .unwrap_or(i64::MIN)
+}
+
+pub(crate) fn authorization_valid(disk: &DiskState, data_dir: &Path) -> bool {
+    disk.worker_batches.iter().all(|batch| batch.authorized_workspace.as_deref().is_none_or(|workspace| authorized_workspace_valid(workspace, Some(data_dir))))
+}
+
+fn slice_empty<T>(value: &&[T]) -> bool {
+    value.is_empty()
+}
+
+/// Additional persisted fields the pre-worker generic capacity estimator intentionally omits.
+/// Measure them for worker admission only, retaining the original estimator for unrelated features.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkerCapacityMetadata<'a> {
+    #[serde(skip_serializing_if = "slice_empty")]
+    permission_rules: &'a [PermissionRule],
+    #[serde(skip_serializing_if = "slice_empty")]
+    groups: &'a [Group],
+    #[serde(skip_serializing_if = "slice_empty")]
+    secrets: &'a [VaultSecret],
+    #[serde(skip_serializing_if = "slice_empty")]
+    mcp_servers: &'a [McpServerRecord],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    main_bot_id: Option<&'a str>,
+}
+
 impl State {
+    fn worker_capacity_metadata_bytes(&self) -> usize {
+        let bytes = crate::json_bytes(&WorkerCapacityMetadata {
+            permission_rules: &self.disk.permission_rules,
+            groups: &self.disk.groups,
+            secrets: &self.disk.secrets,
+            mcp_servers: &self.disk.mcp_servers,
+            main_bot_id: self.disk.main_bot_id.as_deref(),
+        });
+        // Remove braces and add the comma joining these fields to the prospective object.
+        if bytes > 2 { bytes - 1 } else { 0 }
+    }
+
+    /// Bound terminal worker details, never user-authored messages or synthesized assistant replies.
+    /// Call as a standalone maintenance mutation BEFORE admission/count/byte checks. Returning an
+    /// error after applying this change would not roll it back (`Store::mutate` is not transactional).
+    /// The returned hidden conversation IDs may be used for best-effort file cleanup ONLY after
+    /// `Store::mutate(...).await` confirms that this removal is durable.
+    pub fn prune_worker_history(&mut self) -> HttpResult<Vec<String>> {
+        self.prune_worker_history_to(MAX_TERMINAL_WORKER_BATCHES, MAX_TERMINAL_WORKER_BYTES)
+    }
+
+    /// One capacity-pressure retry may discard the remaining terminal detail cache, including
+    /// batches below the ordinary retention ceiling. Visible answers and all pending work survive.
+    /// Like normal maintenance, commit this separately before retrying fallible admission.
+    pub fn prune_worker_history_for_capacity(&mut self) -> HttpResult<Vec<String>> {
+        self.prune_worker_history_to(0, 0)
+    }
+
+    fn prune_worker_history_to(&mut self, max_batches: usize, max_bytes: usize) -> HttpResult<Vec<String>> {
+        self.assert_writable()?;
+        if self.disk.worker_batches.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !schema_valid(&self.disk) || !references_valid(&self.disk) || !authorization_valid(&self.disk, &self.data_dir) {
+            return Err(HttpError::new(500, "Worker history contains invalid ownership links and was not pruned."));
+        }
+        let conversations: HashMap<&str, &Conversation> = self.disk.conversations.iter().map(|conversation| (conversation.id.as_str(), conversation)).collect();
+        let mut terminal: Vec<(usize, i64, usize)> = self
+            .disk
+            .worker_batches
+            .iter()
+            .enumerate()
+            .filter(|(_, batch)| batch_cleanup_ready(batch, &conversations))
+            .map(|(index, batch)| {
+                let children = batch.workers.iter().filter_map(|worker| conversations.get(worker.conversation_id.as_str()));
+                let input = batch
+                    .report_input_id
+                    .as_deref()
+                    .and_then(|input_id| conversations.get(batch.parent_conversation_id.as_str())?.messages.iter().find(|message| message.id == input_id));
+                let bytes = children.fold(crate::json_bytes(batch), |bytes, child| bytes.saturating_add(crate::json_bytes(child)));
+                (index, batch_finished_at(batch), bytes.saturating_add(input.map_or(0, crate::json_bytes)))
+            })
+            .collect();
+        terminal.sort_by_key(|(index, finished, _)| (*finished, *index));
+        let mut count = terminal.len();
+        let mut bytes = terminal.iter().fold(0usize, |bytes, (_, _, size)| bytes.saturating_add(*size));
+        let mut removed_batches = HashSet::new();
+        let mut removed_children = Vec::new();
+        let mut removed_inputs: HashMap<String, HashSet<String>> = HashMap::new();
+        for (index, _, size) in terminal {
+            if count <= max_batches && bytes <= max_bytes {
+                break;
+            }
+            let batch = &self.disk.worker_batches[index];
+            removed_batches.insert(batch.id.clone());
+            removed_children.extend(batch.workers.iter().map(|worker| worker.conversation_id.clone()));
+            if let Some(input_id) = &batch.report_input_id {
+                removed_inputs.entry(batch.parent_conversation_id.clone()).or_default().insert(input_id.clone());
+            }
+            count -= 1;
+            bytes = bytes.saturating_sub(size);
+        }
+        if removed_batches.is_empty() {
+            return Ok(Vec::new());
+        }
+        let children: HashSet<&str> = removed_children.iter().map(String::as_str).collect();
+        let disk = self.disk_mut();
+        disk.worker_batches.retain(|batch| !removed_batches.contains(&batch.id));
+        disk.conversations.retain(|conversation| !children.contains(conversation.id.as_str()));
+        for conversation in &mut disk.conversations {
+            if let Some(inputs) = removed_inputs.get(&conversation.id) {
+                conversation.messages.retain(|message| !inputs.contains(&message.id));
+            }
+        }
+        Ok(removed_children)
+    }
+
     pub fn worker_batch(&self, batch_id: &str) -> HttpResult<&WorkerBatch> {
         self.disk.worker_batches.iter().find(|batch| batch.id == batch_id).ok_or_else(|| HttpError::not_found("Worker batch does not exist."))
     }
@@ -354,6 +521,23 @@ impl State {
             .find_map(|batch| batch.workers.iter().find(|worker| worker.task == js_trim(task)).map(|worker| (batch, worker)))
     }
 
+    /// Whether this run may discover worker delegation. Task, capacity, and writable checks are
+    /// deliberately separate: guidance and tool discovery use the same origin rules as admission.
+    pub fn worker_source_eligible(&self, parent_conversation_id: &str, source_message_id: &str, source_run_id: &str) -> bool {
+        let Ok(parent) = self.conversation(parent_conversation_id) else { return false };
+        plain_parent(&self.disk, parent)
+            && !self.disk.worker_batches.iter().any(|batch| batch.report_message_id.as_deref() == Some(source_message_id))
+            && !parent
+                .messages
+                .iter()
+                .position(|message| message.id == source_message_id)
+                .and_then(|index| index.checked_sub(1))
+                .is_some_and(|index| parent.messages[index].report_delivery_ids.is_some())
+            && parent.run.id == source_run_id
+            && parent.run.status.is_active()
+            && parent.messages.iter().rfind(|message| message.role == Role::Assistant).is_some_and(|message| message.id == source_message_id)
+    }
+
     pub fn validate_worker_source(&self, parent_conversation_id: &str, source_message_id: &str, source_run_id: &str, task: &str) -> HttpResult<()> {
         self.assert_writable()?;
         let mut issues = Issues::new();
@@ -364,21 +548,9 @@ impl State {
         if js_trim(task).len() > MAX_WORKER_TASK_BYTES {
             return Err(HttpError::too_large("Worker tasks must be at most 16 KiB of UTF-8 text."));
         }
-        let parent = self.conversation(parent_conversation_id)?;
-        let latest = parent.messages.iter().rfind(|message| message.role == Role::Assistant);
-        if !plain_parent(&self.disk, parent)
-            || self.disk.worker_batches.iter().any(|batch| batch.report_message_id.as_deref() == Some(source_message_id))
-            || parent
-                .messages
-                .iter()
-                .position(|message| message.id == source_message_id)
-                .and_then(|index| index.checked_sub(1))
-                .is_some_and(|index| parent.messages[index].report_delivery_ids.is_some())
-        {
-            return Err(HttpError::conflict("Workers can be started only by a user-requested plain one-to-one parent turn (depth limit: one)."));
-        }
-        if parent.run.id != source_run_id || !parent.run.status.is_active() || latest.is_none_or(|message| message.id != source_message_id) {
-            return Err(HttpError::conflict("The spawning parent run is no longer active."));
+        self.conversation(parent_conversation_id)?;
+        if !self.worker_source_eligible(parent_conversation_id, source_message_id, source_run_id) {
+            return Err(HttpError::conflict("Workers can be started only by an active user-requested plain one-to-one parent turn (depth limit: one)."));
         }
         if self.find_existing_worker(parent_conversation_id, source_message_id, source_run_id, task).is_some() {
             return Ok(());
@@ -416,6 +588,9 @@ impl State {
         if let Some((batch, worker)) = self.find_existing_worker(parent_conversation_id, source_message_id, source_run_id, task) {
             return Ok((batch.clone(), worker.clone()));
         }
+        if !authorized_workspace_valid(&self.settings().workspace, Some(&self.data_dir)) {
+            return Err(HttpError::bad_request("The approved worker workspace must be a safe absolute workspace directory."));
+        }
         let parent = self.conversation(parent_conversation_id)?;
         let timestamp = iso(self.now());
         let conversation = Conversation {
@@ -451,6 +626,7 @@ impl State {
             parent_conversation_id: parent_conversation_id.into(),
             source_message_id: source_message_id.into(),
             source_run_id: source_run_id.into(),
+            authorized_workspace: Some(self.settings().workspace.clone()),
             created_at: timestamp,
             released_at: None,
             cancelled: false,
@@ -466,7 +642,7 @@ impl State {
             Some(index) => prospect.worker_batches[index] = &batch,
             None => prospect.worker_batches.push(&batch),
         }
-        Self::check_capacity(&prospect)?;
+        Self::check_capacity_with_extra(&prospect, self.worker_capacity_metadata_bytes())?;
         let disk = self.disk_mut();
         disk.conversations.push(conversation);
         match existing {

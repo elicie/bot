@@ -94,7 +94,7 @@ test('external document refresh updates clean editors and preserves unsaved edit
   }
 });
 
-test('hidden worker queues keep the visible parent busy through one grouped report and Stop settlement', () => {
+test('only executing hidden workers hold global admission while queued parents retain Stop', () => {
   const data = snapshot(1, 'completed');
   const parent = data.conversations[0];
   const batch = {
@@ -104,8 +104,10 @@ test('hidden worker queues keep the visible parent busy through one grouped repo
     workers: [{ id: randomUUID(), conversationId: randomUUID(), task: 'Review city data', status: 'queued' as const, createdAt: parent.updatedAt }],
   };
   data.workerBatches = [batch];
-  assert.equal(runningConversation(data), parent);
+  assert.equal(runningConversation(data), undefined, 'a queued batch does not lock unrelated conversations');
   assert.equal(pendingWorkerBatch(data, parent.id), batch);
+  data.workerBatches = [{ ...batch, workers: [{ ...batch.workers[0], status: 'running' }] }];
+  assert.equal(runningConversation(data), parent, 'an executing hidden child owns the global slot');
   assert.equal(pendingWorkerBatch(data, 'other'), undefined);
   const finished = { ...batch, workers: [{ ...batch.workers[0], status: 'completed' as const }], report: { status: 'queued' as const } };
   assert.equal(workerBatchPending(finished), true);

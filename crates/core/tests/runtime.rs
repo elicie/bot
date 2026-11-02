@@ -36,7 +36,7 @@ mod bot_reports;
 use bot_reports::{bot_report_cancellation, bot_report_failures, bot_reports};
 #[path = "runtime_workers/mod.rs"]
 mod workers;
-use workers::{worker_batches, worker_cancellation, worker_deadline};
+use workers::{worker_batches, worker_cancellation, worker_deadline, worker_workspace_authorization};
 
 // ---------------------------------------------------------------------------------------------
 // Mock OpenAI-compatible provider (port of tests/mock-provider.ts and scriptedFileReply)
@@ -1325,6 +1325,7 @@ fn runtime_on_the_in_process_engine() {
         scenario!("bot-report-cancellation", Options::default(), bot_report_cancellation);
         scenario!("workers", Options::default(), worker_batches);
         scenario!("worker-cancellation", Options::default(), worker_cancellation);
+        scenario!("worker-workspace-authorization", Options::default(), worker_workspace_authorization);
         scenario!("worker-deadline", Options { worker: Duration::from_millis(500), ..Options::default() }, worker_deadline);
         scenario!("bot-creation", Options::default(), bot_creation);
         scenario!("bot-data", Options::default(), bot_memory_and_knowledge);

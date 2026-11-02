@@ -101,8 +101,12 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
   );
 }
 function MessageView({ message, bot, conversationId, named }: { message: Message; bot: Bot; conversationId?: string; named?: boolean }) {
-  // Successful native plan updates are represented once by the latest checklist, not tool history.
-  const tools = message.tools.filter(tool => tool.kind !== 'think' || tool.title !== 'Updating plan' || tool.status === 'failed');
+  // Plans have their checklist. A worker's broker approval is already represented by the engine
+  // invocation row (and its separate approval card), so do not show a second completed tool row.
+  const tools = message.tools.filter(tool =>
+    (tool.kind !== 'think' || tool.title !== 'Updating plan' || tool.status === 'failed') &&
+    tool.title !== 'Spawn read-only worker',
+  );
   return (
     <article
       className={`message-row ${message.role}`}

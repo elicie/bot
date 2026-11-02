@@ -335,7 +335,7 @@ fn load(path: &Path) -> anyhow::Result<Option<DiskState>> {
         let mut text = String::new();
         file.read_to_string(&mut text)?;
         let mut disk: DiskState = serde_json::from_str(&text)?;
-        if !disk::schema_valid(&mut disk) {
+        if !disk::schema_valid(&mut disk) || !workers::authorization_valid(&disk, path.parent().ok_or_else(|| anyhow::anyhow!(LOAD_FAILED))?) {
             anyhow::bail!("Application state does not match the expected schema.");
         }
         disk::references_valid(&disk).map_err(anyhow::Error::msg)?;
@@ -435,7 +435,9 @@ impl Store {
             if !dirty {
                 return Ok(value);
             }
-            let mut job = state.commit();
+            // Internal invariant failures are fail-stop, not a rollback of the closure: retain
+            // the last good durable state and refuse further mutations until restart.
+            let mut job = state.commit()?;
             let (done, wait) = oneshot::channel();
             if let Job::Write { done: slot, .. } = &mut job {
                 *slot = Some(done);
@@ -509,16 +511,6 @@ struct Prospect<'a> {
     bot_deliveries: Vec<&'a BotDelivery>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     worker_batches: Vec<&'a WorkerBatch>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    permission_rules: Vec<&'a PermissionRule>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    groups: Vec<&'a Group>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    secrets: Vec<&'a VaultSecret>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    mcp_servers: Vec<&'a McpServerRecord>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    main_bot_id: Option<&'a str>,
 }
 
 fn truthy(value: &Option<String>) -> bool {
@@ -567,17 +559,18 @@ impl State {
             bot_exchanges: self.disk.bot_exchanges.iter().collect(),
             bot_deliveries: self.disk.bot_deliveries.iter().collect(),
             worker_batches: self.disk.worker_batches.iter().collect(),
-            permission_rules: self.disk.permission_rules.iter().collect(),
-            groups: self.disk.groups.iter().collect(),
-            secrets: self.disk.secrets.iter().collect(),
-            mcp_servers: self.disk.mcp_servers.iter().collect(),
-            main_bot_id: self.disk.main_bot_id.as_deref(),
         }
     }
 
     /// `checkCapacity`: counts, then the serialized prospective state plus bytes reserved for queued
     /// dispatch (prompt copies and bounded replies).
     fn check_capacity(prospect: &Prospect<'_>) -> HttpResult<()> {
+        Self::check_capacity_with_extra(prospect, 0)
+    }
+
+    /// Worker admission additionally measures fields omitted by the original generic estimator;
+    /// do not silently change unrelated routine/delivery/skill capacity accounting in this feature.
+    fn check_capacity_with_extra(prospect: &Prospect<'_>, extra_bytes: usize) -> HttpResult<()> {
         if prospect.routines.len() > MAX_ROUTINES {
             return Err(HttpError::conflict("The application supports at most 1000 routines."));
         }
@@ -631,7 +624,7 @@ impl State {
                 tasks.saturating_add(report)
             })
             .sum();
-        if json_bytes(prospect).saturating_add(runs).saturating_add(deliveries).saturating_add(workers) > MAX_STATE_BYTES {
+        if json_bytes(prospect).saturating_add(extra_bytes).saturating_add(runs).saturating_add(deliveries).saturating_add(workers) > MAX_STATE_BYTES {
             return Err(HttpError::too_large(
                 "Application state and reserved queued work would exceed the 64 MiB limit. Existing history and conversations are retained.",
             ));
@@ -641,7 +634,7 @@ impl State {
 
     /// `changed()` up to the write: projections, revision bump, serialization. The public snapshot
     /// for subscribers is rebuilt from these bytes on the writer thread, off the state lock.
-    fn commit(&mut self) -> Job {
+    fn commit(&mut self) -> HttpResult<Job> {
         let now = self.now();
         let DiskState { routine_runs, conversations, bot_deliveries, bot_exchanges, worker_batches, .. } = &mut self.disk;
         for routine_run in routine_runs.iter_mut() {
@@ -668,16 +661,23 @@ impl State {
         let routine_conversations: HashSet<&str> = routine_runs.iter().map(|run| run.conversation_id.as_str()).collect();
         reconcile_bot_deliveries(bot_deliveries, bot_exchanges, conversations, &routine_conversations, now);
         workers::reconcile(worker_batches, conversations, now);
+        if !self.disk.worker_batches.is_empty()
+            && (!workers::schema_valid(&self.disk) || !workers::references_valid(&self.disk) || !workers::authorization_valid(&self.disk, &self.data_dir))
+        {
+            self.write_failed = true;
+            self.runtime = RuntimeInfo { available: false, version: self.runtime.version.clone(), error: Some(SAVE_FAILED_RUNTIME.into()) };
+            return Err(internal());
+        }
         self.disk.revision += 1;
         let bytes = serde_json::to_vec(&self.disk).unwrap_or_default();
-        Job::Write {
+        Ok(Job::Write {
             bytes,
             runtime: self.runtime.clone(),
             routine_scheduling_error: self.routine_scheduling_error.clone(),
             reports: uses_reports(&self.disk),
             workers: !self.disk.worker_batches.is_empty(),
             done: None,
-        }
+        })
     }
 
     fn snapshot(&self) -> AppState {
