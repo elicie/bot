@@ -17,6 +17,7 @@ const examples = [
   { name: '이미지', text: `![생성 결과](${image})`, preview: '이미지' },
   { name: '이미지 링크', text: image, preview: '이미지' },
   { name: 'HTML', text: '<div>보이는 내용</div>', preview: '메시지' },
+  { name: '링크 수식', text: '[price](https://example.com/?currency=$) and $x_i * y_j$.', preview: 'price and x_i * y_j.' },
 ];
 
 test('sidebar previews show plain text and short media labels without changing stored messages', async ({ page }, testInfo) => {

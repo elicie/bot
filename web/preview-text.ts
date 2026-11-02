@@ -41,9 +41,15 @@ function parsePreview(text: string) {
   visit(tree, node => {
     if (!node.position) return;
     const range = { start: node.position.start.offset!, end: node.position.end.offset!, block: node.type === 'code' };
-    if (['code', 'inlineCode', 'html'].includes(node.type)) literals.push(range);
+    if (['code', 'inlineCode', 'html', 'image', 'imageReference', 'definition'].includes(node.type)) literals.push(range);
+    if (node.type === 'link' || node.type === 'linkReference') {
+      // Only the label is visible prose; URLs, titles and reference IDs are not math.
+      const labelEnd = node.children.at(-1)?.position?.end.offset;
+      literals.push({ ...range, start: text[range.start] === '<' ? range.start : labelEnd ?? range.start });
+    }
     if (node.type === 'blockquote') quotes.push(range);
   });
+  literals.sort((a, b) => a.start - b.start || b.end - a.end);
   const occupied = new Set(text + plainText(tree, new Map()));
   const tokens: { index: number; token: string; block?: boolean }[] = [];
   const lastClose = new Map<string, number>();
