@@ -120,7 +120,7 @@ impl RoutineScheduler {
         let result = self
             .queue
             .run(async {
-                if self.closed.load(Ordering::SeqCst) {
+                if self.closed.load(Ordering::SeqCst) || self.runtime.is_paused() {
                     return Ok(());
                 }
                 self.process((self.options.now)()).await
@@ -152,6 +152,9 @@ impl RoutineScheduler {
                 if self.closed.load(Ordering::SeqCst) {
                     return Err(HttpError::unavailable("The server is shutting down."));
                 }
+                if self.runtime.is_paused() {
+                    return Err(HttpError::unavailable("The server is paused for update maintenance."));
+                }
                 if self.error().is_some() {
                     return Err(HttpError::unavailable("Routine scheduling stopped. Restart after checking the application data directory."));
                 }
@@ -179,6 +182,7 @@ impl RoutineScheduler {
 
     async fn process(&self, now: DateTime<Utc>) -> HttpResult<()> {
         self.store.read(|s| s.assert_writable())?;
+        self.runtime.expire_bot_chains(now).await?;
         self.store
             .mutate(|s| {
                 let scheduling_error = match s.claim_due_routines(now) {

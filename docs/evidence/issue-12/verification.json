@@ -1,0 +1,191 @@
+{
+  "before": {
+    "capturedAt": "2026-11-02T05:32:37.868Z",
+    "viewport": {
+      "width": 1280,
+      "height": 900
+    },
+    "theme": "dark",
+    "locale": "ko-KR",
+    "timezone": "UTC",
+    "binarySha256": "e7fa4f335a980d6e4ea3c4c3fc26bd46dacfcb6221714a33603e8b56052e410c",
+    "dataWasDisposable": true,
+    "sourcePrompt": "B 검토자에게 재시도 정책 검토를 요청해 주세요. B는 C 전문가에게 대기 시간을 확인하고, C의 답을 반영해 정리한 뒤 최종 결과를 저에게 알려 주세요.",
+    "messageAB": "C 전문가에게 재시도 대기 시간을 확인하고, 그 답을 반영한 최종 검토 결과를 알려 주세요.",
+    "messageBC": "재시도 정책의 권장 대기 시간을 확인하고 짧게 답해 주세요.",
+    "childAnswer": "C 검토 완료: 권장 재시도 대기 시간은 47초입니다.",
+    "approvalCount": 2,
+    "providerMainRequestCounts": {
+      "A": 4,
+      "B": 3,
+      "C": 1
+    },
+    "finalAnswer": "B 검토자가 C 전문가에게 확인을 요청했습니다. 아직 C의 최종 결과는 받지 못했습니다.",
+    "finalDeliveries": [
+      {
+        "hop": 1,
+        "status": "completed",
+        "report": "completed"
+      },
+      {
+        "hop": 2,
+        "status": "completed",
+        "report": null
+      }
+    ],
+    "pageErrors": [],
+    "waitingStopAvailable": false,
+    "mobileOverflow": {
+      "320": false,
+      "390": false
+    },
+    "stateFileMode": 384,
+    "provenance": {
+      "baselineRevision": "95ffc464e8d55c1a315fddb31101fadb9c9c5b7b",
+      "revision": "95ffc464e8d55c1a315fddb31101fadb9c9c5b7b",
+      "sourceDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sourceTreeSha256": "38c09db2274f736cbf755cfbe3a81c5052bb9e81504fed08f41d53f970df49fa",
+      "webBuildSha256": "6c9c4acd907a7e5fa0081696b805e982c097e4108ede084ba5700b82e77e099e"
+    }
+  },
+  "after": {
+    "capturedAt": "2026-11-02T05:51:40.548Z",
+    "viewport": {
+      "width": 1280,
+      "height": 900
+    },
+    "theme": "dark",
+    "locale": "ko-KR",
+    "timezone": "UTC",
+    "binarySha256": "dea16e57684af9d9e3ffdab2e92887b547739788c579172c4f848bfe50049022",
+    "dataWasDisposable": true,
+    "sourcePrompt": "B 검토자에게 재시도 정책 검토를 요청해 주세요. B는 C 전문가에게 대기 시간을 확인하고, C의 답을 반영해 정리한 뒤 최종 결과를 저에게 알려 주세요.",
+    "messageAB": "C 전문가에게 재시도 대기 시간을 확인하고, 그 답을 반영한 최종 검토 결과를 알려 주세요.",
+    "messageBC": "재시도 정책의 권장 대기 시간을 확인하고 짧게 답해 주세요.",
+    "childAnswer": "C 검토 완료: 권장 재시도 대기 시간은 47초입니다.",
+    "approvalCount": 2,
+    "providerMainRequestCounts": {
+      "A": 4,
+      "B": 4,
+      "C": 1
+    },
+    "finalAnswer": "최종 검토 결과: 권장 재시도 대기 시간은 **47초**입니다.\n\nC 전문가의 답변을 B 검토자가 정리했고, 그 결과를 최종 답변에 반영했습니다.",
+    "finalDeliveries": [
+      {
+        "hop": 1,
+        "status": "completed",
+        "report": "completed"
+      },
+      {
+        "hop": 2,
+        "status": "completed",
+        "report": "completed"
+      }
+    ],
+    "pageErrors": [],
+    "waitingStopAvailable": true,
+    "mobileOverflow": {
+      "320": false,
+      "390": false
+    },
+    "stateFileMode": 384,
+    "provenance": {
+      "baselineRevision": "95ffc464e8d55c1a315fddb31101fadb9c9c5b7b",
+      "revision": "ae355d97f15968e9c506975023cac7dbb640d2da",
+      "sourceDiffSha256": "19a61dd73072ee7ffe59b33c4b2fe7d33b4d74060f32484b5127ff6747d9fb84",
+      "workingTreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "applicationWorkingTreeClean": true,
+      "sourceTreeSha256": "b25719052aad784210ce8a56212ee6bd38fc54b1ec7c79b8a8ef193fb3ba0bd6",
+      "webBuildSha256": "b4b65651fd22b51579a2bc19a496e515182decd889d19e019c5c32d099be09bd"
+    }
+  },
+  "after-stop": {
+    "capturedAt": "2026-11-02T05:51:42.083Z",
+    "viewport": {
+      "width": 1280,
+      "height": 900
+    },
+    "theme": "dark",
+    "locale": "ko-KR",
+    "timezone": "UTC",
+    "binarySha256": "dea16e57684af9d9e3ffdab2e92887b547739788c579172c4f848bfe50049022",
+    "dataWasDisposable": true,
+    "sourcePrompt": "B 검토자에게 재시도 정책 검토를 요청해 주세요. B는 C 전문가에게 대기 시간을 확인하고, C의 답을 반영해 정리한 뒤 최종 결과를 저에게 알려 주세요.",
+    "messageAB": "C 전문가에게 재시도 대기 시간을 확인하고, 그 답을 반영한 최종 검토 결과를 알려 주세요.",
+    "messageBC": "재시도 정책의 권장 대기 시간을 확인하고 짧게 답해 주세요.",
+    "childAnswer": "C 검토 완료: 권장 재시도 대기 시간은 47초입니다.",
+    "approvalCount": 2,
+    "providerMainRequestCounts": {
+      "A": 3,
+      "B": 3,
+      "C": 1
+    },
+    "finalAnswer": "B 검토자에게 요청을 전달했습니다. 전문가의 검토 결과를 받아 정리하겠습니다.",
+    "finalDeliveries": [
+      {
+        "hop": 1,
+        "status": "cancelled",
+        "report": "skipped"
+      },
+      {
+        "hop": 2,
+        "status": "cancelled",
+        "report": "skipped"
+      }
+    ],
+    "pageErrors": [],
+    "waitingStopAvailable": true,
+    "mobileOverflow": {
+      "320": false,
+      "390": false
+    },
+    "stateFileMode": 384,
+    "provenance": {
+      "baselineRevision": "95ffc464e8d55c1a315fddb31101fadb9c9c5b7b",
+      "revision": "ae355d97f15968e9c506975023cac7dbb640d2da",
+      "sourceDiffSha256": "19a61dd73072ee7ffe59b33c4b2fe7d33b4d74060f32484b5127ff6747d9fb84",
+      "workingTreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "applicationWorkingTreeClean": true,
+      "sourceTreeSha256": "b25719052aad784210ce8a56212ee6bd38fc54b1ec7c79b8a8ef193fb3ba0bd6",
+      "webBuildSha256": "b4b65651fd22b51579a2bc19a496e515182decd889d19e019c5c32d099be09bd"
+    }
+  },
+  "actualModel": {
+    "success": true,
+    "startedAt": "2026-11-02T05:40:58.875Z",
+    "finishedAt": "2026-11-02T05:41:34.012Z",
+    "durationMs": 35137,
+    "selectedModel": "gpt-6.1-sol",
+    "providerCredentialWasInMemoryOnly": true,
+    "sourceDataAndPermissionsUnchanged": true,
+    "sourceStateMode": 384,
+    "disposableStateMode": 384,
+    "isolatedWorkspace": "",
+    "approvalCount": 2,
+    "deliveryCount": 2,
+    "chainCount": 1,
+    "hops": [
+      1,
+      2
+    ],
+    "reportStatuses": [
+      "completed",
+      "completed"
+    ],
+    "completionOrder": [
+      {
+        "role": "C",
+        "finishedAt": "2026-11-02T05:41:26.931Z"
+      },
+      {
+        "role": "B",
+        "finishedAt": "2026-11-02T05:41:30.457Z"
+      },
+      {
+        "role": "A",
+        "finishedAt": "2026-11-02T05:41:33.957Z"
+      }
+    ],
+    "providerRequestCount": 12
+  }
+}

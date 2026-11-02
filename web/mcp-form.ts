@@ -43,9 +43,12 @@ export function mcpDraftProblems(draft: McpDraft, servers: PublicMcpServer[], se
     if (!command || command.length > 1024 || control.test(command) || command.includes('${secret:') || (command.includes('/') && !command.startsWith('/'))) {
       problems.command = 'PATH에서 찾을 명령 이름이나 절대 경로를 입력하세요. 시크릿 참조·제어 문자 없이 1,024자 이하여야 해요.';
     }
-    if (draft.args.length > 64 || draft.args.some(arg => arg.length > 4096 || arg.includes('\0') || arg.includes('${secret:'))) {
-      problems.args = '인자는 64개까지, 각각 4,096자까지 입력할 수 있어요. 시크릿은 환경 변수에서 선택하세요.';
-    }
+    if (draft.args.length > 64) problems.args = '인자는 64개까지 입력할 수 있어요.';
+    draft.args.forEach((arg, index) => {
+      const problem = !arg.trim() ? '빈 인자 칸은 삭제하거나 값을 입력해 주세요.'
+        : arg.length > 4096 || arg.includes('\0') || arg.includes('${secret:') ? '인자는 4,096자 이하여야 해요. 시크릿은 환경 변수에서 선택하세요.' : null;
+      if (problem) { problems.args ??= problem; problems[`arg-${index}`] = problem; }
+    });
   } else {
     try {
       const url = new URL(draft.url.trim());

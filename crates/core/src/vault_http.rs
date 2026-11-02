@@ -12,7 +12,6 @@ use axum::extract::{ConnectInfo, FromRequest, Path, Request, State};
 use axum::http::StatusCode;
 use axum::routing::{get, patch, post, put};
 use grok_bot_model::{HttpError, McpConfigInput, McpEnabledInput, SecretInput, SecretValueInput};
-use serde::Deserialize;
 use serde_json::json;
 
 use crate::http::{ApiResult, Ctx, Empty, JsonBody, Remote, is_local, reply, state_reply};
@@ -61,16 +60,8 @@ async fn read_mcp(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(bot_
 
 async fn save_mcp(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(bot_id): Path<String>, JsonBody(input): JsonBody<McpConfigInput>) -> ApiResult {
     let (store, local) = (ctx.store.clone(), is_local(&remote));
-    ctx.queue.run(async move { store.mutate(move |s| s.set_mcp_servers(&bot_id, &input.json, local)).await }).await?;
+    ctx.queue.run(async move { store.mutate(move |s| s.set_mcp_servers_with_secrets(&bot_id, &input.json, &input.secrets, local)).await }).await?;
     Ok(state_reply(&ctx, StatusCode::OK, &remote))
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct McpTestInput {
-    json: String,
-    #[serde(default)]
-    secrets: Vec<SecretInput>,
 }
 
 /// A real, disposable MCP handshake and tools/list; unlike PUT this never saves anything.
@@ -79,26 +70,23 @@ async fn test_mcp(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(bot_
     if !is_local(&remote) {
         return Err(HttpError::forbidden(grok_bot_store::vault::MCP_REQUIRES_LOOPBACK).into());
     }
-    let JsonBody(input) = JsonBody::<McpTestInput>::from_request(request, &ctx)
+    let JsonBody(input) = JsonBody::<McpConfigInput>::from_request(request, &ctx)
         .await
         .map_err(|error| crate::http::ApiError(HttpError::new(error.0.status, "MCP 요청 오류: json 문자열과 선택적인 secrets 목록을 확인해 주세요.")))?;
-    let store = ctx.store.clone();
-    let stopping = ctx.mcp_test_stopping.subscribe();
-    let count = ctx
+    // Admission never waits behind a running test; the worker retains it through cleanup even
+    // when this HTTP future is dropped by a disconnected browser.
+    let admission = ctx.mcp_tests.admit()?;
+    let server = ctx
         .queue
-        .run(async move {
-            // A queued request may acquire the turn after shutdown already started. Inspect the
-            // current value, not just a future change, before preparing or spawning any draft.
-            if *stopping.borrow() {
-                return Err(HttpError::unavailable(crate::mcp_probe::STOPPED));
-            }
-            // Copy only the resolved draft out of the read lock before any network/process await.
-            let server = store.read(|state| state.resolve_mcp_draft(&bot_id, &input.json, &input.secrets, true))?;
-            // The worker observes shutdown itself and acknowledges it only after child cleanup.
-            // Do not drop this future on shutdown: the queue must stay held until kill + wait.
-            crate::mcp_probe::test(server, stopping).await
+        .run(async {
+            admission.check_open()?;
+            ctx.store.read(|state| state.resolve_mcp_draft(&bot_id, &input.json, &input.secrets, true))
         })
         .await?;
+    // Only idle-check + resolution belongs to the app queue. Network/process startup must not
+    // stall messages, approvals, settings, scheduler ticks, or webhooks.
+    let launch = crate::runtime::McpLaunchContext::capture()?;
+    let count = crate::mcp_probe::test(server, launch, admission).await?;
     Ok(reply(StatusCode::OK, json!({ "toolCount": count }), &remote))
 }
 

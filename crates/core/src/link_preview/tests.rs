@@ -400,8 +400,11 @@ async fn bounded_ttl_lru_failure_cache_and_repeat_coalescing() {
     assert_eq!(fixture.hits("/slow"), 1);
     service.preview(&fixture.url("/slow#fragment")).await.unwrap();
     assert_eq!(fixture.hits("/slow"), 1);
-    // Advance only the cache clock. HTTP scheduling must not expire entries during LRU assertions.
-    *cache_time.lock().unwrap() += Duration::from_millis(30);
+    // Advance only cache time: the boundary and later LRU checks do not depend on HTTP scheduling.
+    *cache_time.lock().unwrap() += service.limits.ttl - Duration::from_nanos(1);
+    service.preview(&fixture.url("/slow")).await.unwrap();
+    assert_eq!(fixture.hits("/slow"), 1, "success remains cached immediately before expiry");
+    *cache_time.lock().unwrap() += Duration::from_nanos(1);
     service.preview(&fixture.url("/slow")).await.unwrap();
     assert_eq!(fixture.hits("/slow"), 2);
 

@@ -14,11 +14,13 @@ const SECRET = 'e2e-vault-secret-value-31337';
 const snapshot = (page: Page): Promise<AppState> => page.evaluate(async () => (await fetch('/api/state')).json());
 const details = (page: Page) => page.getByRole('complementary', { name: '대화 세부 정보', exact: true });
 
-/** A streamable-HTTP MCP fixture with one `lookup` tool that records request headers. */
-async function startMcpFixture() {
+/** A real streamable-HTTP MCP peer; optional held discovery exposes command-queue blocking. */
+async function startMcpFixture(options: { holdToolsList?: boolean } = {}) {
   const authorization: string[] = [];
   const methods: string[] = [];
   const calls: unknown[] = [];
+  let releaseToolsList!: () => void;
+  const toolsListGate = new Promise<void>(resolve => { releaseToolsList = resolve; });
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     if (req.method !== 'POST') { res.writeHead(405).end(); return; }
     authorization.push(String(req.headers.authorization ?? ''));
@@ -27,6 +29,10 @@ async function startMcpFixture() {
     const request = JSON.parse(body) as { id?: number | string; method: string; params?: Record<string, unknown> };
     methods.push(request.method);
     if (request.id === undefined) { res.writeHead(202).end(); return; }
+    if (request.method === 'tools/list' && options.holdToolsList) {
+      await toolsListGate;
+      if (res.destroyed) return;
+    }
     const results: Record<string, unknown> = {
       initialize: { protocolVersion: request.params?.protocolVersion, capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'e2e-fixture', version: '1.0.0' } },
       ping: {},
@@ -42,7 +48,11 @@ async function startMcpFixture() {
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`;
-  return { url, authorization, methods, calls, close: () => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); }) };
+  return { url, authorization, methods, calls, releaseToolsList, close: () => new Promise<void>(resolve => {
+    releaseToolsList();
+    server.closeAllConnections();
+    server.close(() => resolve());
+  }) };
 }
 
 /** search_tool, then the fixture tool, then a final answer. */
@@ -110,12 +120,12 @@ async function openMcpJson(page: Page) {
 
 function watchVaultWrites(page: Page) {
   const secretPosts: SecretInput[] = [];
-  const configPuts: Array<{ json: string }> = [];
+  const configPuts: Array<{ json: string; secrets?: SecretInput[] }> = [];
   const probes: Array<{ json: string; secrets: SecretInput[] }> = [];
   page.on('request', request => {
     const path = new URL(request.url()).pathname;
     if (request.method() === 'POST' && path === '/api/secrets') secretPosts.push(request.postDataJSON() as SecretInput);
-    if (request.method() === 'PUT' && /\/mcp-servers$/.test(path)) configPuts.push(request.postDataJSON() as { json: string });
+    if (request.method() === 'PUT' && /\/mcp-servers$/.test(path)) configPuts.push(request.postDataJSON() as { json: string; secrets?: SecretInput[] });
     if (request.method() === 'POST' && /\/mcp-servers\/test$/.test(path)) probes.push(request.postDataJSON() as { json: string; secrets: SecretInput[] });
   });
   return { secretPosts, configPuts, probes };
@@ -289,11 +299,12 @@ test('form: HTTP probe is ephemeral, save uses vault references, JSON and form a
     expect(provider.requests).toEqual([]);
     await page.screenshot({ path: info.outputPath('mcp-form-probed-not-saved.png') });
 
-    // Testing is not enabling. Saving creates a bot-scoped secret and an initially disabled server.
+    // Testing is not enabling. One atomic PUT saves the bot-scoped secret and disabled server.
     await form.getByRole('button', { name: '서버 추가', exact: true }).click();
     await expect(form).toBeHidden();
-    expect(writes.secretPosts).toEqual([{ name: 'MCP_FIXTURE_TOKEN', value: SECRET, botId }]);
+    expect(writes.secretPosts).toEqual([]);
     expect(writes.configPuts).toHaveLength(1);
+    expect(writes.configPuts[0].secrets).toEqual([{ name: 'MCP_FIXTURE_TOKEN', value: SECRET, botId }]);
     expect(writes.configPuts[0].json).not.toContain(SECRET);
     const server = details(page).getByRole('listitem', { name: 'MCP 서버 fixture', exact: true });
     const toggle = server.getByRole('switch', { name: 'fixture 사용', exact: true });
@@ -343,7 +354,9 @@ test('form: HTTP probe is ephemeral, save uses vault references, JSON and form a
     expect((await snapshot(page)).mcpServers?.some(item => item.name === 'from-vault')).toBe(false);
     await selected.getByRole('button', { name: '서버 추가', exact: true }).click();
     await expect(selected).toBeHidden();
-    expect(writes.secretPosts).toHaveLength(1);
+    expect(writes.secretPosts).toEqual([]);
+    expect(writes.configPuts).toHaveLength(3);
+    expect(writes.configPuts.at(-1)?.secrets ?? []).toEqual([]);
     const merged = await readMcp(page, botId);
     expect(merged.parsed).toEqual({ mcpServers: {
       fixture: saved.parsed.mcpServers.fixture,
@@ -383,7 +396,91 @@ test('form: HTTP probe is ephemeral, save uses vault references, JSON and form a
   }
 });
 
-test('form retry: a failed MCP PUT keeps the saved secret reference and appends to external edits without duplicate secret creation', async ({ page }) => {
+test('responsiveness: a pending HTTP probe does not delay browser message send or tool approval beyond two seconds', async ({ page }) => {
+  const app = await startTestApp();
+  const provider = await startMockProvider({ reply });
+  const fixture = await startMcpFixture();
+  const stalled = await startMcpFixture({ holdToolsList: true });
+  const probePage = await page.context().newPage();
+  let probeSettled = false;
+  let probeResult: Promise<{ status: number; body: unknown }> | undefined;
+  try {
+    await page.goto(app.url);
+    await configure(page, provider.baseUrl);
+    const botId = (await snapshot(page)).bots[0].id;
+    const path = `/api/bots/${botId}/mcp-servers`;
+    await vaultRequest(page, path, 'PUT', { json: JSON.stringify({ mcpServers: { fixture: { url: fixture.url } } }) });
+    await vaultRequest(page, `${path}/fixture`, 'PATCH', { enabled: true });
+
+    // Warm the engine and create the conversation outside the latency assertion.
+    const message = page.getByRole('textbox', { name: '메시지', exact: true });
+    const send = page.getByRole('button', { name: '메시지 보내기', exact: true });
+    await message.fill('Warm up the responsiveness fixture');
+    await send.click();
+    await expect(page.getByText('보관함 테스트 응답입니다.', { exact: true })).toBeVisible({ timeout: 30_000 });
+    await message.fill('Please look it up');
+    await expect(send).toBeEnabled();
+
+    // A second browser page makes a real fetch; its peer deliberately holds tools/list open.
+    await probePage.goto(app.url);
+    probeResult = probePage.evaluate(async ({ path, url }) => {
+      const response = await fetch(`${path}/test`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Grok-Bot': '1' },
+        body: JSON.stringify({ json: JSON.stringify({ mcpServers: { pending: { url } } }), secrets: [] }),
+      });
+      return { status: response.status, body: await response.json() as unknown };
+    }, { path, url: stalled.url }).then(result => {
+      probeSettled = true;
+      return result;
+    }, error => {
+      probeSettled = true;
+      return { status: 0, body: { error: String(error) } };
+    });
+    await expect.poll(() => stalled.methods, { timeout: 5_000 }).toContain('tools/list');
+    expect(probeSettled).toBe(false);
+
+    await message.fill('Please look it up');
+    const sentAt = performance.now();
+    const [sent] = await Promise.all([
+      page.waitForResponse(response => response.request().method() === 'POST' && /\/api\/conversations\/[^/]+\/messages$/.test(new URL(response.url()).pathname), { timeout: 2_000 }),
+      send.click(),
+    ]);
+    expect(sent.status()).toBe(202);
+    expect(performance.now() - sentAt).toBeLessThan(2_000);
+    expect(probeSettled).toBe(false);
+    const approval = page.getByRole('region', { name: '작업 승인 요청', exact: true });
+    await expect(approval).toContainText('MCP 서버 fixture: lookup', { timeout: 4_000 });
+    expect(fixture.calls).toHaveLength(0);
+    expect(probeSettled).toBe(false);
+
+    const approvedAt = performance.now();
+    const [approved] = await Promise.all([
+      page.waitForResponse(response => response.request().method() === 'POST' && /\/api\/conversations\/[^/]+\/permissions\/[^/]+$/.test(new URL(response.url()).pathname), { timeout: 2_000 }),
+      approval.getByRole('button', { name: 'Run once', exact: true }).click(),
+    ]);
+    expect(approved.status()).toBe(200);
+    expect(performance.now() - approvedAt).toBeLessThan(2_000);
+    expect(probeSettled).toBe(false);
+    expect(stalled.calls).toHaveLength(0);
+
+    stalled.releaseToolsList();
+    expect(await probeResult).toEqual({ status: 200, body: { toolCount: 1 } });
+    await expect(page.getByText('사용자 지정 MCP 조회를 마쳤습니다.', { exact: true })).toBeVisible({ timeout: 30_000 });
+    expect(fixture.calls).toHaveLength(1);
+    expect((await snapshot(page)).mcpServers?.map(server => server.name)).toEqual(['fixture']);
+    expect((await snapshot(page)).secrets ?? []).toEqual([]);
+  } finally {
+    stalled.releaseToolsList();
+    if (probeResult) await probeResult;
+    await probePage.close();
+    await app.stop();
+    await provider.close();
+    await fixture.close();
+    await stalled.close();
+  }
+});
+
+test('form retry: a failed atomic MCP PUT saves no secrets, retains the password draft, and retries once alongside enabled and externally saved servers', async ({ page }) => {
   const app = await startTestApp();
   const writes = watchVaultWrites(page);
   try {
@@ -407,7 +504,9 @@ test('form retry: a failed MCP PUT keeps the saved secret reference and appends 
     await header.getByLabel('새 시크릿 값', { exact: true }).fill(SECRET);
     await header.getByLabel('접두사 (선택)', { exact: true }).fill('Bearer ');
 
-    // Intercept the failure only: the secret POST and every GET/subsequent PUT use Rust storage.
+    // Intercept the failure only: no secret POST is allowed; the successful retry uses Rust storage.
+    const putsBefore = writes.configPuts.length;
+    const secret = { name: 'RETRY_TOKEN', value: SECRET, botId };
     let failures = 0;
     await page.route(`**${path}`, async route => {
       if (route.request().method() === 'PUT' && failures === 0) {
@@ -416,28 +515,40 @@ test('form retry: a failed MCP PUT keeps the saved secret reference and appends 
       } else await route.continue();
     });
     await form.getByRole('button', { name: '서버 추가', exact: true }).click();
-    await expect(form.getByRole('alert')).toContainText('새 시크릿은 보관함에 저장됐지만 서버는 추가되지 않았어요');
+    await expect(form.getByRole('alert')).toContainText('서버가 추가되지 않았어요');
     await expect(form.getByRole('alert')).toContainText('Injected MCP save failure');
-    await expect(form.getByRole('status')).toContainText('서버 추가를 취소해도 남아');
-    await expect(header.getByLabel('값 선택', { exact: true })).toHaveValue('RETRY_TOKEN');
-    await expect(header.getByLabel('새 시크릿 값', { exact: true })).toHaveCount(0);
+    await expect(form.getByRole('alert')).not.toContainText(SECRET);
+    await expect(form.getByRole('status')).toHaveCount(0);
+    await expect(header.getByLabel('값 선택', { exact: true })).toHaveValue('@new');
+    await expect(header.getByLabel('새 시크릿 이름', { exact: true })).toHaveValue('RETRY_TOKEN');
+    await expect(header.getByLabel('새 시크릿 값', { exact: true })).toHaveValue(SECRET);
+    await expect(header.getByLabel('새 시크릿 값', { exact: true })).toHaveAttribute('type', 'password');
     await expect(form.getByLabel('서버 이름', { exact: true })).toHaveValue('retry');
     expect(failures).toBe(1);
-    expect(writes.secretPosts).toEqual([{ name: 'RETRY_TOKEN', value: SECRET, botId }]);
-    expect((await snapshot(page)).secrets).toEqual([expect.objectContaining({ name: 'RETRY_TOKEN', botId })]);
+    expect(writes.secretPosts).toEqual([]);
+    expect(writes.configPuts).toHaveLength(putsBefore + 1);
+    expect(writes.configPuts.at(-1)?.secrets).toEqual([secret]);
+    expect(writes.configPuts.at(-1)?.json).not.toContain(SECRET);
+    expect((await snapshot(page)).secrets ?? []).toEqual([]);
+    expect((await snapshot(page)).mcpServers).toEqual([expect.objectContaining({ id: baselineId, name: 'baseline', enabled: true })]);
     expect((await readMcp(page, botId)).parsed).toEqual({ mcpServers: { baseline } });
 
     // A different client saves while this dirty dialog is still open. Retry must re-read, not replace.
     const external = { url: 'https://external.invalid/mcp', headers: { 'X-External': 'non-secret-marker' } };
     const latest = await readMcp(page, botId);
     await vaultRequest(page, path, 'PUT', { json: JSON.stringify({ mcpServers: { ...latest.parsed.mcpServers, external } }) });
+    await vaultRequest(page, `${path}/external`, 'PATCH', { enabled: true });
+    const externalId = (await snapshot(page)).mcpServers!.find(server => server.name === 'external')!.id;
     await expect(form).toBeVisible();
     await expect(form.getByLabel('서버 URL', { exact: true })).toHaveValue('https://example.invalid/mcp');
+    await expect(header.getByLabel('새 시크릿 값', { exact: true })).toHaveValue(SECRET);
     expect((await snapshot(page)).mcpServers).toEqual(expect.arrayContaining([expect.objectContaining({ id: baselineId, name: 'baseline', enabled: true })]));
     await form.getByRole('button', { name: '서버 추가', exact: true }).click();
     await expect(form).toBeHidden();
-    expect(writes.secretPosts).toHaveLength(1);
+    expect(writes.secretPosts).toEqual([]);
     expect(writes.probes).toHaveLength(0);
+    expect(writes.configPuts).toHaveLength(putsBefore + 3);
+    expect(writes.configPuts.filter(input => (input.secrets?.length ?? 0) > 0).map(input => input.secrets)).toEqual([[secret], [secret]]);
     const merged = await readMcp(page, botId);
     expect(merged.parsed).toEqual({ mcpServers: {
       baseline,
@@ -446,10 +557,10 @@ test('form retry: a failed MCP PUT keeps the saved secret reference and appends 
     } });
     expect((await snapshot(page)).mcpServers).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: baselineId, name: 'baseline', enabled: true }),
-      expect.objectContaining({ name: 'external', enabled: false }),
+      expect.objectContaining({ id: externalId, name: 'external', enabled: true }),
       expect.objectContaining({ name: 'retry', enabled: false, secretRefs: ['RETRY_TOKEN'] }),
     ]));
-    expect((await snapshot(page)).secrets).toHaveLength(1);
+    expect((await snapshot(page)).secrets).toEqual([expect.objectContaining({ name: 'RETRY_TOKEN', botId })]);
     expect(merged.json).not.toContain(SECRET);
     expect(JSON.stringify(await snapshot(page))).not.toContain(SECRET);
     const editor = await openMcpJson(page);
@@ -571,6 +682,80 @@ test('form validation: local commands, reserved or duplicate names, URLs, creden
     await expect(details(page).getByRole('switch', { name: 'taken 사용', exact: true })).toBeChecked();
     await expect(details(page).getByRole('switch', { name: 'local-form 사용', exact: true })).not.toBeChecked();
     expect(JSON.stringify(await snapshot(page))).not.toContain(SECRET);
+  } finally { await app.stop(); }
+});
+
+test('form blank arguments: empty and whitespace rows block Test and Add, focus only the invalid row, and explain how to fix it', async ({ page }) => {
+  const app = await startTestApp();
+  const writes = watchVaultWrites(page);
+  try {
+    await page.goto(app.url);
+    const botId = (await snapshot(page)).bots[0].id;
+    await page.getByRole('button', { name: '봇 편집', exact: true }).first().click();
+    const form = await openMcpForm(page);
+    await form.getByLabel('서버 이름', { exact: true }).fill('blank-args');
+    await form.getByLabel('명령', { exact: true }).fill('node');
+    await form.getByRole('button', { name: '인자 추가', exact: true }).click();
+    const first = form.getByLabel('인자 1', { exact: true });
+    await first.fill('--version');
+    await form.getByRole('button', { name: '인자 추가', exact: true }).click();
+    const blank = form.getByLabel('인자 2', { exact: true });
+    for (const value of ['', '   ']) {
+      for (const action of ['연결 테스트', '서버 추가']) {
+        await blank.fill(value);
+        await form.getByRole('button', { name: action, exact: true }).click();
+        await expect(form).toBeVisible();
+        await expect(blank).toHaveAttribute('aria-invalid', 'true');
+        await expect(first).toHaveAttribute('aria-invalid', 'false');
+        await expect(blank).toBeFocused();
+        await expect(blank).toHaveAccessibleDescription('빈 인자 칸은 삭제하거나 값을 입력해 주세요.');
+        await expect(form.getByText('빈 인자 칸은 삭제하거나 값을 입력해 주세요.', { exact: true })).toBeVisible();
+        await expect(form.getByRole('alert')).not.toContainText(SECRET);
+        expect(writes.probes).toEqual([]);
+        expect(writes.configPuts).toEqual([]);
+        expect(writes.secretPosts).toEqual([]);
+      }
+    }
+    await blank.fill('argument with spaces');
+    await expect(blank).toHaveAttribute('aria-invalid', 'false');
+    await expect(first).toHaveValue('--version');
+    await expect(blank).toHaveValue('argument with spaces');
+    expect((await snapshot(page)).secrets ?? []).toEqual([]);
+    expect((await readMcp(page, botId)).parsed).toEqual({ mcpServers: {} });
+    page.once('dialog', confirm => confirm.accept());
+    await form.getByRole('button', { name: '취소', exact: true }).click();
+    await expect(form).toBeHidden();
+  } finally { await app.stop(); }
+});
+
+test('probe field errors: invalid URLs, commands, headers, and blank arguments name the field without echoing submitted secrets or keys', async ({ page }) => {
+  const app = await startTestApp();
+  try {
+    await page.goto(app.url);
+    const botId = (await snapshot(page)).bots[0].id;
+    const url = `https://private-user:${SECRET}@example.invalid/mcp`;
+    const invalidHeader = `${SECRET} invalid header`;
+    const cases = [
+      { field: '서버 URL(url)', config: { url, headers: { Authorization: `Bearer ${SECRET}` } } },
+      { field: '명령(command)', config: { command: `./${SECRET}` } },
+      { field: '헤더(headers)', config: { url: 'https://example.invalid/mcp', headers: { [invalidHeader]: SECRET } } },
+      { field: '인자(args)', config: { command: 'node', args: ['   ', SECRET] } },
+    ];
+    for (const { field, config } of cases) {
+      const result = await vaultRequest<{ error: string }>(page, `/api/bots/${botId}/mcp-servers/test`, 'POST', {
+        json: JSON.stringify({ mcpServers: { draft: config } }),
+        secrets: [{ name: 'FIELD_TOKEN', value: SECRET, botId }],
+      }, 400);
+      expect(result.error).toContain(field);
+      expect(result.error).not.toContain('올바른 MCP 서버 JSON을 입력해 주세요');
+      expect(JSON.stringify(result)).not.toContain(SECRET);
+      expect(JSON.stringify(result)).not.toContain('private-user');
+      expect(JSON.stringify(result)).not.toContain(url);
+      expect(JSON.stringify(result)).not.toContain(invalidHeader);
+    }
+    expect((await snapshot(page)).secrets ?? []).toEqual([]);
+    expect((await snapshot(page)).mcpServers ?? []).toEqual([]);
+    expect((await readMcp(page, botId)).parsed).toEqual({ mcpServers: {} });
   } finally { await app.stop(); }
 });
 
