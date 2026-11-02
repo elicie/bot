@@ -170,7 +170,10 @@ jobs:
         run: |
           npm run build:engine
           if [ "$NODE_TESTS" = all ]; then files="tests/*.test.ts"; else files="$NODE_TESTS"; fi
-          npx tsx --test --test-timeout=180000 --test-reporter=spec $files
+          # Clip pathological lines: a multi-megabyte line (e.g. a failure message dumping a 64 MiB test
+          # state) stalls the runner's log processing for hours instead of failing the step (#13).
+          set -o pipefail
+          npx tsx --test --test-timeout=180000 --test-reporter=spec $files 2>&1 | node scripts/clip-lines.mjs
       - name: End-to-end specs (changed, Rust backend, system Chrome)
         if: env.SPECS != ''
         env:

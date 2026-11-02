@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { request } from 'node:http';
 import { createBackend } from '../server/app.js';
+import { stateSummary } from './state-summary.js';
 import type { AppState, RoutineInput, RoutineRunResult } from '../shared/types.js';
 
 const fakeAgent = `#!/usr/bin/env node
@@ -57,7 +58,7 @@ async function fixture(options: { autoStart?: boolean; pollIntervalMs?: number }
   const wait = async (predicate: () => boolean) => {
     const deadline = Date.now() + 5000;
     while (!predicate()) {
-      assert.ok(Date.now() < deadline, JSON.stringify(backend.store.snapshot()));
+      assert.ok(Date.now() < deadline, stateSummary(backend.store.snapshot()));
       await new Promise(resolve => setTimeout(resolve, 10));
     }
   };
