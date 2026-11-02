@@ -896,3 +896,5 @@ mod tests {
         assert_eq!(iso(DateTime::from_timestamp_millis(1_793_526_000_123).unwrap()), "2026-11-01T09:40:00.123Z");
     }
 }
+
+// CI runner check (temporary, reverted before merge)
