@@ -32,6 +32,8 @@ jobs:
     timeout-minutes: 120
     env:
       CARGO_TERM_COLOR: always
+      # One target dir for cargo, scripts/build-engine.mjs (defaults to engine/target), and rust-cache.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       # The pinned Grok Build engine is a large source build; the default runner disk is tight.
       - name: Free disk space
