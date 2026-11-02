@@ -106,6 +106,11 @@ test('a finished bot delivery is reported back in a follow-up reply with a marke
     await expect(page.getByRole('note', { name: '다른 Bot의 요청', exact: true })).toHaveCount(0);
     await page.reload();
     await expect(page.getByRole('log', { name: '대화 메시지', exact: true }).getByRole('note', { name: '이어서 답한 Bot 답변', exact: true })).toBeVisible();
+    // Clicking the recipient bot opens its own chat, not the newer conversation another bot's message opened.
+    await page.getByRole('complementary', { name: '봇 목록', exact: true }).getByRole('button', { name: /^Reviewer/ }).first().click();
+    await expect(page.getByRole('heading', { name: 'Reviewer', exact: true })).toBeVisible();
+    await expect(page.getByRole('note', { name: '다른 Bot의 요청', exact: true })).toHaveCount(0);
+    await expect(page.getByLabel('메시지', { exact: true })).toBeEnabled();
     expect(stage).toBe(5);
   } finally { await app.stop(); await provider.close(); }
 });

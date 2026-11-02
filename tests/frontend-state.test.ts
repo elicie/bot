@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { reducer, emptyFiles, draftKey, readRoute, routeSearch, pendingBotWork, type UIState } from '../web/state.js';
+import { reducer, emptyFiles, draftKey, readRoute, routeSearch, pendingBotWork, ownConversationsFor, type UIState } from '../web/state.js';
 import type { AppState } from '../shared/types.js';
 
 function snapshot(revision: number, status: 'running' | 'completed'): AppState {
@@ -133,4 +133,27 @@ test('pendingBotWork keeps Stop available for related deliveries and pending sou
   data.botDeliveries = [{ ...delivery, status: 'running' }];
   delete data.runtime.botMessageChains;
   assert.equal(pendingBotWork(data, conversation), false, 'legacy Node backend must not expose unsupported chain Stop');
+});
+
+test('opening a bot prefers its own newest conversation over a newer one opened by another bot', () => {
+  const data = snapshot(1, 'completed');
+  const own = data.conversations[0];
+  const recipient = { ...own, id: 'recipient-conversation', title: '1+1 은 ?', updatedAt: '2026-11-01T00:00:00Z' };
+  data.conversations.push(recipient);
+  data.botDeliveries = [{
+    id: 'delivery', exchangeId: 'exchange', chainId: 'delivery', hop: 1,
+    sourceConversationId: 'other-source', sourceMessageId: 'other-message',
+    recipientConversationId: recipient.id, fromBotId: 'other-bot', toBotId: own.botId,
+    text: 'A public fixture question.', createdAt: '2026-11-01T00:00:00Z', status: 'completed',
+  }];
+  assert.deepEqual(ownConversationsFor(data, own.botId).map(item => item.id), [own.id]);
+  // No remembered conversation: selecting the bot lands on its own conversation, not the newer recipient one.
+  const state = reducer(reducer(ui(), { type: 'snapshot', data }), { type: 'select', selection: { botId: own.botId, conversationId: own.id } });
+  assert.equal(state.selection.conversationId, own.id);
+  const fresh = reducer(ui(), { type: 'snapshot', data });
+  assert.equal(fresh.selection.conversationId, own.id);
+  // A bot with only recipient conversations opens a new chat.
+  data.conversations = [recipient];
+  assert.deepEqual(ownConversationsFor(data, own.botId), []);
+  assert.equal(reducer(ui(), { type: 'snapshot', data }).selection.conversationId, null);
 });
