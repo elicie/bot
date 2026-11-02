@@ -28,7 +28,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::State;
-use crate::validate::{is_timestamp, is_uuid, js_len, js_trim};
+use crate::validate::{is_timestamp, is_uuid, iso_ms, js_len, js_trim, parse_ms};
 
 pub const MAX_SECRETS: usize = 200;
 pub const MIN_SECRET_CHARS: usize = 8;
@@ -578,6 +578,17 @@ fn secret_value(value: &str) -> HttpResult<String> {
     Ok(value.to_owned())
 }
 
+/// Server timestamps also bind saved apps and pending approvals to one configuration version.
+/// Millisecond wall clocks can repeat or move backwards; actual changes must never reuse a version.
+fn next_server_version(previous: &str, now: &str) -> HttpResult<String> {
+    let invalid = || HttpError::conflict("The MCP server timestamp version cannot advance safely.");
+    let previous = parse_ms(previous).ok_or_else(invalid)?;
+    let now = parse_ms(now).ok_or_else(invalid)?;
+    let next = now.max(previous.checked_add(1).ok_or_else(invalid)?);
+    let version = iso_ms(next)?;
+    if is_timestamp(&version) { Ok(version) } else { Err(invalid()) }
+}
+
 impl State {
     /// Every string the public snapshot and model-facing text must redact.
     pub fn redaction_keys(&self) -> Vec<String> {
@@ -664,14 +675,24 @@ impl State {
         let current: Vec<McpServerRecord> = self.mcp_servers_for(bot_id).cloned().collect();
         let next: Vec<McpServerRecord> = parsed
             .into_iter()
-            .map(|(name, config)| match current.iter().find(|server| server.name == name) {
-                Some(existing) if existing.config == config => existing.clone(),
-                Some(existing) => McpServerRecord { enabled: false, config, updated_at: now.clone(), ..existing.clone() },
-                None => {
-                    McpServerRecord { id: new_id(), bot_id: bot_id.to_owned(), name, enabled: false, config, created_at: now.clone(), updated_at: now.clone() }
-                }
+            .map(|(name, config)| {
+                Ok(match current.iter().find(|server| server.name == name) {
+                    Some(existing) if existing.config == config => existing.clone(),
+                    Some(existing) => {
+                        McpServerRecord { enabled: false, config, updated_at: next_server_version(&existing.updated_at, &now)?, ..existing.clone() }
+                    }
+                    None => McpServerRecord {
+                        id: new_id(),
+                        bot_id: bot_id.to_owned(),
+                        name,
+                        enabled: false,
+                        config,
+                        created_at: now.clone(),
+                        updated_at: now.clone(),
+                    },
+                })
             })
-            .collect();
+            .collect::<HttpResult<_>>()?;
         if next == current {
             return Ok(());
         }
@@ -736,10 +757,10 @@ impl State {
         if self.disk.mcp_servers[index].enabled == enabled {
             return Ok(());
         }
-        let now = iso(self.now());
+        let version = next_server_version(&self.disk.mcp_servers[index].updated_at, &iso(self.now()))?;
         let server = &mut self.disk_mut().mcp_servers[index];
         server.enabled = enabled;
-        server.updated_at = now;
+        server.updated_at = version;
         Ok(())
     }
 

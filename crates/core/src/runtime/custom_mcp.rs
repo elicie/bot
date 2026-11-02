@@ -103,7 +103,7 @@ impl RunMcp {
         Self { servers, failures, reported: Mutex::default() }
     }
 
-    fn has(&self, name: &str) -> bool {
+    pub(super) fn has(&self, name: &str) -> bool {
         self.servers.iter().any(|server| server.name == name)
     }
 
@@ -204,6 +204,7 @@ fn failed_activity(run: &Run, server: &str, detail: &str) -> ToolActivity {
         paths: None,
         local_only: None,
         approved_by_rule: None,
+        mcp_app: None,
     }
 }
 
@@ -299,6 +300,7 @@ impl Runtime {
                                 paths: None,
                                 local_only: None,
                                 approved_by_rule: Some(rule_id),
+                                mcp_app: None,
                             }),
                         }
                         Ok(())
