@@ -57,6 +57,7 @@ impl Fixture {
             slots: Arc::new(Semaphore::new(limits.concurrent)),
             limits,
             cache: Mutex::new(Cache::default()),
+            cache_now: Arc::new(Instant::now),
         };
         (root, Arc::new(service))
     }
@@ -383,7 +384,10 @@ async fn one_deadline_covers_dns_redirects_html_and_thumbnail() {
 async fn bounded_ttl_lru_failure_cache_and_repeat_coalescing() {
     let fixture = Fixture::start().await;
     let limits = Limits { ttl: Duration::from_millis(30), entries: 2, ..Limits::default() };
-    let (root, service) = fixture.service(limits).await;
+    let (root, mut service) = fixture.service(limits).await;
+    let cache_time = Arc::new(Mutex::new(Instant::now()));
+    let now = cache_time.clone();
+    Arc::get_mut(&mut service).unwrap().cache_now = Arc::new(move || *now.lock().unwrap());
     let mut tasks = Vec::new();
     for _ in 0..12 {
         let service = service.clone();
@@ -396,7 +400,8 @@ async fn bounded_ttl_lru_failure_cache_and_repeat_coalescing() {
     assert_eq!(fixture.hits("/slow"), 1);
     service.preview(&fixture.url("/slow#fragment")).await.unwrap();
     assert_eq!(fixture.hits("/slow"), 1);
-    tokio::time::sleep(Duration::from_millis(40)).await;
+    // Advance only the cache clock. HTTP scheduling must not expire entries during LRU assertions.
+    *cache_time.lock().unwrap() += Duration::from_millis(30);
     service.preview(&fixture.url("/slow")).await.unwrap();
     assert_eq!(fixture.hits("/slow"), 2);
 
@@ -411,6 +416,9 @@ async fn bounded_ttl_lru_failure_cache_and_repeat_coalescing() {
         assert_eq!(service.preview(&fixture.url("/redirect-private")).await.unwrap_err().status, 403);
     }
     assert_eq!(fixture.hits("/redirect-private"), 1, "errors also have a bounded short TTL");
+    *cache_time.lock().unwrap() += service.limits.failure_ttl;
+    assert_eq!(service.preview(&fixture.url("/redirect-private")).await.unwrap_err().status, 403);
+    assert_eq!(fixture.hits("/redirect-private"), 2, "failed entries expire exactly at their deadline");
 }
 
 #[tokio::test]

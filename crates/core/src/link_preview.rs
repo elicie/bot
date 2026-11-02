@@ -29,6 +29,8 @@ use crate::http::{ApiResult, Ctx, JsonBody, Remote, bad_request, state_reply};
 
 type Lookup = Arc<dyn Fn(String, Arc<OwnedSemaphorePermit>) -> BoxFuture<'static, std::io::Result<Vec<IpAddr>>> + Send + Sync>;
 type Pending = watch::Receiver<Option<HttpResult<LinkPreview>>>;
+// Cache time is separate from network deadlines so expiry can be exercised without wall-clock sleeps.
+type CacheClock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -81,8 +83,7 @@ struct Cache {
 }
 
 impl Cache {
-    fn prune(&mut self, retired: &mut Vec<LinkPreview>) {
-        let now = Instant::now();
+    fn prune(&mut self, now: Instant, retired: &mut Vec<LinkPreview>) {
         self.ready.retain(|_, entry| {
             if entry.expires > now {
                 true
@@ -172,12 +173,20 @@ pub(crate) struct LinkPreviewService {
     limits: Limits,
     slots: Arc<Semaphore>,
     cache: Mutex<Cache>,
+    cache_now: CacheClock,
 }
 
 impl LinkPreviewService {
     pub(crate) fn new(store: Arc<Store>) -> Self {
         let limits = Limits::default();
-        Self { store, policy: Policy::new(), slots: Arc::new(Semaphore::new(limits.concurrent)), limits, cache: Mutex::new(Cache::default()) }
+        Self {
+            store,
+            policy: Policy::new(),
+            slots: Arc::new(Semaphore::new(limits.concurrent)),
+            limits,
+            cache: Mutex::new(Cache::default()),
+            cache_now: Arc::new(Instant::now),
+        }
     }
 
     fn enabled(&self) -> HttpResult<()> {
@@ -193,7 +202,7 @@ impl LinkPreviewService {
         let mut retired = Vec::new();
         let (ready, pending) = {
             let mut cache = self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            cache.prune(&mut retired);
+            cache.prune((self.cache_now)(), &mut retired);
             cache.clock += 1;
             let used = cache.clock;
             if let Some(entry) = cache.ready.get_mut(&key) {
@@ -230,13 +239,14 @@ impl LinkPreviewService {
                     {
                         let mut cache = service.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         cache.pending.remove(&key);
-                        cache.prune(&mut retired);
+                        let now = (service.cache_now)();
+                        cache.prune(now, &mut retired);
                         if service.enabled().is_ok() {
                             cache.evict(service.limits.entries, &mut retired);
                             cache.clock += 1;
                             let used = cache.clock;
                             let ttl = if result.is_ok() { service.limits.ttl } else { service.limits.failure_ttl };
-                            cache.ready.insert(key, Cached { result: result.clone(), expires: Instant::now() + ttl, used });
+                            cache.ready.insert(key, Cached { result: result.clone(), expires: now + ttl, used });
                         } else if let Ok(preview) = &result {
                             retired.push(preview.clone());
                         }
