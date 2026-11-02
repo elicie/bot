@@ -550,6 +550,83 @@ async fn finished_deliveries_queue_reports_only_for_plain_conversations_and_back
 }
 
 #[tokio::test]
+async fn cancelling_queued_reports_is_scoped_idempotent_and_survives_restart() {
+    let f = Fixture::new().await;
+    let a = f.bot_id();
+    let b = add_bot(&f, "B").await;
+    let x = sending(&f, &a).await;
+    let completed = send(&f, &x, &b, "Already reported").await;
+    f.finish(&x.source).await;
+    receive(&f, &completed, true).await;
+    start_report(&f, &x.source).await;
+    f.finish(&x.source).await;
+
+    // Two different user turns leave two reports queued in the same conversation.
+    let mut cancelled = Vec::new();
+    for question in ["Pending 1", "Pending 2"] {
+        let turn = sending_from(&f, &x.source).await;
+        let delivery = send(&f, &turn, &b, question).await;
+        f.finish(&x.source).await;
+        receive(&f, &delivery, true).await;
+        cancelled.push(delivery.id);
+    }
+    let turn = sending_from(&f, &x.source).await;
+    let pending = send(&f, &turn, &b, "Recipient has not run yet").await;
+    f.finish(&x.source).await;
+    let y = sending(&f, &a).await;
+    let other = send(&f, &y, &b, "Other conversation").await;
+    f.finish(&y.source).await;
+    receive(&f, &other, true).await;
+    let z = sending(&f, &a).await;
+    let running = send(&f, &z, &b, "Already reporting").await;
+    f.finish(&z.source).await;
+    receive(&f, &running, true).await;
+    start_report(&f, &z.source).await;
+
+    f.set_time("2026-01-01T00:01:00.000Z");
+    let before = f.store.read(|s| s.disk().clone());
+    f.store.mutate(|s| s.cancel_bot_reports(&x.source)).await.unwrap();
+    let after = f.store.read(|s| s.disk().clone());
+    assert_eq!(after.revision, before.revision + 1, "one durable mutation cancels every queued report");
+    assert_eq!(after.conversations, before.conversations, "no run or hidden report message is created or changed");
+    assert_eq!(after.bot_exchanges, before.bot_exchanges, "recipient answers stay in their exchanges");
+    let mut expected = before.bot_deliveries;
+    for delivery in expected.iter_mut().filter(|d| cancelled.contains(&d.id)) {
+        delivery.report = Some(DeliveryReport { status: ReportStatus::Cancelled, finished_at: Some(f.iso_now()), ..DeliveryReport::queued() });
+    }
+    assert_eq!(after.bot_deliveries, expected, "only queued reports of the selected source change");
+    assert!(f.store.read(|s| queued_reports(&s.disk().bot_deliveries, &x.source).is_empty()));
+    assert_eq!(report_status(&f, &other.id), Some(ReportStatus::Queued));
+    assert_eq!(report_status(&f, &running.id), Some(ReportStatus::Running));
+    assert_eq!(report_status(&f, &completed.id), Some(ReportStatus::Completed));
+    assert_eq!((delivery_status(&f, &pending.id), report_of(&f, &pending.id)), (DeliveryStatus::Queued, None));
+
+    let revision = after.revision;
+    f.store.mutate(|s| s.cancel_bot_reports(&x.source)).await.unwrap();
+    f.store.mutate(|s| s.cancel_bot_reports(&z.source)).await.unwrap();
+    assert_eq!(f.store.snapshot().revision, revision, "repeated cancellation and a running-only report are no-ops");
+    let missing = new_id();
+    assert_eq!(f.store.mutate(|s| s.cancel_bot_reports(&missing)).await.unwrap_err().status, 404);
+    assert_eq!(f.store.snapshot().revision, revision, "invalid requests do not write");
+
+    f.finish(&z.source).await;
+    for _ in 0..2 {
+        let reopened = f.reopen().await.expect("cancelled reports without runs pass schema and reference validation");
+        reopened.read(|s| {
+            assert!(queued_reports(&s.disk().bot_deliveries, &x.source).is_empty(), "cancelled reports are never queued again");
+            for delivery in s.disk().bot_deliveries.iter().filter(|d| cancelled.contains(&d.id)) {
+                let report = delivery.report.as_ref().unwrap();
+                assert_eq!(
+                    (report.status, report.run_id.as_deref(), report.finished_at.as_deref(), report.error.as_deref()),
+                    (ReportStatus::Cancelled, None, Some(f.iso_now().as_str()), None)
+                );
+            }
+            assert_eq!(s.conversation(&x.source).unwrap(), &f.conversation(&x.source));
+        });
+    }
+}
+
+#[tokio::test]
 async fn report_turns_continue_the_chain_and_a_chain_gets_two_reports() {
     let f = Fixture::new().await;
     let a = f.bot_id();
@@ -647,6 +724,11 @@ async fn forged_report_state_is_rejected_on_load() {
             }),
         ),
         ("queued report that already has a report message", Box::new(|s| delivery_json(s, &first.id)["report"] = json!({"status": "queued"}))),
+        ("cancelled report without a finish timestamp", Box::new(|s| delivery_json(s, &first.id)["report"] = json!({"status": "cancelled"}))),
+        (
+            "cancelled report without a run but with a hidden report message",
+            Box::new(|s| delivery_json(s, &first.id)["report"] = json!({"status": "cancelled", "finishedAt": f.iso_now()})),
+        ),
         (
             "report on an unfinished delivery",
             Box::new(|s| {

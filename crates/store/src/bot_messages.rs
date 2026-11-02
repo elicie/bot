@@ -126,9 +126,9 @@ fn report_valid(report: &DeliveryReport) -> bool {
             ReportStatus::Queued => report.run_id.is_none() && report.finished_at.is_none() && report.error.is_none(),
             ReportStatus::Running => report.run_id.is_some() && report.finished_at.is_none() && report.error.is_none(),
             ReportStatus::Skipped => report.run_id.is_none() && report.finished_at.is_some(),
-            // An error without a run: the follow-up turn could not start.
-            ReportStatus::Error => report.finished_at.is_some(),
-            ReportStatus::Completed | ReportStatus::Cancelled | ReportStatus::Interrupted => report.run_id.is_some() && report.finished_at.is_some(),
+            // A report can fail or be cancelled before the follow-up turn starts (no run).
+            ReportStatus::Error | ReportStatus::Cancelled => report.finished_at.is_some(),
+            ReportStatus::Completed | ReportStatus::Interrupted => report.run_id.is_some() && report.finished_at.is_some(),
         }
 }
 
@@ -483,6 +483,23 @@ impl crate::State {
     /// Results of deliveries sent from this conversation are reported back to it ([`reports_to`]).
     pub fn reports_to_conversation(&self, conversation_id: &str) -> bool {
         self.conversation(conversation_id).is_ok_and(|conversation| reports_to(&self.disk.bot_deliveries, conversation, &self.routine_conversation_ids()))
+    }
+
+    /// Cancel every currently queued follow-up report of this source conversation, without
+    /// starting a run or changing its messages. Running and terminal reports (and unfinished
+    /// deliveries) are untouched. Allowed while the app is busy; a no-op does not write state.
+    pub fn cancel_bot_reports(&mut self, conversation_id: &str) -> HttpResult<()> {
+        self.assert_writable()?;
+        self.conversation(conversation_id)?;
+        let ids: HashSet<String> = queued_reports(&self.disk.bot_deliveries, conversation_id).iter().map(|delivery| delivery.id.clone()).collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let finished_at = iso(self.now());
+        for delivery in self.disk_mut().bot_deliveries.iter_mut().filter(|delivery| ids.contains(&delivery.id)) {
+            delivery.report = Some(DeliveryReport { status: ReportStatus::Cancelled, finished_at: Some(finished_at.clone()), ..DeliveryReport::queued() });
+        }
+        Ok(())
     }
 
     /// The follow-up turn of `conversation_id` could not start: its queued reports end with
