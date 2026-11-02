@@ -45,6 +45,7 @@ impl Fixture {
             port: AtomicU16::new(3333),
             closing: AtomicBool::new(false),
             web_root: None,
+            mcp_test_stopping: tokio::sync::watch::Sender::new(false),
             stopping: tokio::sync::watch::Sender::new(false),
         });
         Self { app: router(context.clone()), context }
