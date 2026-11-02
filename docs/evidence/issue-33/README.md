@@ -5,7 +5,7 @@ All screenshots are actual Chrome captures of the local Rust application and rea
 ## Matched Before / After
 
 - **Before:** `d6c90d6698a890667a5edbbc3f898b53e26b09bc` (main after PR #24 and PR #30). Both the unchanged frontend and exact baseline Rust server were built before capture; the baseline has a separate Cargo target.
-- **After implementation:** `d485cbf831614fd43d90f661cea55163a8726326`. A following evidence-only commit records this directory.
+- **After implementation:** `ebec22bc5ad1b675ec60c542eee2271f39ef78a2`. A following evidence-only commit records this directory.
 - Same scenario, locale `ko-KR`, timezone `UTC`, Dark theme, and viewports **1040 × 760** / **390 × 844**. Each isolated fixture has generated bot/conversation IDs.
 - User asks Grok to request Reviewer's plan verdict and approves the message. Reviewer's answer arrives while an older routine occupies the global execution slot, leaving the follow-up report queued.
 - For the no-op comparison, the browser holds the cancellation request, the routine finishes, and the real scheduler starts the selected report before the request proceeds. Both captures therefore show the same running report after the cancellation command; Before silently succeeds, while After explains that nothing was cancelled.
@@ -17,7 +17,7 @@ All screenshots are actual Chrome captures of the local Rust application and rea
 | Scheduler first / no-op, desktop | [Before](<./before-noop-1040.png>) | [After](<./after-noop-1040.png>) |
 | Scheduler first / no-op, mobile | [Before](<./before-noop-390.png>) | [After](<./after-noop-390.png>) |
 
-The pending action now visibly says **이 보고 취소** and sends only that summary's displayed delivery ID. No-op feedback is visible and announced after the user's action. Running and historical report chips have no status role and opt out of the transcript's live announcements; queued chips remain live.
+The pending action now visibly says **이 보고 취소** and sends only that summary's displayed delivery ID. No-op feedback appears in a dismissible, non-scrolling chat banner and is announced after the user's action, including when the selected older report is far above the transcript tail. [Desktop long-history regression](<./after-noop-scrolled-1040.png>) and [mobile long-history regression](<./after-noop-scrolled-390.png>) are additional After captures, not replacements for the paired comparisons. Running and historical report chips have no status role and opt out of the transcript's live announcements; queued chips remain live.
 
 ## API and persistence
 
@@ -29,6 +29,6 @@ Before the first unstarted cancellation is written, the ordered store writer pre
 
 ## Verification
 
-Completed frontend checks: production build/typecheck, existing frontend-state tests, interface detector, and all **4** Rust-backed Playwright scenarios. The browser suite covers the original automatic follow-up, desktop/mobile selected cancellation with disk and server-restart persistence, exact outgoing selected IDs, rejected-command retry, in-flight duplicate-action disabling, keyboard activation, conditional live-region attributes, and scheduler-first no-op feedback with the report continuing to completion.
+Completed frontend checks: production build/typecheck, existing frontend-state tests, interface detector, and all **5** Rust-backed Playwright scenarios. The browser suite covers the original automatic follow-up, desktop/mobile selected cancellation with disk and server-restart persistence, exact outgoing selected IDs, rejected-command retry, in-flight duplicate-action disabling, keyboard activation, conditional live-region attributes, and scheduler-first no-op feedback with the report continuing to completion. The desktop/mobile scheduler-first cases use a loader-accepted long-history fixture, scroll to an older report, and assert that both the no-op banner and selected status intersect the viewport while more than 500 px of later transcript remains below it; dismissal is verified.
 
-Rust store/core regression suites passed, including real HTTP/shared-queue tests for cancellation-first and dispatch-first, A selected followed by B arriving and only B executing, strict body validation, exact private create-once backup bytes, restart/no overwrite, fail-closed obstructed or invalid backups, and no fabricated rollback backup for already-new-shape states. Format and whitespace checks passed; final lint and independent-review results are recorded on the PR. No paid model, hosted deployment, or GitHub approval by the local reviewer is claimed.
+Rust store/core regression suites passed, including real HTTP/shared-queue tests for cancellation-first and dispatch-first, A selected followed by B arriving and only B executing, strict body validation, exact private create-once backup bytes, restart/no overwrite, fail-closed obstructed or invalid backups (including valid-JSON versions 2/99, empty bots, dangling references and hardlinks; the same schema/reference checks as actual state loading), and no fabricated rollback backup for already-new-shape states. Format and whitespace checks passed; final lint and independent-review results are recorded on the PR. No paid model, hosted deployment, or GitHub approval by the local reviewer is claimed.
