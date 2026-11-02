@@ -48,6 +48,12 @@ Each bot may hold up to 10 custom MCP servers, edited as one "MCP 서버 JSON" d
 
 The server has no login and a stdio server is arbitrary command execution as the server user, so every secret change and every MCP change that can make a server run (saving the JSON, enabling) requires a loopback client. New and changed servers start disabled; disabling is allowed from LAN. Enabled servers join the bot's sessions next to the `workspace` broker (recipient bot-message conversations get none) with a 10 s startup and 25 s call timeout, and their enabled configuration (unresolved, so no secret values) is part of the session fingerprint. A server with a missing secret or a missing command is skipped and an engine `x.ai/mcp/server_status` report of an unavailable server becomes a failed tool activity; the turn continues. Each custom tool call arrives as an ACP permission request that becomes an approval card ("MCP 서버 name: tool"); declining it sends the engine a follow-up so the model continues without the tool. A `mcp_tool` permission rule (all servers or one `server`, all bots or one bot) can allow calls without asking, except in webhook-triggered runs. Stdio servers inherit the server process environment (with `HOME` pointing at the engine home) plus their configured `env`. Tool results from a custom server reach the model unfiltered; a server that echoes its own credentials exposes them to the model (they stay redacted in the browser).
 
+## MCP apps
+
+Successful custom MCP tools may attach a bounded `ToolActivity.mcpApp` from their definition's `_meta.ui.resourceUri`. The runtime reads that exact `ui://` HTML resource through the existing session-scoped engine extension before closing the turn. The store keeps the resource with its actor bot and server record/version, validates UTF-8/count limits, and redacts HTML plus JSON-encoded input keys/values. Historical HTML remains viewable after its server is disabled or removed.
+
+Only these persisted app cards opt into JSON-RPC `postMessage`; ordinary visualization fences gain no tool authority. The renderer reuses the script-only opaque iframe, network-blocking CSP and full-screen viewer. Each app call creates a separate expiring one-use request and host approval; model `mcp_tool` rules never auto-approve it. After explicit approval the backend serializes a bounded target-only MCP session with model execution, rechecks the saved binding/current configuration, dispatches through the existing engine proxy without an LLM prompt or workspace broker, and closes it. Model `Conversation.run` remains unchanged. The pinned engine exposes text content, not full structured results or a complete app-only catalog; unsupported targets fail closed. See [supported behavior and limits](<docs/mcp-apps.md>).
+
 ## Bot messages
 
 `BotExchange` stores a two-bot transcript and `BotDelivery` stores its durable, idempotent execution receipt. The authenticated broker exposes bot discovery and an outbound message proposal. Approval records the full recipient/text before creating the recipient's dedicated conversation and queue entry atomically. A single source run can deliver one distinct message. Each further hop needs fresh approval. Chains stop at four hops and fourteen total deliveries, bounding recipient/report turns plus the origin at twenty-nine.
@@ -149,6 +155,8 @@ All JSON mutations send `Content-Type: application/json` and `X-Grok-Bot: 1`. Th
 | GET | `/api/generated-images/:id` | | image a provider model generated in a reply (Rust server) |
 | POST | `/api/conversations/:id/cancel` | `{}` | `AppState` |
 | POST | `/api/conversations/:id/permissions/:permissionId` | `{ optionId }` | `AppState` |
+| POST | `/api/conversations/:id/mcp-apps/:toolId/requests` | `{ name, arguments }` | `{ requestId }`; proposal only, no tool execution (Rust) |
+| POST | `/api/conversations/:id/mcp-apps/:toolId/requests/:requestId` | `{ allow }` | bounded MCP text-content result; one-use decision (Rust) |
 | PUT | `/api/conversations/:id/canvas` | `{ revision, title, language, content }` | `AppState`; 409 on stale revision |
 | POST | `/api/conversations/:id/canvas/restore` | `{ revision, targetRevision }` | `AppState`; restored text in a fresh revision |
 | POST | `/api/groups` | `{ name, color?, shape?, memberBotIds }` | `{ group, state }`, status 201 |

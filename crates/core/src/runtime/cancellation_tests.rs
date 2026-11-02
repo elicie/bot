@@ -622,6 +622,36 @@ async fn a_fast_settling_user_stop_does_not_expand_to_an_unrelated_historical_bo
 }
 
 #[tokio::test]
+async fn workers_cannot_capture_mcp_app_resources_or_propose_app_calls() {
+    let f = Fixture::new().await;
+    let parent = f.run(None).await;
+    let batch = f.batch(&parent).await;
+    f.runtime.finish(&parent, Outcome::default()).await;
+    let worker = f.run(Some((&batch.workers[0].conversation_id, &batch.workers[0].id))).await;
+    assert!(worker.mcp.servers.is_empty(), "hidden workers have no custom server authority");
+    let before = f.store.read(|state| state.disk().clone());
+    f.runtime.queue_mcp_app_capture(
+        &worker,
+        json!({
+            "toolCallId": "stray-worker-ui-result", "status": "completed",
+            "rawOutput": {"type": "MCP", "server_name": "apps", "tool_name": "render", "output": {"OkayOutput": "data"}},
+            "_meta": {"ui": {"resourceUri": "ui://fixture/worker"}}
+        }),
+    );
+    {
+        let flags = worker.flags();
+        assert!(flags.mcp_app_seen.is_empty() && flags.mcp_app_captures.is_empty(), "worker UI metadata must not schedule resource reads");
+        assert!(flags.approvals.is_empty());
+    }
+    let error = f.runtime.request_mcp_app_call(&worker.conversation_id, &new_id(), "render", json!({})).unwrap_err();
+    assert_eq!(error.status, 403);
+    assert!(error.message.contains("read-only"));
+    assert!(f.runtime.engine.current().await.is_none(), "rejection starts no isolated MCP session");
+    assert_eq!(f.store.read(|state| state.disk().clone()), before, "rejection attaches no app or other durable change");
+    f.runtime.finish(&worker, Outcome::default()).await;
+}
+
+#[tokio::test]
 async fn cancellation_does_not_report_success_when_only_the_final_run_save_fails() {
     let f = Fixture::new().await;
     let run = f.run(None).await;

@@ -29,6 +29,7 @@ pub mod generated_images;
 pub mod groups;
 pub mod knowledge;
 pub mod main_bot;
+pub mod mcp_apps;
 pub mod memory;
 pub mod permissions;
 mod redact;

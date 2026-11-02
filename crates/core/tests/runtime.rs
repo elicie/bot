@@ -31,6 +31,9 @@ use bot_data::bot_memory_and_knowledge;
 #[path = "runtime_custom_mcp/mod.rs"]
 mod custom_mcp;
 use custom_mcp::custom_mcp_servers;
+#[path = "runtime_mcp_apps/mod.rs"]
+mod mcp_apps;
+use mcp_apps::mcp_apps;
 #[path = "runtime_bot_reports/mod.rs"]
 mod bot_reports;
 use bot_reports::{bot_report_cancellation, bot_report_failures, bot_reports};
@@ -1351,6 +1354,7 @@ fn runtime_on_the_in_process_engine() {
         scenario!("bot-data", Options::default(), bot_memory_and_knowledge);
         scenario!("permission-rules", Options::default(), permission_rules);
         scenario!("custom-mcp", Options::default(), custom_mcp_servers);
+        scenario!("mcp-apps", Options::default(), mcp_apps);
         scenario!("chat-routines", Options::default(), chat_routines);
         scenario!("restart", Options::default(), restart_continuation);
         todos::checklist_updates(&base, &engine_root).await;

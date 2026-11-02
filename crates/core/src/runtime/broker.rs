@@ -397,6 +397,7 @@ impl Runtime {
             paths: Some(vec![public_path.clone()]),
             local_only: None,
             approved_by_rule: None,
+            mcp_app: None,
         };
         let tool_id = tool.id.clone();
         let (allow, _, options) = approval_options("Allow once", "Deny");
@@ -482,6 +483,7 @@ impl Runtime {
             paths: None,
             local_only: None,
             approved_by_rule: None,
+            mcp_app: None,
         };
         let tool_id = tool.id.clone();
         let (allow, _, options) = approval_options("Send once", "Deny");
@@ -557,6 +559,7 @@ impl Runtime {
             paths: None,
             local_only: None,
             approved_by_rule: None,
+            mcp_app: None,
         };
         let tool_id = tool.id.clone();
         let (allow, _, options) = approval_options("Save skill once", "Deny");
@@ -633,6 +636,7 @@ impl Runtime {
             paths: None,
             local_only: None,
             approved_by_rule: None,
+            mcp_app: None,
         };
         let tool_id = tool.id.clone();
         let (allow, _, options) = approval_options("Create bot once", "Deny");

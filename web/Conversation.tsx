@@ -29,6 +29,7 @@ import { BotMessageLinks, BotReportMarker, BotRequestBanner } from './BotChat';
 import { RichMarkdown } from './RichMarkdown';
 import { TodoList } from './TodoList';
 import { WorkerProgress, WorkerReportMarker } from './Workers';
+import { McpAppCard } from './McpApp';
 import { AttachButton, AttachmentTray, DropOverlay, MessageAttachments, useFileDrop, type ComposerAttachments } from './Attachments';
 
 const toolLabels = {
@@ -134,6 +135,7 @@ function MessageView({ message, bot, conversationId, named }: { message: Message
             ))}
           </div>
         )}
+        {conversationId && tools.filter(tool => tool.mcpApp).map(tool => <McpAppCard key={tool.id} app={tool.mcpApp!} conversationId={conversationId} toolId={tool.id} />)}
         {(message.text || tools.length > 0 || !!message.attachments?.length) && (
           <time className="message-time" dateTime={message.createdAt}>
             {formatTime(message.createdAt)}

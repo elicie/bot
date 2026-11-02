@@ -15,6 +15,7 @@ mod broker;
 mod custom_mcp;
 pub(crate) use custom_mcp::McpLaunchContext;
 mod engine;
+mod mcp_apps;
 mod permissions;
 pub mod text;
 mod todos;
@@ -125,6 +126,10 @@ struct RunFlags {
     skills: Vec<Skill>,
     text_suffix: String,
     tool_ids: HashMap<String, String>,
+    /// Completed MCP UI captures already attempted this turn (no duplicate resource reads).
+    mcp_app_seen: std::collections::HashSet<String>,
+    mcp_app_captures: Vec<tokio::task::JoinHandle<()>>,
+    mcp_app_captures_sealed: bool,
     todos: todos::TodoTracker,
     idle_since: Option<Instant>,
     /// Epoch of the managed browser this run acted on; cancellation stops only that epoch.
@@ -231,6 +236,9 @@ pub struct Runtime {
     maintenance: AtomicBool,
     runs: Mutex<Vec<Arc<Run>>>,
     engine: EngineManager,
+    mcp_app_requests: Mutex<mcp_apps::Requests>,
+    /// A bounded app call owns the engine admission slot, without starting an LLM turn.
+    mcp_app_busy: AtomicBool,
     /// Notified whenever a run settles, so the dispatcher can start the next queued turn at once.
     settled: tokio::sync::Notify,
     this: Weak<Runtime>,
@@ -358,6 +366,8 @@ impl Runtime {
             maintenance: AtomicBool::new(false),
             runs: Mutex::new(Vec::new()),
             engine: EngineManager::default(),
+            mcp_app_requests: Mutex::new(mcp_apps::Requests::default()),
+            mcp_app_busy: AtomicBool::new(false),
             settled: tokio::sync::Notify::new(),
             this: this.clone(),
             computer: std::sync::OnceLock::new(),
@@ -418,8 +428,8 @@ impl Runtime {
         self.maintenance.load(Ordering::SeqCst)
     }
 
-    /// Refuse maintenance while a reply is active or still settling. The HTTP caller holds the
-    /// command queue, so accepted starts finish registering before this check. The store lock also
+    /// Refuse maintenance while a reply or isolated app call is active or still settling. The HTTP
+    /// caller holds the command queue, so accepted starts finish registering before this check. The store lock also
     /// serializes the latch with direct runtime starts. Durable queued work is left untouched.
     pub fn pause_if_idle(&self) -> HttpResult<()> {
         self.store.read(|state| {
@@ -427,7 +437,7 @@ impl Runtime {
                 return Err(HttpError::unavailable("The server is shutting down."));
             }
             state.assert_idle()?;
-            if !self.runs().is_empty() {
+            if self.mcp_app_busy.load(Ordering::SeqCst) || !self.runs().is_empty() {
                 return Err(HttpError::conflict(RUN_BUSY));
             }
             self.maintenance.store(true, Ordering::SeqCst);
@@ -492,6 +502,9 @@ impl Runtime {
     }
 
     async fn start_turn(&self, conversation_id: &str, turn: Turn, attachments: Vec<PreparedAttachment>) -> HttpResult<()> {
+        if self.mcp_app_busy.load(Ordering::SeqCst) {
+            return Err(HttpError::conflict("An MCP app call is still running. Wait for it to finish."));
+        }
         // Maintenance admission must not mutate even an expired chain before rejecting the turn.
         // The store mutation below rechecks both guards under the normal admission path.
         if !self.closing.load(Ordering::SeqCst) && !self.is_paused() {
@@ -503,7 +516,7 @@ impl Runtime {
         let (run_id, message_id, settings, plan, extras, prompt, report_deliveries, worker_id, worker_report) = self
             .store
             .mutate(move |state| {
-                if state.active().is_some() {
+                if state.active().is_some() || self.mcp_app_busy.load(Ordering::SeqCst) {
                     state.assert_writable()?;
                     return Err(HttpError::conflict(RUN_BUSY));
                 }
@@ -686,6 +699,7 @@ impl Runtime {
             done: watch::Sender::new(false),
             broker: tokio::sync::Mutex::new(()),
         });
+        self.mcp_app_requests.lock().unwrap_or_else(|p| p.into_inner()).cancel(&run.conversation_id);
         self.runs().push(Arc::clone(&run));
         let runtime = self.arc();
         tokio::spawn(async move { runtime.execute(run, prompt).await });
@@ -994,6 +1008,16 @@ impl Runtime {
     }
 
     async fn finish(&self, run: &Arc<Run>, outcome: Outcome) {
+        // Resource fetches do not block the event router. Drain has projected all normal updates;
+        // join this turn's bounded captures before closing their session, not before projecting text.
+        let captures = {
+            let mut flags = run.flags();
+            flags.mcp_app_captures_sealed = true;
+            std::mem::take(&mut flags.mcp_app_captures)
+        };
+        for capture in captures {
+            let _ = capture.await;
+        }
         let suffix = {
             let mut flags = run.flags();
             flags.finishing = true;
@@ -1094,6 +1118,7 @@ impl Runtime {
             return;
         };
         let kind = update["sessionUpdate"].as_str().unwrap_or_default().to_owned();
+        let app_update = mcp_apps::has_ui_metadata(&update).then(|| update.clone());
         let result = if let acp::SessionUpdate::Plan(plan) = notification.update {
             // Native successes carry IDs, unlike the full-session Plans emitted after them.
             if run.flags().todos.native {
@@ -1190,6 +1215,7 @@ impl Runtime {
                             paths: None,
                             local_only: None,
                             approved_by_rule: None,
+                            mcp_app: None,
                         });
                         message.tools.len() - 1
                     }
@@ -1234,7 +1260,11 @@ impl Runtime {
         } else {
             return;
         };
-        if result.is_err() {
+        if result.is_ok() {
+            if let Some(update) = app_update {
+                self.queue_mcp_app_capture(&run, update);
+            }
+        } else {
             // Saving an update may have made the store unwritable. Stop the live turn now, not
             // after another mutation (or waiting for the command queue), and unblock approvals.
             self.request_stop(&run);
@@ -1451,6 +1481,7 @@ impl Runtime {
     /// and workers of waiting parents. Durable chain, worker, and ordinary queued-work cancellation
     /// share the dispatch queue; cleanup always runs outside it and preserves the original error.
     pub async fn cancel(&self, conversation_id: &str) -> HttpResult<()> {
+        self.mcp_app_requests.lock().unwrap_or_else(|p| p.into_inner()).cancel(conversation_id);
         let own = self.run_for_conversation(conversation_id);
         let mut chain_ids = self.cancellation_bot_chains(conversation_id, own.as_deref());
         let mut runs = Vec::new();
@@ -1496,6 +1527,7 @@ impl Runtime {
 
     pub async fn shutdown(&self) {
         self.closing.store(true, Ordering::SeqCst);
+        self.mcp_app_requests.lock().unwrap_or_else(|p| p.into_inner()).clear();
         let runs: Vec<Arc<Run>> = self.runs().clone();
         for run in &runs {
             self.request_stop(run);
