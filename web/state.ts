@@ -7,6 +7,7 @@ import type {
   FileListing,
   RunStatus,
 } from '../shared/types';
+import { previewText } from './preview-text';
 
 export type SettingsTab = 'general' | 'models' | 'files' | 'permissions' | 'vault' | 'usage' | 'updates';
 export type Overlay =
@@ -414,5 +415,5 @@ export function conversationPreview(conversation: Conversation | undefined): str
   if (conversation.run.status === 'error') return conversation.run.error ?? '실행 오류';
   // Report inputs are app-written data for the bot, never shown as text.
   const message = [...conversation.messages].reverse().find((message) => !message.reportDeliveryIds && message.text.trim());
-  return message?.text.replace(/\s+/g, ' ') ?? '아직 메시지가 없습니다';
+  return message ? previewText(message.text, message.id) || '메시지' : '아직 메시지가 없습니다';
 }

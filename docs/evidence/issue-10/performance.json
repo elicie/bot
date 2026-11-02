@@ -1,0 +1,30 @@
+{
+  "runtime": "Node v24.18.0 on Linux; isolated child, 12 second deadline, 384 MiB heap",
+  "beforeSource": "f023215c0312202a4b86e872adbe9f6f451f377f",
+  "afterSource": "e9f7f958262373c2a68a5b7a6358dab3e3f9fec7",
+  "method": "Five short Markdown/TeX warmups, then five distinct sources and stable message IDs (all cache misses), prefix Sample N: plus repeat/slice of fixture body. Timed only previewText, not imports/process startup. These are observations, not CI thresholds.",
+  "fixtures": {
+    "markdownUnit": "## Analysis\n\n**Important** text with [reference](https://example.com).\n\n- first detail\n- second detail\n\n",
+    "unclosedInlineUnit": "\\(x ",
+    "unclosedDisplayUnit": "\\[x "
+  },
+  "cases": [
+    { "kind": "markdown", "bodyLength": 15000, "beforeMs": [55.955,36.568,49.394,41.736,36.773], "afterMs": [15.906,8.654,6.403,3.803,3.284], "beforeMedianMs": 41.736, "afterMedianMs": 6.403 },
+    { "kind": "markdown", "bodyLength": 77000, "beforeMs": [267.557,218.307,207.993,178.296,196.826], "afterMs": [11.000,8.042,6.650,5.688,2.854], "beforeMedianMs": 207.993, "afterMedianMs": 6.650 },
+    { "kind": "markdown", "bodyLength": 192000, "beforeMs": [1127.075,1033.081,969.433,991.408,975.113], "afterMs": [18.293,10.200,9.061,8.115,5.462], "beforeMedianMs": 991.408, "afterMedianMs": 9.061 },
+    { "kind": "unclosed-inline", "bodyLength": 60000, "beforeMs": [208.458,197.048,176.394,210.246,184.130], "afterMs": [6.735,2.672,2.923,1.777,3.375], "beforeMedianMs": 197.048, "afterMedianMs": 2.923 },
+    { "kind": "unclosed-display", "bodyLength": 60000, "beforeMs": [218.268,191.126,172.544,192.662,179.894], "afterMs": [10.914,10.135,10.226,3.517,4.830], "beforeMedianMs": 191.126, "afterMedianMs": 10.135 }
+  ],
+  "historyBrowser": {
+    "scenario": "120 histories including long reply, deep nesting and malformed delimiters; actual app, no selected full message; real SSE refresh between passes; typing verified afterwards",
+    "source": "c1ea81f04ed6bf72eb3722084e02942f36daa939",
+    "historyOpenToSecondFrameMs": [417.000,50.100,47.000],
+    "note": "First cold parse/render is not instantaneous; subsequent full history openings reuse previews. Timings include frame scheduling and React rendering, not just converter CPU. Full stored source verified unchanged."
+  },
+  "workingTreePrototypeRepeatedList": {
+    "scenario": "120 distinct 15000-unit replies, same stable IDs in three traversals",
+    "beforePassesMs": [2922.775,2217.786,2306.711],
+    "boundedPrototypePassesMs": [259.899,0.078,0.045],
+    "note": "Earlier bounded working-tree prototype, not final committed benchmark. Final deterministic test independently verifies zero parser calls across 120 unchanged cloned message IDs."
+  }
+}

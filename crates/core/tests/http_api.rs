@@ -254,26 +254,73 @@ async fn cancel_pending_bot_reports(root: &Path, engine: &Path) {
         .await
         .unwrap();
     let route = format!("/api/conversations/{source}/bot-reports/cancel");
+    let selected = json!({"deliveryIds": [delivery.id]});
+    // B becomes ready after the browser selected A. B is not implicitly selected by this route.
+    let later = app
+        .store
+        .mutate(|s| {
+            let now = s.now();
+            let message_id = new_id();
+            let c = s.conversation_mut(&source)?;
+            let run_id = c.run.id.clone();
+            let mut message = c.messages.last().unwrap().clone();
+            message.id = message_id.clone();
+            message.bot_exchange_ids = None;
+            c.messages.push(message);
+            let delivery = s.queue_bot_message(
+                &source,
+                &run_id,
+                &message_id,
+                BotMessageInput { to_bot_id: recipient.id.clone(), text: "Later question B".into(), request_id: None },
+            )?;
+            s.fail_bot_delivery(&delivery.id, "Recipient could not start.", now)?;
+            Ok(delivery)
+        })
+        .await
+        .unwrap();
     let before = app.store.read(|s| s.conversation(&source).unwrap().clone());
     assert_eq!(app.store.snapshot().bot_deliveries[0].report.as_ref().unwrap().status, grok_bot_model::ReportStatus::Queued);
     for headers in [vec![("X-Grok-Bot", "")], vec![("Origin", "http://evil.invalid")], vec![("Content-Type", "text/plain")]] {
         assert_eq!(app.request("POST", &route, Some("{}".into()), &headers).await.0, 403);
     }
     assert_eq!(app.request("POST", &route, Some("{".into()), &[]).await.0, 400);
-    assert_eq!(app.api("POST", &route, Some(json!({"extra": true}))).await.0, 400);
+    let untouched = app.store.read(|s| s.disk().clone());
+    for invalid in [
+        json!({}),
+        json!({"extra": true}),
+        json!({"deliveryIds": null}),
+        json!({"deliveryIds": []}),
+        json!({"deliveryIds": delivery.id}),
+        json!({"deliveryIds": [delivery.id, 1]}),
+        json!({"deliveryIds": [delivery.id, "invalid-uuid"]}),
+        json!({"deliveryIds": [delivery.id], "extra": true}),
+        json!({"deliveryIds": vec![delivery.id.clone(); grok_bot_store::bot_messages::MAX_BOT_DELIVERIES + 1]}),
+    ] {
+        assert_eq!(app.api("POST", &route, Some(invalid.clone())).await.0, 400, "{invalid}");
+        assert_eq!(app.store.read(|s| s.disk().clone()), untouched, "rejected bodies never cancel any report");
+    }
     let missing = format!("/api/conversations/{}/bot-reports/cancel", new_id());
-    assert_eq!(app.api("POST", &missing, Some(json!({}))).await.0, 404);
+    assert_eq!(app.api("POST", &missing, Some(selected.clone())).await.0, 404);
+    let (status, unknown) = app.api("POST", &route, Some(json!({"deliveryIds": [new_id()]}))).await;
+    assert_eq!(status, 200);
+    assert_eq!(unknown["cancelledDeliveryIds"], json!([]));
+    assert_eq!(app.store.read(|s| s.disk().clone()), untouched);
 
-    let (status, state) = app.api("POST", &route, Some(json!({}))).await;
-    assert_eq!(status, 200, "{state}");
+    let (status, result) = app.api("POST", &route, Some(selected.clone())).await;
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(result["cancelledDeliveryIds"], json!([delivery.id]));
+    let state = &result["state"];
     assert_eq!(state["botDeliveries"][0]["id"], delivery.id);
     assert_eq!(state["botDeliveries"][0]["report"]["status"], "cancelled");
     assert!(state["botDeliveries"][0]["report"].get("runId").is_none());
     assert!(state["botDeliveries"][0]["report"]["finishedAt"].is_string());
+    assert_eq!(state["botDeliveries"][1]["id"], later.id);
+    assert_eq!(state["botDeliveries"][1]["report"]["status"], "queued", "a later arrival is not selected");
     assert_eq!(app.store.read(|s| s.conversation(&source).unwrap().clone()), before);
-    let (status, repeated) = app.api("POST", &route, Some(json!({}))).await;
+    let (status, repeated) = app.api("POST", &route, Some(selected)).await;
     assert_eq!(status, 200);
-    assert_eq!(repeated, state, "cancelling again does not write or alter the finish timestamp");
+    assert_eq!(repeated["cancelledDeliveryIds"], json!([]));
+    assert_eq!(&repeated["state"], state, "cancelling again does not write or alter the finish timestamp");
     app.store
         .mutate(|s| {
             let now = iso(s.now());
@@ -288,7 +335,7 @@ async fn cancel_pending_bot_reports(root: &Path, engine: &Path) {
 
     let restarted = TestApp::start(engine, data).await;
     let (_, state) = restarted.api("GET", "/api/state", None).await;
-    assert_eq!(state["botDeliveries"][0]["report"], repeated["botDeliveries"][0]["report"], "cancellation survives a backend restart");
+    assert_eq!(state["botDeliveries"][0]["report"], repeated["state"]["botDeliveries"][0]["report"], "cancellation survives a backend restart");
     restarted.close().await;
 }
 

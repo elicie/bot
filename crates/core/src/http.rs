@@ -540,13 +540,30 @@ async fn cancel(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(id): P
     Ok(state_reply(&ctx, StatusCode::OK, &remote))
 }
 
-/// `POST /api/conversations/:id/bot-reports/cancel` with `{}`: cancel all still-queued
-/// reports and return the public AppState. Serialize with dispatch so none can start between
-/// selection and the durable cancellation. Running reports use the existing Stop endpoint.
-async fn cancel_bot_reports(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(id): Path<String>, JsonBody(_): JsonBody<Empty>) -> ApiResult {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CancelBotReports {
+    delivery_ids: Vec<String>,
+}
+
+/// Cancel only the selected delivery IDs that are still queued, serialized with dispatch. An empty
+/// actual result tells the caller that nothing was cancelled (for example, dispatch started first).
+/// Running reports use the existing Stop endpoint; a later arrival is not part of this selection.
+async fn cancel_bot_reports(
+    State(ctx): State<Ctx>,
+    ConnectInfo(remote): Remote,
+    Path(id): Path<String>,
+    JsonBody(input): JsonBody<CancelBotReports>,
+) -> ApiResult {
     let store = ctx.store.clone();
-    ctx.queue.run(async move { store.mutate(|s| s.cancel_bot_reports(&id)).await }).await?;
-    Ok(state_reply(&ctx, StatusCode::OK, &remote))
+    let (state, cancelled_delivery_ids) = ctx
+        .queue
+        .run(async move {
+            let cancelled = store.mutate(|s| s.cancel_bot_reports(&id, &input.delivery_ids)).await?;
+            Ok::<_, HttpError>((store.snapshot(), cancelled))
+        })
+        .await?;
+    Ok(reply(StatusCode::OK, json!({ "state": state, "cancelledDeliveryIds": cancelled_delivery_ids }), &remote))
 }
 
 #[derive(Deserialize)]
