@@ -235,7 +235,7 @@ export function Transcript({
   onPermission: (optionId: string) => void;
   data?: AppState;
   onBotChat?: (id: string) => void;
-  onCancelReports?: (conversationId: string) => void;
+  onCancelReports?: (conversationId: string, deliveryIds: string[]) => void;
   cancelReportsDisabled?: boolean;
   onRoutines?: () => void;
   /** Group conversations: the member bot that wrote an assistant message. */
