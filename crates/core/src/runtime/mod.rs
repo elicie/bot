@@ -467,6 +467,9 @@ impl Runtime {
                     Turn::Report => Some(turns::report(state, &id)?),
                     _ => None,
                 };
+                if let Some(report) = report.as_ref() {
+                    state.check_bot_report_capacity(&id, &report.prompt, &report.delivery_ids)?;
+                }
                 let requested = match &turn {
                     Turn::Prompt(prompt) => Some(prompt.clone()),
                     Turn::Group => None,
@@ -1235,7 +1238,11 @@ impl Runtime {
             {
                 let mut flags = run.flags();
                 flags.stop_chains.extend(chain_ids.iter().cloned());
-                flags.stop_error = error.map(str::to_owned);
+                // First stop cause wins, just like the durable root receipt. A later Stop must
+                // not clear a timeout, and a later timeout must not replace an earlier Stop.
+                if !flags.stopped {
+                    flags.stop_error = error.map(str::to_owned);
+                }
             }
             self.request_stop(run);
         }
@@ -1283,9 +1290,10 @@ impl Runtime {
                 }
                 self.store
                     .mutate(|state| {
-                        if chain_ids.is_empty() {
-                            state.cancel_queued_work(conversation_id)?;
-                        } else {
+                        // Group rounds/routines and Bot-chain work can coexist in a conversation.
+                        // Clear ordinary queued work too instead of choosing just one category.
+                        state.cancel_queued_work(conversation_id)?;
+                        if !chain_ids.is_empty() {
                             state.terminate_bot_chains(&chain_ids, RunStatus::Cancelled, None, state.now())?;
                         }
                         Ok(())

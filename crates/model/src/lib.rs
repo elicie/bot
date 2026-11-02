@@ -304,6 +304,7 @@ pub struct BotDelivery {
     /// follow-up run. Rebinding requires both the child's report `run_id` and its hidden input marker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_run_id: Option<String>,
+    /// First recipient execution start, preserved when a later report turn handles the delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

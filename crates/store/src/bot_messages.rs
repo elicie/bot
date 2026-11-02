@@ -19,6 +19,12 @@ use grok_bot_model::{
 use crate::validate::{Issues, is_timestamp, is_uuid, js_len, js_slice, js_trim};
 
 pub const MAX_BOT_HOPS: u32 = 4;
+/// Explicitly retain the natural four-hop/two-root-report fanout bound: 8 + 4 + 2 deliveries.
+pub const MAX_BOT_DELIVERIES_PER_CHAIN: usize = 14;
+/// Each delivery starts at most one recipient turn and one report turn, plus the origin turn.
+/// No persistent counter is needed: admission bounds deliveries and each report is claimed once.
+pub const MAX_BOT_TURNS_PER_CHAIN: usize = 2 * MAX_BOT_DELIVERIES_PER_CHAIN + 1;
+pub const BOT_CHAIN_CAPACITY_ERROR: &str = "Bot message chains are limited to 14 deliveries.";
 /// Reports to original/nonrecipient conversations per chain; internal recipient reports are exempt.
 pub const MAX_BOT_REPORTS_PER_CHAIN: usize = 2;
 pub const BOT_CHAIN_TIMEOUT_MINUTES: i64 = 30;
@@ -331,44 +337,49 @@ fn enforce_chain_terminations(deliveries: &mut [BotDelivery], conversations: &mu
 /// A failed recipient cannot consume later child reports. Cancel its queued descendant subtree
 /// locally (not the whole chain, because its own failure still needs to be reported upstream).
 fn suppress_failed_children(deliveries: &mut [BotDelivery], conversations: &mut [Conversation], now: DateTime<Utc>) {
+    if deliveries.is_empty() {
+        return;
+    }
     let terminated: HashSet<String> =
         deliveries.iter().filter(|delivery| delivery.chain_termination.is_some()).map(|delivery| delivery.chain_id.clone()).collect();
+    let failed_conversations: HashSet<&str> = conversations
+        .iter()
+        .filter(|conversation| matches!(conversation.run.status, RunStatus::Cancelled | RunStatus::Error | RunStatus::Interrupted))
+        .map(|conversation| conversation.id.as_str())
+        .collect();
+    // Streamed-token commits normally have no failed recipient: seed in O(C + D), not O(C * D).
     let mut failed: HashSet<String> = deliveries
         .iter()
-        .filter(|delivery| {
-            !terminated.contains(&delivery.chain_id)
-                && conversations.iter().any(|conversation| {
-                    conversation.id == delivery.recipient_conversation_id
-                        && matches!(conversation.run.status, RunStatus::Cancelled | RunStatus::Error | RunStatus::Interrupted)
-                })
-        })
+        .filter(|delivery| !terminated.contains(&delivery.chain_id) && failed_conversations.contains(delivery.recipient_conversation_id.as_str()))
         .map(|delivery| delivery.recipient_conversation_id.clone())
         .collect();
+    if failed.is_empty() {
+        return;
+    }
+    let conversation_index: HashMap<String, usize> = conversations.iter().enumerate().map(|(index, conversation)| (conversation.id.clone(), index)).collect();
+    let mut outgoing: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, delivery) in deliveries.iter().enumerate().filter(|(_, delivery)| !terminated.contains(&delivery.chain_id)) {
+        outgoing.entry(delivery.source_conversation_id.clone()).or_default().push(index);
+    }
     // All outgoing work is owned by the recipient conversation, including sends in report turns.
-    loop {
-        let before = failed.len();
-        for delivery in deliveries.iter_mut().filter(|delivery| !terminated.contains(&delivery.chain_id) && failed.contains(&delivery.source_conversation_id)) {
+    // Visit each descendant and its outgoing edges once, retaining terminal history and root latches.
+    let mut pending: Vec<String> = failed.iter().cloned().collect();
+    let termination =
+        ChainTermination { status: RunStatus::Cancelled, finished_at: iso(now), error: Some("The sending recipient run failed or stopped.".into()) };
+    while let Some(source) = pending.pop() {
+        for &index in outgoing.get(&source).into_iter().flatten() {
+            let delivery = &mut deliveries[index];
             if delivery.status.is_pending() {
-                let termination = ChainTermination {
-                    status: RunStatus::Cancelled,
-                    finished_at: iso(now),
-                    error: Some("The sending recipient run failed or stopped.".into()),
-                };
-                if let Some(recipient) = conversations.iter_mut().find(|conversation| conversation.id == delivery.recipient_conversation_id) {
-                    terminate_run(recipient, &termination, now);
+                if let Some(&recipient) = conversation_index.get(&delivery.recipient_conversation_id) {
+                    terminate_run(&mut conversations[recipient], &termination, now);
+                }
+                if failed.insert(delivery.recipient_conversation_id.clone()) {
+                    pending.push(delivery.recipient_conversation_id.clone());
                 }
             }
             if delivery.report.as_ref().is_some_and(|report| report.status == ReportStatus::Queued) {
-                skip_report(delivery, Some("The sending recipient run failed or stopped.".into()), now);
+                skip_report(delivery, termination.error.clone(), now);
             }
-        }
-        for delivery in deliveries.iter() {
-            if !terminated.contains(&delivery.chain_id) && failed.contains(&delivery.source_conversation_id) && delivery.status.is_pending() {
-                failed.insert(delivery.recipient_conversation_id.clone());
-            }
-        }
-        if failed.len() == before {
-            break;
         }
     }
 }
@@ -411,7 +422,13 @@ pub fn reconcile_bot_deliveries(
         if !execution.id.is_empty() {
             delivery.execution_run_id = Some(execution.id.clone());
         }
-        delivery.started_at = execution.started_at.clone().filter(|value| !value.is_empty());
+        if linked_report {
+            // Report turns rebind execution, not the first recipient start. Normalize pending
+            // prior-PR27 records that used the latest report start instead of the initial input.
+            delivery.started_at = conversation.messages.first().map(|message| message.created_at.clone());
+        } else if let Some(started_at) = execution.started_at.as_ref().filter(|value| !value.is_empty()) {
+            delivery.started_at.get_or_insert_with(|| started_at.clone());
+        }
         if execution.status.is_active() {
             delivery.status = if linked_report { DeliveryStatus::WaitingChildren } else { DeliveryStatus::Running };
             continue;
@@ -479,8 +496,8 @@ pub fn queued_reports<'a>(deliveries: &'a [BotDelivery], conversation_id: &str) 
 }
 
 /// A completed report is an immutable historical receipt even if the recipient aggregate later
-/// terminates while waiting for another child. Permit only the two proven aggregate transitions:
-/// a canonical root latch, or a failed start of the next linked child-report turn.
+/// terminates while waiting for another child. Require a canonical root latch or a proven failed
+/// start/cancellation of the next linked child report without starting another run.
 fn completed_report_aggregate_override(deliveries: &[BotDelivery], delivery: &BotDelivery, report: &DeliveryReport, source: &Conversation) -> bool {
     if report.status != ReportStatus::Completed || report.run_id.as_deref() != Some(source.run.id.as_str()) {
         return false;
@@ -489,20 +506,23 @@ fn completed_report_aggregate_override(deliveries: &[BotDelivery], delivery: &Bo
     if let Some(termination) = deliveries.iter().find(|root| root.id == delivery.chain_id).and_then(|root| root.chain_termination.as_ref()) {
         return source.run.status == termination.status && source.run.error == termination.error && run_status_name(owner.status) == Some(termination.status);
     }
-    source.run.status == RunStatus::Error
-        && owner.status == DeliveryStatus::Error
-        && deliveries.iter().any(|child| {
-            child.chain_id == delivery.chain_id
-                && child.source_conversation_id == source.id
-                && source.messages.last().is_some_and(|answer| answer.role == Role::Assistant && answer.id == child.source_message_id)
-                && child.report.as_ref().is_some_and(|failed| {
-                    failed.status == ReportStatus::Error
-                        && failed.run_id.is_none()
-                        && failed.error.is_some()
-                        && failed.error == source.run.error
-                        && failed.finished_at == source.run.finished_at
-                })
-        })
+    let status = match (source.run.status, owner.status) {
+        (RunStatus::Error, DeliveryStatus::Error) => ReportStatus::Error,
+        (RunStatus::Cancelled, DeliveryStatus::Cancelled) => ReportStatus::Cancelled,
+        _ => return false,
+    };
+    deliveries.iter().any(|child| {
+        child.chain_id == delivery.chain_id
+            && child.source_conversation_id == source.id
+            && source.messages.last().is_some_and(|answer| answer.role == Role::Assistant && answer.id == child.source_message_id)
+            && child.report.as_ref().is_some_and(|failed| {
+                failed.status == status
+                    && failed.run_id.is_none()
+                    && failed.error.is_some() == (status == ReportStatus::Error)
+                    && failed.error == source.run.error
+                    && failed.finished_at == source.run.finished_at
+            })
+    })
 }
 
 /// A delivery's report agrees with its source conversation: only reportable sources, and a report
@@ -589,8 +609,12 @@ pub fn valid_bot_message_references(
             return false;
         }
         if truthy(&delivery.execution_run_id) {
+            // New report turns retain the first input's timestamp. Prior PR27 disks used the
+            // latest run start; accept that historical shape without weakening report-run proof.
+            let start_matches = delivery.started_at == recipient.run.started_at
+                || (recipient.messages.len() > 2 && delivery.started_at.as_deref() == recipient.messages.first().map(|message| message.created_at.as_str()));
             if delivery.execution_run_id.as_deref() != Some(recipient.run.id.as_str())
-                || delivery.started_at != recipient.run.started_at
+                || !start_matches
                 || recipient.messages.len() < 2
                 || recipient.messages.len() % 2 != 0
                 || recipient.messages[0].role != Role::User
@@ -724,8 +748,10 @@ impl crate::State {
     }
 
     /// Cancel every currently queued follow-up report of this source conversation, without
-    /// starting a run or changing its messages. Running and terminal reports (and unfinished
-    /// deliveries) are untouched. Allowed while the app is busy; a no-op does not write state.
+    /// starting a run or changing its messages. A waiting recipient aggregate is cancelled too:
+    /// its provisional answer must never become final because a mandatory report was cancelled.
+    /// Root conversations and running/terminal reports are unchanged. Allowed while the app is
+    /// busy; a no-op does not write state. Failed-source reconciliation suppresses descendants.
     pub fn cancel_bot_reports(&mut self, conversation_id: &str) -> HttpResult<()> {
         self.assert_writable()?;
         self.conversation(conversation_id)?;
@@ -733,9 +759,18 @@ impl crate::State {
         if ids.is_empty() {
             return Ok(());
         }
+        let waiting = inbound(&self.disk.bot_deliveries, conversation_id).is_some_and(|delivery| delivery.status == DeliveryStatus::WaitingChildren);
         let finished_at = iso(self.now());
         for delivery in self.disk_mut().bot_deliveries.iter_mut().filter(|delivery| ids.contains(&delivery.id)) {
             delivery.report = Some(DeliveryReport { status: ReportStatus::Cancelled, finished_at: Some(finished_at.clone()), ..DeliveryReport::queued() });
+        }
+        if waiting {
+            let conversation = self.conversation_mut(conversation_id)?;
+            conversation.run.status = RunStatus::Cancelled;
+            conversation.run.error = None;
+            conversation.run.finished_at = Some(finished_at.clone());
+            conversation.run.permission = None;
+            conversation.updated_at = finished_at;
         }
         Ok(())
     }

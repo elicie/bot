@@ -1,5 +1,5 @@
 import { ArrowLeftRight, Clock3, CornerDownRight, X } from 'lucide-react';
-import type { AppState, BotDelivery, BotExchange, Message } from '../shared/types';
+import type { AppState, BotDelivery, BotExchange, DeliveryReport, Message } from '../shared/types';
 import { Avatar } from './ui';
 
 const exchangeStatus: Record<BotDelivery['status'], string> = {
@@ -32,6 +32,20 @@ const reportLabels: Record<NonNullable<BotDelivery['report']>['status'], string>
   skipped: '이 대화 흐름은 이어서 답하기 한도(2회)에 도달해 답변을 다시 전달하지 않았습니다.',
 };
 
+/** Translate application-owned skip reasons without hiding a provider's unexpected error detail. */
+export function botReportDescription(report: DeliveryReport): string {
+  if (report.status === 'skipped' && report.error) {
+    const reasons: Record<string, string> = {
+      'This bot message chain was stopped.': 'Bot 체인이 중단되어 이어서 답하지 않습니다.',
+      'Bot message chain exceeded the 30-minute wall-clock limit.': '승인·대기를 포함한 Bot 체인의 30분 기한이 지나 이어서 답하지 않습니다.',
+      'The sending recipient conversation already finished.': '상위 Bot 작업이 이미 종료되어 이어서 답하지 않습니다.',
+      'The sending recipient run failed or stopped.': '상위 Bot 작업이 실패하거나 중단되어 이어서 답하지 않습니다.',
+    };
+    return reasons[report.error] ?? report.error;
+  }
+  return report.status === 'error' && report.error ? report.error : reportLabels[report.status];
+}
+
 export function BotMessageLinks({ message, data, onOpen, onCancelReports, cancelReportsDisabled }: {
   message: Message;
   data: AppState;
@@ -51,7 +65,7 @@ export function BotMessageLinks({ message, data, onOpen, onCancelReports, cancel
       {delivery && <span className="bot-exchange-status" data-status={delivery.status} aria-label={`${other?.name ?? 'Bot'} 답변 상태`}>{exchangeStatus[delivery.status]}</span>}
       {report && <span className="bot-report-summary">
         <span>이어서 답하기</span>
-        <span className="bot-exchange-status" data-status={report.status} role="status" aria-label={`${other?.name ?? 'Bot'} 답변 이어서 답하기 상태`} title={reportLabels[report.status]}>{reportStatus[report.status]}</span>
+        <span className="bot-exchange-status" data-status={report.status} role="status" aria-label={`${other?.name ?? 'Bot'} 답변 이어서 답하기 상태`} title={botReportDescription(report)}>{report.status === 'skipped' && report.error ? '건너뜀' : reportStatus[report.status]}</span>
         {report.status === 'queued' && onCancelReports && <button type="button" disabled={cancelReportsDisabled} onClick={() => onCancelReports(exchange.sourceConversationId)} aria-label="대기 중인 이어서 답하기 모두 취소" title="이 대화의 대기 중인 이어서 답하기를 모두 취소합니다.">취소</button>}
       </span>}
     </div>;
@@ -82,7 +96,7 @@ export function BotChat({ data, exchangeId, onClose, onExecution }: { data: AppS
         {exchange.messages.map(message => { const bot = data.bots.find(item => item.id === message.botId); return <article className="pair-message" key={message.id} aria-label={`${bot?.name ?? 'Bot'} 메시지`}><Avatar color={bot?.color} seed={message.botId} shape={bot?.shape} size={28} /><div><strong>{bot?.name ?? 'Bot'}</strong><p>{message.text}</p><small>{new Date(message.createdAt).toLocaleTimeString('ko-KR', { hour: 'numeric', minute: '2-digit' })}</small></div></article>; })}
         {delivery && ['queued', 'running', 'waiting_children'].includes(delivery.status) && <div className="pair-delivery" role="status"><Clock3 size={14} /><span>{delivery.status === 'queued' ? 'Bot의 응답을 기다리고 있습니다.' : delivery.status === 'waiting_children' ? '하위 Bot의 답변을 기다리고 있습니다.' : 'Bot이 작업 중입니다.'}</span><button className="text-button" onClick={() => onExecution(delivery.toBotId, delivery.recipientConversationId)}>실행 대화 열기</button></div>}
         {delivery && ['error', 'cancelled', 'interrupted'].includes(delivery.status) && <p className="terminal-note">{delivery.error || (delivery.status === 'cancelled' ? 'Bot 작업이 취소됐습니다.' : 'Bot 작업이 중단됐습니다.')}<button className="text-button" onClick={() => onExecution(delivery.toBotId, delivery.recipientConversationId)}>실행 대화 확인</button></p>}
-        {delivery?.report && <p className="pair-report" role="status"><CornerDownRight size={13} aria-hidden="true" />{(delivery.report.status === 'error' || delivery.report.status === 'skipped') && delivery.report.error ? delivery.report.error : reportLabels[delivery.report.status]}</p>}
+        {delivery?.report && <p className="pair-report" role="status"><CornerDownRight size={13} aria-hidden="true" />{botReportDescription(delivery.report)}</p>}
       </>}
     </div></div>
     <footer className="pair-close"><button type="button" className="small-button" onClick={onClose}><X size={14} />채팅 닫기</button></footer>

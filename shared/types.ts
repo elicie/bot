@@ -64,6 +64,7 @@ export interface BotDelivery {
   status: 'queued' | 'running' | 'waiting_children' | 'completed' | 'cancelled' | 'error' | 'interrupted';
   requestId?: string;
   executionRunId?: string;
+  /** First recipient execution start; report turns do not reset it. */
   startedAt?: string;
   finishedAt?: string;
   error?: string;

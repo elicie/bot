@@ -173,6 +173,23 @@ pub(super) async fn nested_bot_reports(f: &Fixture) {
     assert!(!a_done.messages[2].text.contains("DELEGATED_ONLY_NOT_FINAL"));
     assert_eq!(delivery(f, &root).report.unwrap().status, ReportStatus::Completed);
     no_replay(f, &scheduler, &root, "final").await;
+
+    // A waiting logical chain does not reserve its source conversation from a new user turn.
+    let another = self::root(f, &b).await;
+    let nested = child(f, &scheduler, &another, &c).await;
+    f.provider.plan(vec![text("An independent answer while C is queued.")]);
+    f.runtime.start(&another.source_conversation_id, "A separate user question.").await.unwrap();
+    f.wait(&another.source_conversation_id, "the independent user turn", |conversation| conversation.messages.len() == 4).await;
+    f.completed(&another.source_conversation_id).await;
+    assert_eq!(delivery(f, &another).status, DeliveryStatus::WaitingChildren);
+    assert!(another.chain_termination.is_none());
+    answer(f, &scheduler, &nested.recipient_conversation_id, "C answered after the user turn.").await;
+    answer(f, &scheduler, &another.recipient_conversation_id, "B includes the late C answer.").await;
+    let final_a = answer(f, &scheduler, &another.source_conversation_id, "A reports the late result once.").await;
+    assert_eq!(final_a.messages.len(), 6);
+    assert_eq!(final_a.messages[2].text, "A separate user question.");
+    assert_eq!(final_a.messages[4].report_delivery_ids.as_deref(), Some(&[another.id.clone()][..]));
+    no_replay(f, &scheduler, &another, "independent-user-final").await;
     scheduler.close().await;
 }
 
@@ -304,6 +321,8 @@ pub(super) async fn expire_nested_bot_chains(f: &Fixture) {
             assert_eq!(f.get(&leaf.recipient_conversation_id).run, expired_run, "stale failure handling must preserve the expired run");
         }
         if let Some(id) = active {
+            // An immediate Stop after timeout must retain the first canonical failure cause.
+            f.runtime.cancel(&root.source_conversation_id).await.unwrap();
             let done = f.settled(&id).await;
             assert_eq!(done.run.status, RunStatus::Error, "{boundary}: {:?}", done.run);
             assert_eq!(done.run.error.as_deref(), Some(BOT_CHAIN_TIMEOUT_ERROR));
@@ -374,5 +393,20 @@ pub(super) async fn nested_report_start_failure(f: &Fixture) {
     assert!(done.messages[2].text.contains("Runtime is not connected"));
     assert!(!done.messages[2].text.contains("DELEGATED_ONLY_NOT_FINAL"));
     no_replay(f, &scheduler, &root, "failed-start").await;
+
+    // PR24's queued-report cancel also closes a waiting recipient without publishing its
+    // provisional delegation message as a successful answer to the original bot.
+    let cancelled = self::root(f, &b).await;
+    let child_delivery = child(f, &scheduler, &cancelled, &c).await;
+    answer(f, &scheduler, &child_delivery.recipient_conversation_id, "C final that B will not consume.").await;
+    f.store.mutate(|state| state.cancel_bot_reports(&cancelled.recipient_conversation_id)).await.unwrap();
+    assert_eq!(delivery(f, &cancelled).status, DeliveryStatus::Cancelled);
+    assert_eq!(delivery(f, &child_delivery).report.unwrap().status, ReportStatus::Cancelled);
+    assert_eq!(exchange_texts(f, &cancelled).as_slice(), std::slice::from_ref(&cancelled.text));
+    assert!(delivery(f, &cancelled).chain_termination.is_none(), "cancel only the queued report, not the entire root chain");
+    let reported = answer(f, &scheduler, &cancelled.source_conversation_id, "B's nested summary was cancelled.").await;
+    assert!(reported.messages[2].text.contains(r#""status":"cancelled""#));
+    assert!(!reported.messages[2].text.contains("DELEGATED_ONLY_NOT_FINAL"));
+    no_replay(f, &scheduler, &cancelled, "cancelled-nested-report").await;
     scheduler.close().await;
 }

@@ -4,7 +4,9 @@ mod common;
 use common::{Fixture, assert_load_rejected, write_json};
 use grok_bot_model::*;
 use grok_bot_store::Store;
-use grok_bot_store::bot_messages::{BOT_CHAIN_TIMEOUT_ERROR, MAX_BOT_REPORTS_PER_CHAIN, queued_reports, valid_bot_message_references};
+use grok_bot_store::bot_messages::{
+    BOT_CHAIN_TIMEOUT_ERROR, MAX_BOT_DELIVERIES_PER_CHAIN, MAX_BOT_REPORTS_PER_CHAIN, MAX_BOT_TURNS_PER_CHAIN, queued_reports, valid_bot_message_references,
+};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
@@ -175,7 +177,8 @@ async fn a_b_c_waits_then_reports_c_b_a_exactly_once_across_durable_roundtrips()
     assert_eq!(handling.status, DeliveryStatus::WaitingChildren);
     assert_eq!(handling.execution_run_id.as_deref(), Some(summary_b.run.as_str()));
     assert_ne!(handling.execution_run_id.as_deref(), Some(b.run.as_str()));
-    assert_eq!(handling.started_at, Some(f.iso_now()));
+    assert_eq!(handling.started_at, waiting.started_at, "report turns preserve the first recipient start");
+    assert_ne!(handling.started_at, Some(f.iso_now()));
     assert_eq!(exchange(&f, &ab).messages.len(), 1);
     roundtrip(&f).await;
 
@@ -268,6 +271,8 @@ async fn four_hops_unwind_every_mandatory_internal_report_despite_original_cap_t
         roundtrip(&f).await;
     }
     assert_eq!(MAX_BOT_REPORTS_PER_CHAIN, 2);
+    assert_eq!(MAX_BOT_DELIVERIES_PER_CHAIN, 14);
+    assert_eq!(MAX_BOT_TURNS_PER_CHAIN, 29);
     assert_eq!(
         f.store.read(|state| state
             .disk()
@@ -313,7 +318,7 @@ async fn invalid_recipient_suffixes_and_latest_report_run_references_are_rejecte
     json_delivery(&mut stale_execution, &ab.id)["executionRunId"] = b.run.clone().into();
     corruptions.push(stale_execution);
     let mut stale_start = original.clone();
-    json_delivery(&mut stale_start, &ab.id)["startedAt"] = "2026-01-01T00:00:00.000Z".into();
+    json_delivery(&mut stale_start, &ab.id)["startedAt"] = "2026-01-01T00:00:30.000Z".into();
     corruptions.push(stale_start);
     let mut wrong_run = original.clone();
     json_delivery(&mut wrong_run, &bc.id)["report"]["runId"] = new_id().into();
@@ -551,6 +556,44 @@ async fn provider_failure_cancels_queued_descendants_but_reports_the_failed_pare
 }
 
 #[tokio::test]
+async fn failed_recipient_suppresses_waiting_descendants_once_and_preserves_terminal_history() {
+    let f = Fixture::new().await;
+    let bots = bots(&f, 4).await;
+    let (a, ab, b, bc) = three(&f, &bots).await;
+    let c = receive(&f, &bc, "C needs D").await;
+    let cd = send(&f, &c, &bots[3], "C asks D").await.unwrap();
+    finish(&f, &c, "Waiting for D", RunStatus::Completed).await;
+    assert_eq!(delivery(&f, &bc.id).status, DeliveryStatus::WaitingChildren);
+    let before_a = f.conversation(&a.conversation);
+    finish(&f, &b, "B failed while waiting", RunStatus::Error).await;
+    assert_eq!(delivery(&f, &ab.id).status, DeliveryStatus::Error);
+    assert_eq!(delivery(&f, &ab.id).report.unwrap().status, ReportStatus::Queued);
+    assert!(delivery(&f, &ab.id).chain_termination.is_none());
+    for child in [&bc, &cd] {
+        let current = delivery(&f, &child.id);
+        assert_eq!(current.status, DeliveryStatus::Cancelled);
+        assert_eq!(current.report.unwrap().status, ReportStatus::Skipped);
+        assert_eq!(exchange(&f, child).messages.len(), 1);
+    }
+    assert_eq!(f.conversation(&a.conversation), before_a);
+    let settled = f.store.read(|state| state.disk().clone());
+    f.set_time("2026-01-01T00:01:00.000Z");
+    f.store
+        .mutate(|state| {
+            state.disk_mut();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    f.store.read(|state| {
+        assert_eq!(state.disk().bot_deliveries, settled.bot_deliveries);
+        assert_eq!(state.disk().bot_exchanges, settled.bot_exchanges);
+        assert_eq!(state.disk().conversations, settled.conversations);
+    });
+    roundtrip(&f).await;
+}
+
+#[tokio::test]
 async fn stop_and_timeout_after_nested_report_send_preserve_completed_report_receipts_and_reload() {
     for status in [RunStatus::Cancelled, RunStatus::Error] {
         let f = Fixture::new().await;
@@ -594,6 +637,171 @@ async fn next_internal_report_start_failure_preserves_previous_completed_report_
     assert_eq!(delivery(&f, &bd.id).report.unwrap().status, ReportStatus::Error);
     assert_eq!(delivery(&f, &ab.id).status, DeliveryStatus::Error);
     assert_eq!(f.conversation(&b.conversation).run.status, RunStatus::Error);
+    roundtrip(&f).await;
+}
+
+#[tokio::test]
+async fn cancelling_queued_nested_report_cancels_parent_without_publishing_provisional_answer() {
+    let mut f = Fixture::new().await;
+    let bots = bots(&f, 3).await;
+    let (a, ab, b, bc) = three(&f, &bots).await;
+    let c = receive(&f, &bc, "C answer").await;
+    finish(&f, &c, "C answer", RunStatus::Completed).await;
+    let unrelated = root(&f, &bots[0]).await;
+    let before_b = f.conversation(&b.conversation);
+    let before_a = f.conversation(&a.conversation);
+    let before_unrelated = f.conversation(&unrelated.conversation);
+    let before_exchanges = f.store.read(|state| state.disk().bot_exchanges.clone());
+
+    f.set_time("2026-01-01T00:01:00.000Z");
+    f.store.mutate(|state| state.cancel_bot_reports(&b.conversation)).await.unwrap();
+    let cancelled = delivery(&f, &bc.id);
+    assert_eq!(cancelled.status, DeliveryStatus::Completed, "the child's completed exchange is historical");
+    assert_eq!(cancelled.report.unwrap(), DeliveryReport { status: ReportStatus::Cancelled, finished_at: Some(f.iso_now()), ..DeliveryReport::queued() });
+    let parent = delivery(&f, &ab.id);
+    assert_eq!(parent.status, DeliveryStatus::Cancelled);
+    assert_eq!(parent.execution_run_id.as_deref(), Some(b.run.as_str()));
+    assert!(parent.chain_termination.is_none(), "cancelling a pending report must not stop the whole chain");
+    assert_eq!(parent.report.unwrap().status, ReportStatus::Queued, "the non-success still goes upstream");
+    assert_eq!(exchange(&f, &ab).messages.len(), 1, "never publish B's provisional initial answer");
+    let mut expected_b = before_b;
+    expected_b.run.status = RunStatus::Cancelled;
+    expected_b.run.finished_at = Some(f.iso_now());
+    expected_b.updated_at = f.iso_now();
+    assert_eq!(f.conversation(&b.conversation), expected_b, "no new run or message is created");
+    assert_eq!(f.conversation(&a.conversation), before_a);
+    assert_eq!(f.conversation(&unrelated.conversation), before_unrelated, "unrelated global activity is untouched");
+    assert_eq!(f.store.read(|state| state.disk().bot_exchanges.clone()), before_exchanges);
+    let revision = f.store.snapshot().revision;
+    f.store.mutate(|state| state.cancel_bot_reports(&b.conversation)).await.unwrap();
+    assert_eq!(f.store.snapshot().revision, revision, "cancellation is idempotent");
+    roundtrip(&f).await;
+
+    finish(&f, &unrelated, "Unrelated answer", RunStatus::Completed).await;
+    for _ in 0..2 {
+        f.store = f.reopen().await.expect("cancelled nested report must reload without replay");
+        assert_eq!(delivery(&f, &ab.id).status, DeliveryStatus::Cancelled);
+        assert_eq!(delivery(&f, &bc.id).report.unwrap().status, ReportStatus::Cancelled);
+        assert_eq!(markers(&f, &b.conversation), 0);
+        f.store.read(|state| {
+            assert_eq!(queued_reports(&state.disk().bot_deliveries, &a.conversation).iter().map(|delivery| &delivery.id).collect::<Vec<_>>(), [&ab.id]);
+            assert!(queued_reports(&state.disk().bot_deliveries, &b.conversation).is_empty());
+        });
+    }
+    let summary_a = report(&f, &a.conversation).await;
+    finish(&f, &summary_a, "B was cancelled before its C summary", RunStatus::Completed).await;
+    let settled = f.store.read(|state| state.disk().clone());
+    for _ in 0..2 {
+        f.store = f.reopen().await.unwrap();
+        f.store
+            .mutate(|state| {
+                state.disk_mut();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        f.store.read(|state| {
+            assert_eq!(state.disk().bot_deliveries, settled.bot_deliveries);
+            assert_eq!(state.disk().bot_exchanges, settled.bot_exchanges);
+            assert_eq!(state.disk().conversations, settled.conversations);
+        });
+    }
+    assert_eq!(markers(&f, &a.conversation), 1, "report the cancelled aggregate upstream exactly once");
+    assert_eq!(markers(&f, &b.conversation), 0);
+    roundtrip(&f).await;
+}
+
+#[tokio::test]
+async fn cancelling_next_nested_report_preserves_previous_completed_receipt_and_reloads() {
+    let mut f = Fixture::new().await;
+    let bots = bots(&f, 4).await;
+    let (a, ab, b, bc) = three(&f, &bots).await;
+    let c = receive(&f, &bc, "C answer").await;
+    finish(&f, &c, "C answer", RunStatus::Completed).await;
+    f.set_time("2026-01-01T00:01:00.000Z");
+    let summary = report(&f, &b.conversation).await;
+    let bd = send(&f, &summary, &bots[3], "Still need D").await.unwrap();
+    finish(&f, &summary, "Waiting for D", RunStatus::Completed).await;
+    let consumed = delivery(&f, &bc.id).report.unwrap();
+    let d = receive(&f, &bd, "D answer").await;
+    finish(&f, &d, "D answer", RunStatus::Completed).await;
+    let history = f.conversation(&b.conversation).messages;
+
+    f.set_time("2026-01-01T00:02:00.000Z");
+    f.store.mutate(|state| state.cancel_bot_reports(&b.conversation)).await.unwrap();
+    assert_eq!(delivery(&f, &bc.id).report.unwrap(), consumed, "a prior consumed report is immutable");
+    assert_eq!(delivery(&f, &bd.id).report.unwrap().status, ReportStatus::Cancelled);
+    assert_eq!(delivery(&f, &ab.id).status, DeliveryStatus::Cancelled);
+    assert_eq!(f.conversation(&b.conversation).run.id, summary.run);
+    assert_eq!(f.conversation(&b.conversation).run.status, RunStatus::Cancelled);
+    assert_eq!(f.conversation(&b.conversation).messages, history);
+    assert_eq!(exchange(&f, &ab).messages.len(), 1, "neither the initial answer nor the earlier summary is final");
+    assert!(delivery(&f, &ab.id).chain_termination.is_none());
+    roundtrip(&f).await;
+
+    // The completed receipt override is narrow: a matching no-run cancellation proves why the
+    // same latest report run is now cancelled. Unrelated terminal reports/times do not suffice.
+    let original = f.disk_json();
+    let mut wrong_status = original.clone();
+    json_delivery(&mut wrong_status, &bd.id)["report"]["status"] = "skipped".into();
+    let mut wrong_time = original.clone();
+    json_delivery(&mut wrong_time, &bd.id)["report"]["finishedAt"] = "2026-01-01T00:01:30.000Z".into();
+    let mut wrong_error = original.clone();
+    json_delivery(&mut wrong_error, &bd.id)["report"]["error"] = "Different cancellation".into();
+    for corruption in [wrong_status, wrong_time, wrong_error] {
+        let bytes = write_json(&f.state_file(), &corruption);
+        assert_load_rejected(&f, &bytes).await;
+    }
+    write_json(&f.state_file(), &original);
+    for _ in 0..2 {
+        f.store = f.reopen().await.expect("previous completed receipt plus next cancelled report remains valid");
+        assert_eq!(delivery(&f, &bc.id).report.unwrap(), consumed);
+        assert_eq!(markers(&f, &b.conversation), 1, "never replay C or start a cancelled D report");
+        assert_eq!(delivery(&f, &ab.id).report.unwrap().status, ReportStatus::Queued);
+    }
+    let summary_a = report(&f, &a.conversation).await;
+    finish(&f, &summary_a, "B was cancelled while waiting for D", RunStatus::Completed).await;
+    f.store = f.reopen().await.unwrap();
+    assert_eq!(markers(&f, &a.conversation), 1);
+    assert_eq!(markers(&f, &b.conversation), 1);
+    assert_eq!(delivery(&f, &ab.id).status, DeliveryStatus::Cancelled);
+    assert_eq!(delivery(&f, &ab.id).report.unwrap().status, ReportStatus::Completed);
+    assert_eq!(delivery(&f, &bc.id).report.unwrap(), consumed);
+    assert_eq!(delivery(&f, &bd.id).report.unwrap().status, ReportStatus::Cancelled);
+    assert!(
+        f.store.read(|state| state.disk().bot_deliveries.iter().all(|delivery| { delivery.report.as_ref().is_none_or(|report| report.status.is_terminal()) }))
+    );
+    roundtrip(&f).await;
+}
+
+#[tokio::test]
+async fn recipient_first_start_is_stable_and_prior_latest_start_disks_remain_loadable() {
+    let f = Fixture::new().await;
+    let bots = bots(&f, 3).await;
+    let (_, ab, b, bc) = three(&f, &bots).await;
+    let first_start = delivery(&f, &ab.id).started_at.unwrap();
+    let c = receive(&f, &bc, "C answer").await;
+    finish(&f, &c, "C answer", RunStatus::Completed).await;
+    f.set_time("2026-01-01T00:01:00.000Z");
+    let summary = report(&f, &b.conversation).await;
+    for completed in [false, true] {
+        if completed {
+            finish(&f, &summary, "B summary", RunStatus::Completed).await;
+        }
+        assert_eq!(delivery(&f, &ab.id).started_at.as_deref(), Some(first_start.as_str()));
+        let mut legacy = f.disk_json();
+        json_delivery(&mut legacy, &ab.id)["startedAt"] = f.iso_now().into();
+        let copy = tempfile::tempdir().unwrap();
+        write_json(&copy.path().join("state.json"), &legacy);
+        let reopened = Store::open(copy.path(), f.clock()).await.expect("prior PR27 latest-start data must remain loadable");
+        reopened.read(|state| {
+            let parent = state.disk().bot_deliveries.iter().find(|delivery| delivery.id == ab.id).unwrap();
+            assert_eq!(parent.execution_run_id.as_deref(), Some(summary.run.as_str()));
+            assert_eq!(parent.started_at.as_deref(), Some(if completed { f.iso_now() } else { first_start.clone() }.as_str()));
+        });
+        reopened.flush().await.unwrap();
+        Store::open(copy.path(), f.clock()).await.expect("normalized or historical state must load again");
+    }
     roundtrip(&f).await;
 }
 

@@ -423,6 +423,7 @@ export function Composer({
   onFiles,
   onCancel,
   running,
+  pendingBotWork = false,
   disabled,
   busy,
   model,
@@ -438,6 +439,8 @@ export function Composer({
   onFiles?: () => void;
   onCancel: () => void;
   running: boolean;
+  /** Logical Bot work may be stopped without disabling a new user message. */
+  pendingBotWork?: boolean;
   disabled: boolean;
   busy: boolean;
   model: string;
@@ -507,15 +510,20 @@ export function Composer({
             <Square size={14} fill="currentColor" />
           </IconButton>
         ) : (
-          <button
-            type="submit"
-            className="send-button"
-            aria-label="메시지 보내기"
-            title="메시지 보내기"
-            disabled={disabled || busy || (!value.trim() && !hasFiles)}
-          >
-            <ArrowUp size={19} />
-          </button>
+          <>
+            {pendingBotWork && <IconButton label="Bot 체인 중단" className="send-button stop-button" onClick={onCancel} disabled={busy}>
+              <Square size={14} fill="currentColor" />
+            </IconButton>}
+            <button
+              type="submit"
+              className="send-button"
+              aria-label="메시지 보내기"
+              title="메시지 보내기"
+              disabled={disabled || busy || (!value.trim() && !hasFiles)}
+            >
+              <ArrowUp size={19} />
+            </button>
+          </>
         )}
       </form>
       <div className="composer-meta">

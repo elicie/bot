@@ -10,7 +10,8 @@ use grok_bot_model::{
     ToolStatus, new_id,
 };
 use grok_bot_store::bot_messages::{
-    BOT_CHAIN_TIMEOUT_ERROR, MAX_BOT_HOPS, MAX_BOT_MESSAGE_BYTES, bot_delivery_receipt, chain_parent, validate_bot_message_input,
+    BOT_CHAIN_CAPACITY_ERROR, BOT_CHAIN_TIMEOUT_ERROR, MAX_BOT_DELIVERIES_PER_CHAIN, MAX_BOT_HOPS, MAX_BOT_MESSAGE_BYTES, bot_delivery_receipt, chain_parent,
+    validate_bot_message_input,
 };
 use grok_bot_store::skills::{MAX_SKILL_RESPONSE_BYTES, skill_response_text, validate_skill_input};
 use serde_json::{Map, Value, json};
@@ -428,6 +429,9 @@ impl Runtime {
             // A report turn's message continues the reported delivery's chain (see `chain_parent`).
             let parent = chain_parent(&state.disk().bot_deliveries, state.conversation(&run.conversation_id)?, &run.message_id);
             if let Some(parent) = parent {
+                if state.disk().bot_deliveries.iter().filter(|delivery| delivery.chain_id == parent.chain_id).count() >= MAX_BOT_DELIVERIES_PER_CHAIN {
+                    return Err(HttpError::conflict(BOT_CHAIN_CAPACITY_ERROR));
+                }
                 if state.expired_bot_chains(state.now()).contains(&parent.chain_id) {
                     return Err(HttpError::conflict(BOT_CHAIN_TIMEOUT_ERROR));
                 }

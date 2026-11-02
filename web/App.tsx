@@ -765,7 +765,8 @@ export function App() {
               onSend={() => void send()}
               onFiles={() => toggleComputer(true)}
               onCancel={() => void cancel()}
-              running={!!queuedRun || botWork || (!!conversation && activeRun(conversation.run.status))}
+              running={!!queuedRun || (!!conversation && activeRun(conversation.run.status))}
+              pendingBotWork={botWork}
               disabled={state.connection !== 'online' || !!globalRun || !!queuedRun}
               busy={busy}
               model={data.settings.model}
