@@ -189,6 +189,9 @@ pub(super) async fn custom_mcp_servers(f: &Fixture) {
     assert!(!everything.contains(SECRET));
     assert!(!serde_json::to_string(&f.public()).unwrap().contains(SECRET));
     let data_dir = f.root.join("data");
+    // The terminal run is visible in memory before its atomic write finishes. Scan only after
+    // that write drains, otherwise its private state.json.<uuid>.tmp can appear mid-replacement.
+    f.store.flush().await.unwrap();
     assert_eq!(files_containing(&data_dir, SECRET.as_bytes()), [data_dir.join("state.json")]);
     let engine_home = std::env::var("GROK_HOME").map(std::path::PathBuf::from).unwrap();
     let leaked = files_containing(engine_home.parent().unwrap(), SECRET.as_bytes());

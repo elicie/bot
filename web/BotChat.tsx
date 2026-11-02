@@ -11,6 +11,16 @@ const exchangeStatus: Record<BotDelivery['status'], string> = {
   interrupted: '중단됨',
 };
 
+const reportStatus: Record<NonNullable<BotDelivery['report']>['status'], string> = {
+  queued: '대기 중',
+  running: '답변 중',
+  completed: '완료',
+  cancelled: '취소됨',
+  interrupted: '중단됨',
+  error: '실패',
+  skipped: '한도 도달',
+};
+
 const reportLabels: Record<NonNullable<BotDelivery['report']>['status'], string> = {
   queued: '보낸 Bot이 이 답변을 받아 이어서 답할 차례를 기다리고 있습니다.',
   running: '보낸 Bot이 이 답변을 받아 이어서 답하고 있습니다.',
@@ -21,13 +31,29 @@ const reportLabels: Record<NonNullable<BotDelivery['report']>['status'], string>
   skipped: '이 대화 흐름은 이어서 답하기 한도(2회)에 도달해 답변을 다시 전달하지 않았습니다.',
 };
 
-export function BotMessageLinks({ message, data, onOpen }: { message: Message; data: AppState; onOpen: (id: string) => void }) {
+export function BotMessageLinks({ message, data, onOpen, onCancelReports, cancelReportsDisabled }: {
+  message: Message;
+  data: AppState;
+  onOpen: (id: string) => void;
+  onCancelReports?: (conversationId: string) => void;
+  cancelReportsDisabled?: boolean;
+}) {
   const exchanges = (message.botExchangeIds ?? []).map(id => data.botExchanges?.find(exchange => exchange.id === id)).filter((item): item is BotExchange => Boolean(item));
   return <>{exchanges.map(exchange => {
     const otherId = exchange.botIds.find(id => id !== data.conversations.find(conversation => conversation.messages.some(entry => entry.id === message.id))?.botId) ?? exchange.botIds[1];
     const other = data.bots.find(bot => bot.id === otherId);
     const delivery = data.botDeliveries?.find(item => item.exchangeId === exchange.id);
-    return <div className="bot-exchange-summary" key={exchange.id}><ArrowLeftRight size={13} /><span>메시지 {exchange.messages.length}개 ·</span><button type="button" onClick={() => onOpen(exchange.id)} aria-label={`${other?.name ?? 'Bot'}와의 대화 열기`}>{other && <Avatar color={other.color} seed={other.id} shape={other.shape} size={18} />}{other?.name ?? 'Bot'}</button>{delivery && <span className="bot-exchange-status" data-status={delivery.status} aria-label={`${other?.name ?? 'Bot'} 답변 상태`}>{exchangeStatus[delivery.status]}</span>}</div>;
+    const report = delivery?.report;
+    return <div className="bot-exchange-summary" key={exchange.id}>
+      <ArrowLeftRight size={13} /><span>메시지 {exchange.messages.length}개 ·</span>
+      <button type="button" onClick={() => onOpen(exchange.id)} aria-label={`${other?.name ?? 'Bot'}와의 대화 열기`}>{other && <Avatar color={other.color} seed={other.id} shape={other.shape} size={18} />}{other?.name ?? 'Bot'}</button>
+      {delivery && <span className="bot-exchange-status" data-status={delivery.status} aria-label={`${other?.name ?? 'Bot'} 답변 상태`}>{exchangeStatus[delivery.status]}</span>}
+      {report && <span className="bot-report-summary">
+        <span>이어서 답하기</span>
+        <span className="bot-exchange-status" data-status={report.status} role="status" aria-label={`${other?.name ?? 'Bot'} 답변 이어서 답하기 상태`} title={reportLabels[report.status]}>{reportStatus[report.status]}</span>
+        {report.status === 'queued' && onCancelReports && <button type="button" disabled={cancelReportsDisabled} onClick={() => onCancelReports(exchange.sourceConversationId)} aria-label="대기 중인 이어서 답하기 모두 취소" title="이 대화의 대기 중인 이어서 답하기를 모두 취소합니다.">취소</button>}
+      </span>}
+    </div>;
   })}</>;
 }
 

@@ -29,3 +29,35 @@
 .vault-warning { display: flex; gap: 8px; align-items: flex-start; margin: 0; padding: 10px 12px; border-radius: 8px; background: #ffb02e14; border: 1px solid #ffb02e40; color: #ffd38a; font-size: 12px; line-height: 18px; }
 .vault-warning svg { flex-shrink: 0; margin-top: 2px; }
 .vault-warning strong { font-weight: 600; }
+
+.modal.mcp-form-modal { width: 560px; }
+.mcp-form-body { display: grid; gap: 16px; }
+.mcp-form-note { margin: 0; color: var(--secondary); font-size: 11px; line-height: 18px; overflow-wrap: anywhere; }
+.mcp-form-fields { border: 0; padding: 0; margin: 0; min-width: 0; display: grid; gap: 20px; }
+.mcp-form-fields:disabled { opacity: 0.65; }
+.mcp-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 12px; }
+.mcp-form-fields .vault-field { min-width: 0; }
+.mcp-form-fields input, .mcp-form-fields select { width: 100%; min-width: 0; min-height: 34px; }
+.mcp-form-fields select { border: 1px solid var(--line); border-radius: 6px; background: var(--canvas); color: var(--text, #fcfcfc); }
+.mcp-form-modal .vault-invalid { color: var(--danger); }
+.mcp-form-modal .vault-warning { background: light-dark(#fff4df, #ffb02e14); color: light-dark(#734807, #ffd38a); border-color: light-dark(#dfc391, #ffb02e40); }
+.mcp-form-fields [aria-invalid='true'] { border-color: var(--danger); }
+.mcp-form-fields .vault-invalid { line-height: 17px; overflow-wrap: anywhere; }
+.mcp-form-section { display: grid; gap: 10px; min-width: 0; }
+.mcp-form-section > header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.mcp-form-section h3 { font-size: 12px; font-weight: 600; }
+.mcp-form-section .text-button { display: inline-flex; align-items: center; gap: 4px; min-height: 30px; }
+.mcp-arg-row { display: flex; align-items: flex-end; gap: 8px; }
+.mcp-arg-row .vault-field { flex: 1; }
+.mcp-form-fields .icon-button { width: 34px; height: 34px; flex-shrink: 0; }
+.mcp-credential { display: grid; gap: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
+.mcp-credential-heading { display: flex; align-items: center; justify-content: space-between; color: var(--secondary); font-size: 11px; }
+.mcp-credential-heading > span { display: inline-flex; align-items: center; gap: 6px; }
+.mcp-form-feedback { padding: 0 22px 12px; flex-shrink: 0; }
+.mcp-form-footer > span { flex: 1; }
+.mcp-test-result { margin: 0; color: var(--settings-success, #95c7ad); font-size: 12px; line-height: 19px; }
+@media (max-width: 520px) {
+  .mcp-form-grid { grid-template-columns: minmax(0, 1fr); }
+  .mcp-form-modal .modal-footer { padding-inline: 16px; gap: 6px; }
+  .mcp-form-modal .modal-footer button { min-height: 36px; }
+}
