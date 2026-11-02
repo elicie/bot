@@ -472,6 +472,15 @@ export function App() {
       dispatch({ type: 'snapshot', data: snapshot });
     });
   };
+  const cancelReports = async (conversationId: string) => {
+    await command('cancel-reports', async () => {
+      const snapshot = await request<AppState>(
+        `/api/conversations/${encodeURIComponent(conversationId)}/bot-reports/cancel`,
+        { method: 'POST', body: {} },
+      );
+      dispatch({ type: 'snapshot', data: snapshot });
+    });
+  };
   const permission = async (optionId: string) => {
     const selected = selectedConversation(current.current);
     if (!selected?.run.permission) return;
@@ -735,6 +744,8 @@ export function App() {
               data={data}
               messageExtras={message => conversation && <ThreadLinks data={data} conversation={conversation} message={message} busy={busy} run={command} onSnapshot={snapshot} onOpen={thread => openThread(thread)} />}
               onBotChat={exchangeId => navigate({ selection: current.current.selection, surface: { kind: 'bot-chat', exchangeId } })}
+              onCancelReports={conversationId => void cancelReports(conversationId)}
+              cancelReportsDisabled={busy || state.connection !== 'online'}
               onRoutines={() => navigate({ selection: current.current.selection, surface: { kind: 'routines' } })}
               queuedRoutine={queuedRun}
               modelConfigured={!!data.settings.baseUrl && !!data.settings.model}

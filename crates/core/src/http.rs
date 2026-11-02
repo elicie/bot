@@ -41,7 +41,9 @@ pub struct HttpContext {
     pub closing: AtomicBool,
     /// Built frontend (`dist/`). `None` serves the API only.
     pub web_root: Option<PathBuf>,
-    /// Flips to `true` on shutdown; open SSE streams end so graceful shutdown can finish.
+    /// Cancels disposable MCP probes before the command queue is drained on shutdown.
+    pub mcp_test_stopping: tokio::sync::watch::Sender<bool>,
+    /// Flips to `true` after final state flush; open SSE streams can then finish.
     pub stopping: tokio::sync::watch::Sender<bool>,
 }
 
@@ -237,6 +239,7 @@ pub fn router(ctx: Ctx) -> Router {
         .route("/conversations", post(add_conversation))
         .route("/conversations/{id}/messages", post(send_message))
         .route("/conversations/{id}/cancel", post(cancel))
+        .route("/conversations/{id}/bot-reports/cancel", post(cancel_bot_reports))
         .route("/conversations/{id}/permissions/{permission_id}", post(resolve_permission))
         .route("/files", get(list_files))
         .route("/file", get(read_file).put(save_file))
@@ -510,6 +513,15 @@ async fn cancel(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(id): P
         // (the Node handler awaited `done` outside the queue as well).
         ctx.runtime.cancel(&id).await?;
     }
+    Ok(state_reply(&ctx, StatusCode::OK, &remote))
+}
+
+/// `POST /api/conversations/:id/bot-reports/cancel` with `{}`: cancel all still-queued
+/// reports and return the public AppState. Serialize with dispatch so none can start between
+/// selection and the durable cancellation. Running reports use the existing Stop endpoint.
+async fn cancel_bot_reports(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(id): Path<String>, JsonBody(_): JsonBody<Empty>) -> ApiResult {
+    let store = ctx.store.clone();
+    ctx.queue.run(async move { store.mutate(|s| s.cancel_bot_reports(&id)).await }).await?;
     Ok(state_reply(&ctx, StatusCode::OK, &remote))
 }
 

@@ -1,8 +1,9 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import type { AppState } from '../shared/types';
+import type { McpConfigDocument, SecretInput } from '../shared/vault';
 import { startTestApp } from './app-fixture';
 import { startMockProvider, type MockCompletion, type MockProviderRequest } from './mock-provider';
 
@@ -16,6 +17,7 @@ const details = (page: Page) => page.getByRole('complementary', { name: '대화 
 /** A streamable-HTTP MCP fixture with one `lookup` tool that records request headers. */
 async function startMcpFixture() {
   const authorization: string[] = [];
+  const methods: string[] = [];
   const calls: unknown[] = [];
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     if (req.method !== 'POST') { res.writeHead(405).end(); return; }
@@ -23,6 +25,7 @@ async function startMcpFixture() {
     let body = '';
     for await (const part of req) body += part.toString();
     const request = JSON.parse(body) as { id?: number | string; method: string; params?: Record<string, unknown> };
+    methods.push(request.method);
     if (request.id === undefined) { res.writeHead(202).end(); return; }
     const results: Record<string, unknown> = {
       initialize: { protocolVersion: request.params?.protocolVersion, capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'e2e-fixture', version: '1.0.0' } },
@@ -39,7 +42,7 @@ async function startMcpFixture() {
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`;
-  return { url, authorization, calls, close: () => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); }) };
+  return { url, authorization, methods, calls, close: () => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); }) };
 }
 
 /** search_tool, then the fixture tool, then a final answer. */
@@ -68,6 +71,74 @@ async function openVault(page: Page) {
   await dialog.getByRole('button', { name: '보관함', exact: true }).click();
   await expect(dialog.getByRole('heading', { name: /Grok Bot 보관함/ })).toBeVisible();
   return dialog;
+}
+
+type McpJson = { mcpServers: Record<string, { command?: string; args?: string[]; env?: Record<string, string>; url?: string; headers?: Record<string, string> }> };
+
+/** Real Rust store requests, including setup and concurrent edits; only failure responses are routed. */
+async function vaultRequest<T>(page: Page, path: string, method = 'GET', body?: unknown, expectedStatus = 200): Promise<T> {
+  const response = await page.evaluate(async ({ path, method, body }) => {
+    const result = await fetch(path, {
+      method,
+      headers: { 'Content-Type': 'application/json', 'X-Grok-Bot': '1' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    return { status: result.status, text: await result.text() };
+  }, { path, method, body });
+  expect(response.status, response.text).toBe(expectedStatus);
+  return JSON.parse(response.text) as T;
+}
+
+async function readMcp(page: Page, botId: string) {
+  const document = await vaultRequest<McpConfigDocument>(page, `/api/bots/${botId}/mcp-servers`);
+  return { ...document, parsed: JSON.parse(document.json) as McpJson };
+}
+
+async function openMcpForm(page: Page) {
+  await details(page).getByRole('button', { name: '사용자 지정 MCP 추가', exact: true }).click();
+  const form = page.getByRole('dialog', { name: 'MCP 서버 추가', exact: true });
+  await expect(form).toBeVisible();
+  return form;
+}
+
+async function openMcpJson(page: Page) {
+  await details(page).getByRole('button', { name: 'MCP 서버 JSON', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'MCP 서버 JSON', exact: true });
+  await expect(editor.getByLabel('MCP 서버 JSON', { exact: true })).toBeEnabled();
+  return editor;
+}
+
+function watchVaultWrites(page: Page) {
+  const secretPosts: SecretInput[] = [];
+  const configPuts: Array<{ json: string }> = [];
+  const probes: Array<{ json: string; secrets: SecretInput[] }> = [];
+  page.on('request', request => {
+    const path = new URL(request.url()).pathname;
+    if (request.method() === 'POST' && path === '/api/secrets') secretPosts.push(request.postDataJSON() as SecretInput);
+    if (request.method() === 'PUT' && /\/mcp-servers$/.test(path)) configPuts.push(request.postDataJSON() as { json: string });
+    if (request.method() === 'POST' && /\/mcp-servers\/test$/.test(path)) probes.push(request.postDataJSON() as { json: string; secrets: SecretInput[] });
+  });
+  return { secretPosts, configPuts, probes };
+}
+
+/** Navigate naturally, rather than making an otherwise unreachable control focused with DOM APIs. */
+async function tabTo(page: Page, target: Locator) {
+  for (let step = 0; step < 60; step++) {
+    if (await target.evaluate(element => element === document.activeElement)) return;
+    await page.keyboard.press('Tab');
+  }
+  await expect(target).toBeFocused();
+}
+
+async function expectNoFormOverflow(page: Page, form: Locator) {
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  expect(await form.evaluate(element => {
+    const bounds = element.getBoundingClientRect();
+    return bounds.left >= -1 && bounds.right <= window.innerWidth + 1 && element.scrollWidth <= element.clientWidth && [...element.querySelectorAll('input, select, button')].every(control => {
+      const box = control.getBoundingClientRect();
+      return box.left >= bounds.left - 1 && box.right <= bounds.right + 1;
+    });
+  })).toBe(true);
 }
 
 test('loopback: secrets are write-only, the MCP JSON editor saves servers, and a custom tool asks before it runs', async ({ page }, info) => {
@@ -116,7 +187,7 @@ test('loopback: secrets are write-only, the MCP JSON editor saves servers, and a
     await page.getByRole('button', { name: '봇 편집', exact: true }).first().click();
     await expect(details(page).getByRole('heading', { name: 'MCP 서버', exact: true })).toBeVisible();
     await expect(details(page).getByText('아직 사용자 지정 MCP 서버가 없어요', { exact: true })).toBeVisible();
-    await details(page).getByRole('button', { name: '사용자 지정 MCP 추가', exact: true }).click();
+    await details(page).getByRole('button', { name: 'MCP 서버 JSON', exact: true }).click();
     const editor = page.getByRole('dialog', { name: 'MCP 서버 JSON', exact: true });
     await expect(editor.getByRole('note')).toContainText('서버 컴퓨터에서 이 앱과 같은 사용자 권한으로 실행돼요');
     const json = editor.getByLabel('MCP 서버 JSON', { exact: true });
@@ -167,6 +238,457 @@ test('loopback: secrets are write-only, the MCP JSON editor saves servers, and a
   }
 });
 
+test('form: HTTP probe is ephemeral, save uses vault references, JSON and form append preserve enabled servers, and chat approves one credentialed call', async ({ page }, info) => {
+  const app = await startTestApp();
+  const provider = await startMockProvider({ reply });
+  const fixture = await startMcpFixture();
+  const writes = watchVaultWrites(page);
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(app.url);
+    await configure(page, provider.baseUrl);
+    const botId = (await snapshot(page)).bots[0].id;
+    await page.getByRole('button', { name: '봇 편집', exact: true }).first().click();
+    const form = await openMcpForm(page);
+    await expect(form.getByRole('note')).toContainText('새 서버는 꺼진 상태로 저장돼요');
+    await form.getByLabel('종류', { exact: true }).selectOption('http');
+    await form.getByLabel('서버 이름', { exact: true }).fill('fixture');
+    await form.getByLabel('서버 URL', { exact: true }).fill(fixture.url);
+    await form.getByRole('button', { name: '헤더 추가', exact: true }).click();
+    const header = form.getByRole('group', { name: '헤더 1', exact: true });
+    await header.getByLabel('헤더 이름', { exact: true }).fill('Authorization');
+    await expect(header.getByLabel('값 선택', { exact: true })).toHaveValue('@new');
+    await expect(header.getByLabel('새 시크릿 이름', { exact: true })).toHaveValue('MCP_FIXTURE_TOKEN');
+    await header.getByLabel('새 시크릿 이름', { exact: true }).fill('mcp_fixture_token');
+    await expect(header.getByLabel('새 시크릿 이름', { exact: true })).toHaveValue('MCP_FIXTURE_TOKEN');
+    await header.getByLabel('새 시크릿 값', { exact: true }).fill(SECRET);
+    await expect(header.getByLabel('새 시크릿 값', { exact: true })).toHaveAttribute('type', 'password');
+    await header.getByLabel('접두사 (선택)', { exact: true }).fill('Bearer ');
+
+    const probeResponse = page.waitForResponse(response => response.request().method() === 'POST' && response.url().endsWith(`/api/bots/${botId}/mcp-servers/test`));
+    await form.getByRole('button', { name: '연결 테스트', exact: true }).click();
+    const tested = await probeResponse;
+    expect(tested.status()).toBe(200);
+    expect(await tested.json()).toEqual({ toolCount: 1 });
+    await expect(form.getByRole('status')).toHaveText('연결됐어요. 도구 1개를 확인했어요. 서버는 아직 추가되지 않았어요.');
+    expect(writes.probes).toHaveLength(1);
+    expect(writes.probes[0].secrets).toEqual([{ name: 'MCP_FIXTURE_TOKEN', value: SECRET, botId }]);
+    expect(JSON.parse(writes.probes[0].json)).toEqual({ mcpServers: { fixture: { url: fixture.url, headers: { Authorization: 'Bearer ${secret:MCP_FIXTURE_TOKEN}' } } } });
+    expect(writes.probes[0].json).not.toContain(SECRET);
+    // The fixture is initialize-era: modern HTTP discovery may fall back, but never call a tool.
+    expect(fixture.methods.filter(method => !method.startsWith('notifications/'))).toEqual(['server/discover', 'initialize', 'tools/list']);
+    expect(fixture.calls).toEqual([]);
+    expect(fixture.authorization.every(value => value === `Bearer ${SECRET}`)).toBe(true);
+    expect(writes.secretPosts).toEqual([]);
+    expect(writes.configPuts).toEqual([]);
+    expect((await snapshot(page)).secrets ?? []).toEqual([]);
+    expect((await snapshot(page)).mcpServers ?? []).toEqual([]);
+    expect((await readMcp(page, botId)).parsed).toEqual({ mcpServers: {} });
+    expect(provider.requests).toEqual([]);
+    await page.screenshot({ path: info.outputPath('mcp-form-probed-not-saved.png') });
+
+    // Testing is not enabling. Saving creates a bot-scoped secret and an initially disabled server.
+    await form.getByRole('button', { name: '서버 추가', exact: true }).click();
+    await expect(form).toBeHidden();
+    expect(writes.secretPosts).toEqual([{ name: 'MCP_FIXTURE_TOKEN', value: SECRET, botId }]);
+    expect(writes.configPuts).toHaveLength(1);
+    expect(writes.configPuts[0].json).not.toContain(SECRET);
+    const server = details(page).getByRole('listitem', { name: 'MCP 서버 fixture', exact: true });
+    const toggle = server.getByRole('switch', { name: 'fixture 사용', exact: true });
+    await expect(server).toContainText('HTTP');
+    await expect(toggle).not.toBeChecked();
+    const saved = await readMcp(page, botId);
+    expect(saved.parsed).toEqual({ mcpServers: { fixture: { url: fixture.url, headers: { Authorization: 'Bearer ${secret:MCP_FIXTURE_TOKEN}' } } } });
+    expect(saved.json).not.toContain(SECRET);
+    const savedState = await snapshot(page);
+    expect(savedState.secrets).toEqual([expect.objectContaining({ name: 'MCP_FIXTURE_TOKEN', botId })]);
+    expect(savedState.mcpServers).toEqual([expect.objectContaining({ name: 'fixture', enabled: false, secretRefs: ['MCP_FIXTURE_TOKEN'] })]);
+    expect(JSON.stringify(savedState)).not.toContain(SECRET);
+    expect(JSON.stringify(savedState)).not.toContain(fixture.url);
+    await toggle.click();
+    await expect(toggle).toBeChecked();
+    const fixtureId = (await snapshot(page)).mcpServers!.find(item => item.name === 'fixture')!.id;
+
+    // The advanced editor reads the exact form document. Appending there keeps the enabled row.
+    const editor = await openMcpJson(page);
+    const json = editor.getByLabel('MCP 서버 JSON', { exact: true });
+    expect(JSON.parse(await json.inputValue())).toEqual(saved.parsed);
+    await json.fill(JSON.stringify({ mcpServers: { ...saved.parsed.mcpServers, 'from-json': { command: 'node', args: ['--version'] } } }, null, 2));
+    await editor.getByRole('button', { name: '저장', exact: true }).click();
+    await expect(editor).toBeHidden();
+    await expect(toggle).toBeChecked();
+    await expect(details(page).getByRole('switch', { name: 'from-json 사용', exact: true })).not.toBeChecked();
+
+    // Conversely, the form appends to JSON-created rows and can select an existing vault value.
+    const selected = await openMcpForm(page);
+    await selected.getByLabel('종류', { exact: true }).selectOption('http');
+    await selected.getByLabel('서버 이름', { exact: true }).fill('from-vault');
+    await selected.getByLabel('서버 URL', { exact: true }).fill(fixture.url);
+    await selected.getByRole('button', { name: '헤더 추가', exact: true }).click();
+    const reused = selected.getByRole('group', { name: '헤더 1', exact: true });
+    await reused.getByLabel('헤더 이름', { exact: true }).fill('Authorization');
+    await expect(reused.getByLabel('값 선택', { exact: true })).toHaveValue('');
+    await reused.getByLabel('값 선택', { exact: true }).selectOption('MCP_FIXTURE_TOKEN');
+    await expect(reused.getByLabel('새 시크릿 값', { exact: true })).toHaveCount(0);
+    await reused.getByLabel('접두사 (선택)', { exact: true }).fill('Token  ');
+    const selectedStart = fixture.authorization.length;
+    await selected.getByRole('button', { name: '연결 테스트', exact: true }).click();
+    await expect(selected.getByRole('status')).toContainText('도구 1개를 확인했어요');
+    expect(writes.probes[1].secrets).toEqual([]);
+    expect(fixture.authorization.slice(selectedStart).length).toBeGreaterThan(0);
+    expect(fixture.authorization.slice(selectedStart).every(value => value === `Token  ${SECRET}`)).toBe(true);
+    expect(fixture.calls).toHaveLength(0);
+    expect((await snapshot(page)).mcpServers?.some(item => item.name === 'from-vault')).toBe(false);
+    await selected.getByRole('button', { name: '서버 추가', exact: true }).click();
+    await expect(selected).toBeHidden();
+    expect(writes.secretPosts).toHaveLength(1);
+    const merged = await readMcp(page, botId);
+    expect(merged.parsed).toEqual({ mcpServers: {
+      fixture: saved.parsed.mcpServers.fixture,
+      'from-json': { command: 'node', args: ['--version'] },
+      'from-vault': { url: fixture.url, headers: { Authorization: 'Token  ${secret:MCP_FIXTURE_TOKEN}' } },
+    } });
+    expect((await snapshot(page)).mcpServers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: fixtureId, name: 'fixture', enabled: true }),
+      expect.objectContaining({ name: 'from-json', enabled: false }),
+      expect.objectContaining({ name: 'from-vault', enabled: false, secretRefs: ['MCP_FIXTURE_TOKEN'] }),
+    ]));
+    const reflected = await openMcpJson(page);
+    expect(JSON.parse(await reflected.getByLabel('MCP 서버 JSON', { exact: true }).inputValue())).toEqual(merged.parsed);
+    expect(await reflected.getByLabel('MCP 서버 JSON', { exact: true }).inputValue()).not.toContain(SECRET);
+    await reflected.getByRole('button', { name: '취소', exact: true }).click();
+
+    const chatStart = fixture.authorization.length;
+    await page.getByRole('textbox', { name: '메시지', exact: true }).fill('Please look it up');
+    await page.getByRole('button', { name: '메시지 보내기', exact: true }).click();
+    const approval = page.getByRole('region', { name: '작업 승인 요청', exact: true });
+    await expect(approval).toContainText('MCP 서버 fixture: lookup', { timeout: 30_000 });
+    expect(fixture.calls).toHaveLength(0);
+    await approval.getByRole('button', { name: 'Run once', exact: true }).click();
+    await expect(page.getByText('사용자 지정 MCP 조회를 마쳤습니다.', { exact: true })).toBeVisible({ timeout: 30_000 });
+    expect(fixture.calls).toHaveLength(1);
+    expect(fixture.calls[0]).toEqual(expect.objectContaining({ name: 'lookup', arguments: { query: 'e2e' } }));
+    expect(fixture.authorization.slice(chatStart).length).toBeGreaterThan(0);
+    expect(fixture.authorization.slice(chatStart).every(value => value === `Bearer ${SECRET}`)).toBe(true);
+    expect(JSON.stringify(provider.requests)).not.toContain(SECRET);
+    expect(JSON.stringify(await snapshot(page))).not.toContain(SECRET);
+    expect((await readMcp(page, botId)).json).not.toContain(SECRET);
+    expect(errors).toEqual([]);
+  } finally {
+    await app.stop();
+    await provider.close();
+    await fixture.close();
+  }
+});
+
+test('form retry: a failed MCP PUT keeps the saved secret reference and appends to external edits without duplicate secret creation', async ({ page }) => {
+  const app = await startTestApp();
+  const writes = watchVaultWrites(page);
+  try {
+    await page.goto(app.url);
+    const botId = (await snapshot(page)).bots[0].id;
+    const path = `/api/bots/${botId}/mcp-servers`;
+    const baseline = { command: 'node', args: ['--version'] };
+    await vaultRequest(page, path, 'PUT', { json: JSON.stringify({ mcpServers: { baseline } }) });
+    await vaultRequest(page, `${path}/baseline`, 'PATCH', { enabled: true });
+    await page.getByRole('button', { name: '봇 편집', exact: true }).first().click();
+    await expect(details(page).getByRole('switch', { name: 'baseline 사용', exact: true })).toBeChecked();
+    const baselineId = (await snapshot(page)).mcpServers!.find(server => server.name === 'baseline')!.id;
+    const form = await openMcpForm(page);
+    await form.getByLabel('종류', { exact: true }).selectOption('http');
+    await form.getByLabel('서버 이름', { exact: true }).fill('retry');
+    await form.getByLabel('서버 URL', { exact: true }).fill('https://example.invalid/mcp');
+    await form.getByRole('button', { name: '헤더 추가', exact: true }).click();
+    const header = form.getByRole('group', { name: '헤더 1', exact: true });
+    await header.getByLabel('헤더 이름', { exact: true }).fill('Authorization');
+    await header.getByLabel('새 시크릿 이름', { exact: true }).fill('RETRY_TOKEN');
+    await header.getByLabel('새 시크릿 값', { exact: true }).fill(SECRET);
+    await header.getByLabel('접두사 (선택)', { exact: true }).fill('Bearer ');
+
+    // Intercept the failure only: the secret POST and every GET/subsequent PUT use Rust storage.
+    let failures = 0;
+    await page.route(`**${path}`, async route => {
+      if (route.request().method() === 'PUT' && failures === 0) {
+        failures++;
+        await route.fulfill({ status: 500, json: { error: 'Injected MCP save failure' } });
+      } else await route.continue();
+    });
+    await form.getByRole('button', { name: '서버 추가', exact: true }).click();
+    await expect(form.getByRole('alert')).toContainText('새 시크릿은 보관함에 저장됐지만 서버는 추가되지 않았어요');
+    await expect(form.getByRole('alert')).toContainText('Injected MCP save failure');
+    await expect(form.getByRole('status')).toContainText('서버 추가를 취소해도 남아');
+    await expect(header.getByLabel('값 선택', { exact: true })).toHaveValue('RETRY_TOKEN');
+    await expect(header.getByLabel('새 시크릿 값', { exact: true })).toHaveCount(0);
+    await expect(form.getByLabel('서버 이름', { exact: true })).toHaveValue('retry');
+    expect(failures).toBe(1);
+    expect(writes.secretPosts).toEqual([{ name: 'RETRY_TOKEN', value: SECRET, botId }]);
+    expect((await snapshot(page)).secrets).toEqual([expect.objectContaining({ name: 'RETRY_TOKEN', botId })]);
+    expect((await readMcp(page, botId)).parsed).toEqual({ mcpServers: { baseline } });
+
+    // A different client saves while this dirty dialog is still open. Retry must re-read, not replace.
+    const external = { url: 'https://external.invalid/mcp', headers: { 'X-External': 'non-secret-marker' } };
+    const latest = await readMcp(page, botId);
+    await vaultRequest(page, path, 'PUT', { json: JSON.stringify({ mcpServers: { ...latest.parsed.mcpServers, external } }) });
+    await expect(form).toBeVisible();
+    await expect(form.getByLabel('서버 URL', { exact: true })).toHaveValue('https://example.invalid/mcp');
+    expect((await snapshot(page)).mcpServers).toEqual(expect.arrayContaining([expect.objectContaining({ id: baselineId, name: 'baseline', enabled: true })]));
+    await form.getByRole('button', { name: '서버 추가', exact: true }).click();
+    await expect(form).toBeHidden();
+    expect(writes.secretPosts).toHaveLength(1);
+    expect(writes.probes).toHaveLength(0);
+    const merged = await readMcp(page, botId);
+    expect(merged.parsed).toEqual({ mcpServers: {
+      baseline,
+      external,
+      retry: { url: 'https://example.invalid/mcp', headers: { Authorization: 'Bearer ${secret:RETRY_TOKEN}' } },
+    } });
+    expect((await snapshot(page)).mcpServers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: baselineId, name: 'baseline', enabled: true }),
+      expect.objectContaining({ name: 'external', enabled: false }),
+      expect.objectContaining({ name: 'retry', enabled: false, secretRefs: ['RETRY_TOKEN'] }),
+    ]));
+    expect((await snapshot(page)).secrets).toHaveLength(1);
+    expect(merged.json).not.toContain(SECRET);
+    expect(JSON.stringify(await snapshot(page))).not.toContain(SECRET);
+    const editor = await openMcpJson(page);
+    expect(JSON.parse(await editor.getByLabel('MCP 서버 JSON', { exact: true }).inputValue())).toEqual(merged.parsed);
+    await editor.getByRole('button', { name: '취소', exact: true }).click();
+  } finally { await app.stop(); }
+});
+
+test('form validation: local commands, reserved or duplicate names, URLs, credentials, and case-insensitive headers fail inline before any request', async ({ page }) => {
+  const app = await startTestApp();
+  try {
+    await page.goto(app.url);
+    const botId = (await snapshot(page)).bots[0].id;
+    const path = `/api/bots/${botId}/mcp-servers`;
+    const taken = { url: 'https://existing.invalid/mcp' };
+    await vaultRequest(page, '/api/secrets', 'POST', { name: 'VALIDATION_TOKEN', value: SECRET }, 201);
+    await vaultRequest(page, path, 'PUT', { json: JSON.stringify({ mcpServers: { taken } }) });
+    await vaultRequest(page, `${path}/taken`, 'PATCH', { enabled: true });
+    const writes = watchVaultWrites(page);
+    await page.getByRole('button', { name: '봇 편집', exact: true }).first().click();
+    await expect(details(page).getByRole('switch', { name: 'taken 사용', exact: true })).toBeChecked();
+    await expect(details(page).getByRole('list', { name: '시크릿 목록', exact: true })).toContainText('VALIDATION_TOKEN');
+    const form = await openMcpForm(page);
+    const testConnection = form.getByRole('button', { name: '연결 테스트', exact: true });
+    await form.getByRole('button', { name: '서버 추가', exact: true }).click();
+    await expect(form.getByRole('alert')).toContainText('입력 내용을 확인해 주세요');
+    await expect(form.getByLabel('서버 이름', { exact: true })).toHaveAttribute('aria-invalid', 'true');
+    await expect(form.getByLabel('명령', { exact: true })).toHaveAttribute('aria-invalid', 'true');
+    await form.getByLabel('명령', { exact: true }).fill('node');
+    for (const name of ['workspace-new', 'bad__name', 'Uppercase', 'taken']) {
+      await form.getByLabel('서버 이름', { exact: true }).fill(name);
+      await testConnection.click();
+      await expect(form.getByLabel('서버 이름', { exact: true })).toHaveAttribute('aria-invalid', 'true');
+    }
+    await expect(form.getByText('같은 이름의 서버가 있어요. 다른 이름을 입력하세요.', { exact: true })).toBeVisible();
+    await form.getByLabel('서버 이름', { exact: true }).fill('local-form');
+    for (const command of ['./server.js', 'node ${secret:VALIDATION_TOKEN}']) {
+      await form.getByLabel('명령', { exact: true }).fill(command);
+      await testConnection.click();
+      await expect(form.getByLabel('명령', { exact: true })).toHaveAttribute('aria-invalid', 'true');
+    }
+    await form.getByLabel('명령', { exact: true }).fill('node');
+    await form.getByRole('button', { name: '인자 추가', exact: true }).click();
+    await form.getByLabel('인자 1', { exact: true }).fill('${secret:VALIDATION_TOKEN}');
+    await testConnection.click();
+    await expect(form.getByLabel('인자 1', { exact: true })).toHaveAttribute('aria-invalid', 'true');
+    await form.getByLabel('인자 1', { exact: true }).fill('--label=two words');
+    await form.getByRole('button', { name: '인자 추가', exact: true }).click();
+    await form.getByLabel('인자 2', { exact: true }).fill('file "quoted name".js');
+    await form.getByRole('button', { name: '환경 변수 추가', exact: true }).click();
+    const env = form.getByRole('group', { name: '환경 변수 1', exact: true });
+    await env.getByLabel('환경 변수 이름', { exact: true }).fill('1TOKEN');
+    await testConnection.click();
+    await expect(env.getByText('영문·_로 시작하는 환경 변수 이름을 입력하세요.', { exact: true })).toBeVisible();
+    await env.getByLabel('환경 변수 이름', { exact: true }).fill('TOKEN');
+    await testConnection.click();
+    await expect(env.getByText('보관함 시크릿을 선택하세요.', { exact: true })).toBeVisible();
+    await env.getByLabel('값 선택', { exact: true }).selectOption('VALIDATION_TOKEN');
+
+    // The transport switch retains the local draft while validating only the visible transport.
+    await form.getByLabel('종류', { exact: true }).selectOption('http');
+    for (const url of ['ftp://example.invalid/mcp', 'https://user:pass@example.invalid/mcp', 'https://example.invalid/mcp#fragment']) {
+      await form.getByLabel('서버 URL', { exact: true }).fill(url);
+      await testConnection.click();
+      await expect(form.getByLabel('서버 URL', { exact: true })).toHaveAttribute('aria-invalid', 'true');
+    }
+    await form.getByLabel('서버 URL', { exact: true }).fill('https://example.invalid/mcp');
+    await form.getByRole('button', { name: '헤더 추가', exact: true }).click();
+    const firstHeader = form.getByRole('group', { name: '헤더 1', exact: true });
+    await firstHeader.getByLabel('헤더 이름', { exact: true }).fill('Authorization');
+    await firstHeader.getByLabel('값 선택', { exact: true }).selectOption('VALIDATION_TOKEN');
+    await form.getByRole('button', { name: '헤더 추가', exact: true }).click();
+    const secondHeader = form.getByRole('group', { name: '헤더 2', exact: true });
+    await secondHeader.getByLabel('헤더 이름', { exact: true }).fill('authorization');
+    await secondHeader.getByLabel('값 선택', { exact: true }).selectOption('VALIDATION_TOKEN');
+    await testConnection.click();
+    await expect(secondHeader.getByText('같은 이름의 항목이 있어요. HTTP 헤더는 대소문자를 구분하지 않아요.', { exact: true })).toBeVisible();
+    await secondHeader.getByLabel('헤더 이름', { exact: true }).fill('invalid header');
+    await testConnection.click();
+    await expect(secondHeader.getByText('올바른 HTTP 헤더 이름을 입력하세요.', { exact: true })).toBeVisible();
+    await secondHeader.getByLabel('헤더 이름', { exact: true }).fill('X-Extra');
+    await secondHeader.getByLabel('값 선택', { exact: true }).selectOption('@new');
+    await secondHeader.getByLabel('새 시크릿 이름', { exact: true }).fill('VALIDATION_TOKEN');
+    await secondHeader.getByLabel('새 시크릿 값', { exact: true }).fill(SECRET);
+    await testConnection.click();
+    await expect(secondHeader.getByText('같은 이름의 시크릿이 있어요. 보관함에서 선택하거나 새 이름을 입력하세요.', { exact: true })).toBeVisible();
+    await secondHeader.getByLabel('새 시크릿 이름', { exact: true }).fill('SECOND_TOKEN');
+    await secondHeader.getByLabel('새 시크릿 값', { exact: true }).fill('short');
+    await testConnection.click();
+    await expect(secondHeader.getByText('시크릿 값은 줄바꿈·제어 문자 없이 8~8,192자로 입력하세요.', { exact: true })).toBeVisible();
+    await secondHeader.getByLabel('새 시크릿 값', { exact: true }).fill(SECRET);
+    await secondHeader.getByLabel('접두사 (선택)', { exact: true }).fill('Bearer ${secret:VALIDATION_TOKEN}');
+    await testConnection.click();
+    await expect(secondHeader.getByText('접두사는 시크릿 참조·제어 문자 없이 입력하세요. 전체 헤더는 8,192자 이하여야 해요.', { exact: true })).toBeVisible();
+    await secondHeader.getByRole('button', { name: '헤더 2 삭제', exact: true }).click();
+
+    await form.getByLabel('종류', { exact: true }).selectOption('stdio');
+    await expect(form.getByLabel('명령', { exact: true })).toHaveValue('node');
+    await expect(form.getByLabel('인자 1', { exact: true })).toHaveValue('--label=two words');
+    await expect(form.getByLabel('인자 2', { exact: true })).toHaveValue('file "quoted name".js');
+    const confirmation = page.waitForEvent('dialog');
+    const click = testConnection.click();
+    const confirm = await confirmation;
+    expect(confirm.type()).toBe('confirm');
+    expect(confirm.message()).toContain('서버 컴퓨터에서 입력한 명령을 실제로 실행');
+    await confirm.dismiss();
+    await click;
+    expect(writes.probes).toEqual([]);
+    expect(writes.secretPosts).toEqual([]);
+    expect(writes.configPuts).toEqual([]);
+
+    await form.getByRole('button', { name: '서버 추가', exact: true }).click();
+    await expect(form).toBeHidden();
+    expect(writes.secretPosts).toEqual([]);
+    expect((await readMcp(page, botId)).parsed).toEqual({ mcpServers: {
+      taken,
+      'local-form': { command: 'node', args: ['--label=two words', 'file "quoted name".js'], env: { TOKEN: '${secret:VALIDATION_TOKEN}' } },
+    } });
+    await expect(details(page).getByRole('switch', { name: 'taken 사용', exact: true })).toBeChecked();
+    await expect(details(page).getByRole('switch', { name: 'local-form 사용', exact: true })).not.toBeChecked();
+    expect(JSON.stringify(await snapshot(page))).not.toContain(SECRET);
+  } finally { await app.stop(); }
+});
+
+test('mobile light form: every action is reachable at 390x844, keyboard cancel and Escape guard the draft, and discard persists no secrets', async ({ page }, info) => {
+  const app = await startTestApp();
+  const fixture = await startMcpFixture();
+  const writes = watchVaultWrites(page);
+  try {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(app.url);
+    const botId = (await snapshot(page)).bots[0].id;
+    await page.getByRole('button', { name: '봇 목록 열기', exact: true }).click();
+    await page.getByRole('button', { name: '설정', exact: true }).click();
+    const settings = page.getByRole('dialog', { name: '설정', exact: true });
+    await settings.getByLabel('테마', { exact: true }).selectOption('light');
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+    await settings.getByRole('button', { name: '설정 닫기', exact: true }).click();
+    await page.getByRole('button', { name: '봇 편집', exact: true }).first().click();
+    const opener = details(page).getByRole('button', { name: '사용자 지정 MCP 추가', exact: true });
+    const form = await openMcpForm(page);
+    await expect(form.getByRole('note')).toBeVisible();
+    await expect(form.getByRole('note')).toContainText('로컬 명령은 서버 컴퓨터에서 이 앱과 같은 권한');
+    await expect(form.getByLabel('서버 이름', { exact: true })).toBeFocused();
+    await page.keyboard.type('mobile');
+    await form.getByLabel('종류', { exact: true }).selectOption('http');
+    await form.getByLabel('서버 URL', { exact: true }).fill(fixture.url);
+    const addHeader = form.getByRole('button', { name: '헤더 추가', exact: true });
+    await tabTo(page, addHeader);
+    await expect(addHeader).toBeInViewport({ ratio: 1 });
+    await page.keyboard.press('Enter');
+    const header = form.getByRole('group', { name: '헤더 1', exact: true });
+    await header.getByLabel('헤더 이름', { exact: true }).fill('Authorization');
+    await expect(header.getByLabel('새 시크릿 이름', { exact: true })).toHaveValue('MCP_MOBILE_TOKEN');
+    const password = header.getByLabel('새 시크릿 값', { exact: true });
+    await expect(password).toHaveAttribute('type', 'password');
+    await header.getByLabel('접두사 (선택)', { exact: true }).fill('Bearer ');
+    await tabTo(page, form.getByRole('button', { name: '연결 테스트', exact: true }));
+    await page.keyboard.press('Enter');
+    await expect(form.getByRole('alert')).toContainText('입력 내용을 확인해 주세요');
+    await expect(form.getByRole('alert')).toBeInViewport({ ratio: 1 });
+    await expect(password).toHaveAttribute('aria-invalid', 'true');
+    await expect(password).toBeFocused();
+    await expect(password).toHaveAccessibleDescription('시크릿 값은 줄바꿈·제어 문자 없이 8~8,192자로 입력하세요.');
+    expect(writes.probes).toHaveLength(0);
+    await password.fill(SECRET);
+    for (const field of ['헤더 이름', '값 선택', '새 시크릿 이름', '새 시크릿 값', '접두사 (선택)']) {
+      const input = header.getByLabel(field, { exact: true });
+      await tabTo(page, input);
+      await expect(input).toBeInViewport({ ratio: 1 });
+    }
+    await expectNoFormOverflow(page, form);
+
+    const testConnection = form.getByRole('button', { name: '연결 테스트', exact: true });
+    await tabTo(page, testConnection);
+    await expect(testConnection).toBeInViewport({ ratio: 1 });
+    await page.keyboard.press('Enter');
+    await expect(form.getByRole('status')).toContainText('도구 1개를 확인했어요. 서버는 아직 추가되지 않았어요.');
+    await expect(form.getByRole('status')).toBeInViewport({ ratio: 1 });
+    expect(fixture.calls).toHaveLength(0);
+    expect(fixture.authorization.every(value => value === `Bearer ${SECRET}`)).toBe(true);
+    expect(writes.secretPosts).toEqual([]);
+    expect(writes.configPuts).toEqual([]);
+
+    // Exercise dynamic-row removal and every footer/header action through the real tab order.
+    await tabTo(page, addHeader);
+    await page.keyboard.press('Enter');
+    const remove = form.getByRole('button', { name: '헤더 2 삭제', exact: true });
+    await tabTo(page, remove);
+    await expect(remove).toBeInViewport({ ratio: 1 });
+    await page.keyboard.press('Enter');
+    await expect(form.getByRole('group', { name: '헤더 2', exact: true })).toHaveCount(0);
+    for (const label of ['서버 추가', 'MCP 서버 추가 닫기']) {
+      const action = form.getByRole('button', { name: label, exact: true });
+      await tabTo(page, action);
+      await expect(action).toBeInViewport({ ratio: 1 });
+    }
+    await expectNoFormOverflow(page, form);
+    await page.screenshot({ path: info.outputPath('mcp-form-mobile-light-filled.png') });
+
+    const answerDiscard = async (key: string, accept: boolean) => {
+      const dialogReady = page.waitForEvent('dialog');
+      const pressed = page.keyboard.press(key);
+      const confirm = await dialogReady;
+      expect(confirm.type()).toBe('confirm');
+      expect(confirm.message()).toContain('입력 중인 MCP 서버를 버리고 닫을까요');
+      if (accept) await confirm.accept(); else await confirm.dismiss();
+      await pressed;
+    };
+    const cancel = form.getByRole('button', { name: '취소', exact: true });
+    await tabTo(page, cancel);
+    await expect(cancel).toBeInViewport({ ratio: 1 });
+    await answerDiscard('Enter', false);
+    await expect(form).toBeVisible();
+    await expect(form.getByLabel('서버 이름', { exact: true })).toHaveValue('mobile');
+    await expect(header.getByLabel('새 시크릿 값', { exact: true })).toHaveValue(SECRET);
+    await answerDiscard('Escape', false);
+    await expect(form).toBeVisible();
+    await expect(header.getByLabel('새 시크릿 값', { exact: true })).toHaveValue(SECRET);
+    await answerDiscard('Escape', true);
+    await expect(form).toBeHidden();
+    await expect(opener).toBeFocused();
+    expect(writes.probes).toHaveLength(1);
+    expect(writes.secretPosts).toEqual([]);
+    expect(writes.configPuts).toEqual([]);
+    expect((await snapshot(page)).secrets ?? []).toEqual([]);
+    expect((await snapshot(page)).mcpServers ?? []).toEqual([]);
+    expect((await readMcp(page, botId)).parsed).toEqual({ mcpServers: {} });
+    const clean = await openMcpForm(page);
+    await expect(clean.getByLabel('서버 이름', { exact: true })).toHaveValue('');
+    await expect(clean.getByRole('group', { name: '환경 변수 1', exact: true })).toHaveCount(0);
+    await page.keyboard.press('Escape');
+    await expect(clean).toBeHidden();
+  } finally {
+    await app.stop();
+    await fixture.close();
+  }
+});
+
 test('a LAN client sees secret names and server summaries read-only and cannot change them', async ({ browser }, info) => {
   const hostname = Object.values(networkInterfaces()).flat().find(address => address?.family === 'IPv4' && !address.internal)?.address;
   if (!hostname) throw Error('This LAN verification requires a network interface');
@@ -204,6 +726,8 @@ test('a LAN client sees secret names and server summaries read-only and cannot c
     const server = details(page).getByRole('listitem', { name: 'MCP 서버 tools', exact: true });
     await expect(server).toContainText('STDIO');
     await expect(details(page).getByRole('button', { name: 'MCP 서버 JSON', exact: true })).toBeDisabled();
+    await expect(details(page).getByRole('button', { name: '사용자 지정 MCP 추가', exact: true })).toBeDisabled();
+    await expect(page.getByRole('dialog', { name: 'MCP 서버 추가', exact: true })).toHaveCount(0);
     // Disabling is a tightening and stays available; enabling again is not.
     const toggle = server.getByRole('switch', { name: 'tools 사용', exact: true });
     await expect(toggle).toBeChecked();
@@ -217,9 +741,15 @@ test('a LAN client sees secret names and server summaries read-only and cannot c
       const read = await fetch(`/api/bots/${bot}/mcp-servers`);
       const save = await fetch(`/api/bots/${bot}/mcp-servers`, { method: 'PUT', headers, body: JSON.stringify({ json: '{"mcpServers": {}}' }) });
       const enable = await fetch(`/api/bots/${bot}/mcp-servers/tools`, { method: 'PATCH', headers, body: JSON.stringify({ enabled: true }) });
-      return [add.status, read.status, save.status, enable.status];
+      const probe = await fetch(`/api/bots/${bot}/mcp-servers/test`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ json: JSON.stringify({ mcpServers: { lan_probe: { url: 'http://127.0.0.1:1/mcp', headers: { Authorization: '${secret:LAN_PROBE_TOKEN}' } } } }), secrets: [{ name: 'LAN_PROBE_TOKEN', value: 'lan-probe-must-not-persist', botId: bot }] }),
+      });
+      return [add.status, read.status, save.status, enable.status, probe.status];
     }, { bot });
-    expect(results).toEqual([403, 403, 403, 403]);
+    expect(results).toEqual([403, 403, 403, 403, 403]);
+    expect((await snapshot(page)).secrets?.map(secret => secret.name)).toEqual(['LAN_TOKEN']);
+    expect((await snapshot(page)).mcpServers).toEqual([expect.objectContaining({ name: 'tools', enabled: false })]);
     const state = JSON.stringify(await snapshot(page));
     expect(state).not.toContain(SECRET);
     expect(state).not.toContain('server.js');
