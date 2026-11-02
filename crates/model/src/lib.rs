@@ -255,6 +255,22 @@ pub struct PendingPermission {
     pub local_only: Option<bool>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TodoItem {
+    pub content: String,
+    pub status: TodoStatus,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunState {
@@ -265,6 +281,9 @@ pub struct RunState {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission: Option<PendingPermission>,
+    /// Latest engine checklist for this turn; absent until a plan arrives, empty when cleared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todos: Option<Vec<TodoItem>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -273,7 +292,7 @@ pub struct RunState {
 
 impl RunState {
     pub fn idle() -> Self {
-        Self { id: String::new(), status: RunStatus::Idle, error: None, permission: None, started_at: None, finished_at: None }
+        Self { id: String::new(), status: RunStatus::Idle, error: None, permission: None, todos: None, started_at: None, finished_at: None }
     }
 }
 

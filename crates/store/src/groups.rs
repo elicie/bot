@@ -359,6 +359,7 @@ impl State {
             status: RunStatus::Error,
             error: Some(error),
             permission: None,
+            todos: conversation.run.todos.clone(),
             started_at: conversation.run.started_at.clone(),
             finished_at: Some(timestamp.clone()),
         };

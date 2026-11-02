@@ -29,7 +29,7 @@ let permissionResolve;
 let loadCount = 0;
 const pending = new Map();
 const response = (id,result) => send({id,result});
-const update = update => send({method:'session/update',params:{sessionId,update}});
+const update = (update,meta) => send({method:'session/update',params:{sessionId,update,...(meta?{_meta:meta}:{})}});
 async function rpc(method,params) {
  const id = randomUUID();
  const result = new Promise(resolve=>pending.set(id,resolve));
@@ -54,6 +54,13 @@ createInterface({input:process.stdin}).on('line',async line=>{
  if(method==='session/cancel'){return;}
  if(method==='session/prompt'){
   const prompt=params.prompt[0].text;
+  if(prompt==='todos'){
+   const entries=[{content:'Inspect '+process.env.GROK_BOT_PROVIDER_KEY,priority:'medium',status:'in_progress'},{content:'Optional',priority:'low',status:'completed',_meta:{cancelled:true}}];
+   update({sessionUpdate:'plan',entries},{eventId:'durable-1'});
+   update({sessionUpdate:'plan',entries},{eventId:'durable-2'});
+   update({sessionUpdate:'plan',entries:entries.map(entry=>({...entry,status:'completed'}))});
+   response(id,{stopReason:'end_turn'});return;
+  }
   if(prompt==='inspect-runtime'){
    update({sessionUpdate:'agent_message_chunk',content:{type:'text',text:JSON.stringify({args:process.argv.slice(2),home:process.env.HOME,grokHome:process.env.GROK_HOME,cwd:process.cwd()})}});
    response(id,{stopReason:'end_turn'});return;
@@ -214,13 +221,29 @@ test('runtime availability requires the application engine identity, version, an
     const home = path.join(f.root, 'data', 'grok', completed.id, completed.sessionFingerprint!);
     assert.deepEqual(JSON.parse(completed.messages[1].text), { args: [], home, grokHome: path.join(home, '.grok'), cwd: path.join(home, 'workspace') });
     const profile = (await f.requests()).find(request => request.method === 'session/new')!.params._meta!.agentProfile;
-    assert.deepEqual(profile.tools, ['search_tool', 'use_tool']);
+    assert.deepEqual(profile.tools, ['search_tool', 'use_tool', 'todo_write']);
     assert.equal(profile.injectDefaultTools, false);
     assert.equal(profile.agentsMd, false);
-    assert.deepEqual(profile.toolConfig.tools.map(tool => tool.id), ['GrokBuild:search_tool', 'GrokBuild:use_tool']);
+    assert.deepEqual(profile.toolConfig.tools.map(tool => tool.id), ['GrokBuild:search_tool', 'GrokBuild:use_tool', 'GrokBuild:todo_write']);
     assert.equal(profile.discoverSkills, false);
     assert.equal(profile.inheritSkills, false);
     for (const name of ['run_terminal_cmd', 'task', 'workflow', 'read_file', 'write', 'list_dir', 'grep']) assert.ok(profile.disallowedTools.includes(name));
+  } finally { await f.close(); }
+});
+
+test('durable plans replace checklist state, redact credentials and ignore cosmetic completion', async () => {
+  const f = await fixture();
+  try {
+    await f.api('/api/settings', { baseUrl: 'http://127.0.0.1:12345/v1', model: 'fixture', workspace: f.workspace, apiKey: 'todo-secret-canary' }, 'PUT');
+    await f.send('todos');
+    const completed = await f.wait(c => c.run.status === 'completed');
+    const expected = [{ content: 'Inspect [redacted]', status: 'in_progress' }, { content: 'Optional', status: 'cancelled' }];
+    assert.deepEqual(completed.run.todos, expected);
+    const disk = JSON.parse(await readFile(path.join(f.root, 'data', 'state.json'), 'utf8'));
+    assert.deepEqual(disk.conversations[0].run.todos, expected);
+    await f.send('inspect-runtime');
+    const next = await f.wait(c => c.run.status === 'completed' && c.messages.length === 4);
+    assert.equal(next.run.todos, undefined);
   } finally { await f.close(); }
 });
 
