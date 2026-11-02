@@ -339,7 +339,7 @@ pub(super) async fn expire_nested_bot_chains(f: &Fixture) {
     }
     // Update maintenance preserves even already-expired durable work until it resumes.
     let paused = self::root(f, &b).await;
-    f.runtime.pause_if_idle().unwrap();
+    f.wait(&paused.source_conversation_id, "maintenance admission after the origin settles", |_| f.runtime.pause_if_idle().is_ok()).await;
     let before = f.public();
     let deadline = chrono::DateTime::parse_from_rfc3339(&paused.created_at).unwrap().with_timezone(&chrono::Utc) + chrono::Duration::minutes(31);
     f.runtime.expire_bot_chains(deadline).await.unwrap();

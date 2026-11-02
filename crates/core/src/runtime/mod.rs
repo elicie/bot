@@ -1294,19 +1294,22 @@ impl Runtime {
     /// Called inside the scheduler command queue: signal cancellation, but do not await engine
     /// settlement here (a broker call may itself be waiting for that queue).
     pub async fn expire_bot_chains(&self, now: chrono::DateTime<chrono::Utc>) -> HttpResult<()> {
-        let chain_ids = self.store.read(|state| {
-            if self.closing.load(Ordering::SeqCst) || self.is_paused() { HashSet::new() } else { state.expired_bot_chains(now) }
-        });
+        let chain_ids =
+            self.store.read(|state| if self.closing.load(Ordering::SeqCst) || self.is_paused() { HashSet::new() } else { state.expired_bot_chains(now) });
         if chain_ids.is_empty() {
             return Ok(());
         }
         let runs = self.stop_bot_chain_runs(&chain_ids, Some(BOT_CHAIN_TIMEOUT_ERROR));
-        self.store.mutate(|state| {
-            // Maintenance sets its latch under this store lock as well. Direct runtime starts
-            // cannot race preparation into modifying the durable queues after it succeeded.
-            if self.closing.load(Ordering::SeqCst) || self.is_paused() { return Ok(()); }
-            state.terminate_bot_chains(&chain_ids, RunStatus::Error, Some(BOT_CHAIN_TIMEOUT_ERROR), now)
-        }).await?;
+        self.store
+            .mutate(|state| {
+                // Maintenance sets its latch under this store lock as well. Direct runtime starts
+                // cannot race preparation into modifying the durable queues after it succeeded.
+                if self.closing.load(Ordering::SeqCst) || self.is_paused() {
+                    return Ok(());
+                }
+                state.terminate_bot_chains(&chain_ids, RunStatus::Error, Some(BOT_CHAIN_TIMEOUT_ERROR), now)
+            })
+            .await?;
         for run in runs {
             self.stop_run_computer(&run).await;
         }

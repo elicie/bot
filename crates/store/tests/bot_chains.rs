@@ -647,6 +647,13 @@ async fn cancelling_queued_nested_report_cancels_parent_without_publishing_provi
     let (a, ab, b, bc) = three(&f, &bots).await;
     let c = receive(&f, &bc, "C answer").await;
     finish(&f, &c, "C answer", RunStatus::Completed).await;
+    let independent = root(&f, &bots[0]).await;
+    let other = send(&f, &independent, &bots[2], "Independent root question").await.unwrap();
+    finish(&f, &independent, "Sent independently", RunStatus::Completed).await;
+    let other_recipient = receive(&f, &other, "Independent answer").await;
+    finish(&f, &other_recipient, "Independent answer", RunStatus::Completed).await;
+    let before_other = delivery(&f, &other.id);
+    assert_eq!(before_other.report.as_ref().unwrap().status, ReportStatus::Queued);
     let unrelated = root(&f, &bots[0]).await;
     let before_b = f.conversation(&b.conversation);
     let before_a = f.conversation(&a.conversation);
@@ -676,6 +683,7 @@ async fn cancelling_queued_nested_report_cancels_parent_without_publishing_provi
     assert_eq!(f.conversation(&b.conversation), expected_b, "no new run or message is created");
     assert_eq!(f.conversation(&a.conversation), before_a);
     assert_eq!(f.conversation(&unrelated.conversation), before_unrelated, "unrelated global activity is untouched");
+    assert_eq!(delivery(&f, &other.id), before_other, "cancelling a nested aggregate cannot retire an independent root's queued report");
     assert_eq!(f.store.read(|state| state.disk().bot_exchanges.clone()), before_exchanges);
     let revision = f.store.snapshot().revision;
     assert!(f.store.mutate(|state| state.cancel_bot_reports(&b.conversation, selected)).await.unwrap().is_empty());
@@ -687,6 +695,7 @@ async fn cancelling_queued_nested_report_cancels_parent_without_publishing_provi
         f.store = f.reopen().await.expect("cancelled nested report must reload without replay");
         assert_eq!(delivery(&f, &ab.id).status, DeliveryStatus::Cancelled);
         assert_eq!(delivery(&f, &bc.id).report.unwrap().status, ReportStatus::Cancelled);
+        assert_eq!(delivery(&f, &other.id), before_other, "the independent root report remains queued across recovery");
         assert_eq!(markers(&f, &b.conversation), 0);
         f.store.read(|state| {
             assert_eq!(queued_reports(&state.disk().bot_deliveries, &a.conversation).iter().map(|delivery| &delivery.id).collect::<Vec<_>>(), [&ab.id]);
