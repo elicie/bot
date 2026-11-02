@@ -19,6 +19,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Rust on the self-hosted runner: `rustup toolchain install <ver> --profile minimal -c clippy -c rustfmt`.
+  SELF_HOSTED_RUST: 1.98.0
 
 jobs:
   changes:
@@ -71,17 +73,22 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      # The self-hosted runner already has stable with clippy and rustfmt; don't touch its rustup.
+      # The self-hosted runner uses its pinned toolchain (SELF_HOSTED_RUST); don't touch its rustup.
       - if: runner.environment == 'github-hosted'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - run: cargo fmt --all --check
-      - if: needs.changes.outputs.packages != ''
-        name: Cargo target dir (persistent on self-hosted)
+      - name: Cargo target dir (persistent on self-hosted)
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then dir="$HOME/.cache/grok-bot-ci/target"; else dir="$GITHUB_WORKSPACE/target"; fi
+          if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
+            dir="$HOME/.cache/grok-bot-ci/target"
+            # A pinned toolchain installed on the runner, so its default `stable` (shared with other repos) stays untouched.
+            echo "RUSTUP_TOOLCHAIN=$SELF_HOSTED_RUST" >> "$GITHUB_ENV"
+          else
+            dir="$GITHUB_WORKSPACE/target"
+          fi
           echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
+      - run: cargo fmt --all --check
       - name: Free disk space
         if: needs.changes.outputs.packages != '' && runner.environment == 'github-hosted'
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
@@ -119,7 +126,13 @@ jobs:
       # One target dir for cargo, scripts/build-engine.mjs (defaults to engine/target), and rust-cache.
       - name: Cargo target dir (persistent on self-hosted)
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then dir="$HOME/.cache/grok-bot-ci/target"; else dir="$GITHUB_WORKSPACE/target"; fi
+          if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
+            dir="$HOME/.cache/grok-bot-ci/target"
+            # A pinned toolchain installed on the runner, so its default `stable` (shared with other repos) stays untouched.
+            echo "RUSTUP_TOOLCHAIN=$SELF_HOSTED_RUST" >> "$GITHUB_ENV"
+          else
+            dir="$GITHUB_WORKSPACE/target"
+          fi
           echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
       - if: runner.environment == 'github-hosted'
         uses: dtolnay/rust-toolchain@stable
