@@ -25,7 +25,7 @@ import type {
 } from '../shared/types';
 import { activeRun, runLabels } from './state';
 import { Avatar, ErrorNotice, IconButton } from './ui';
-import { BotMessageLinks } from './BotChat';
+import { BotMessageLinks, BotReportMarker } from './BotChat';
 import { RichMarkdown } from './RichMarkdown';
 import { AttachButton, AttachmentTray, DropOverlay, MessageAttachments, useFileDrop, type ComposerAttachments } from './Attachments';
 
@@ -316,10 +316,17 @@ export function Transcript({
               {dateKey(message.createdAt) !== dateKey(messages[index - 1]?.createdAt ?? '') && (
                 <div className="date-label">{dateKey(message.createdAt)}</div>
               )}
-              <MessageView message={message} bot={speakerFor?.(message) ?? bot} conversationId={conversation?.id} named={!!speakerFor} />
-              {data && onBotChat && <BotMessageLinks message={message} data={data} onOpen={onBotChat} />}
-              {onRoutines && <RoutineLinks message={message} onOpen={onRoutines} />}
-              {messageExtras?.(message)}
+              {message.reportDeliveryIds ? (
+                // The input of an automatic follow-up turn is app-written data: show only a marker.
+                <BotReportMarker message={message} data={data} onOpen={onBotChat} />
+              ) : (
+                <>
+                  <MessageView message={message} bot={speakerFor?.(message) ?? bot} conversationId={conversation?.id} named={!!speakerFor} />
+                  {data && onBotChat && <BotMessageLinks message={message} data={data} onOpen={onBotChat} />}
+                  {onRoutines && <RoutineLinks message={message} onOpen={onRoutines} />}
+                  {messageExtras?.(message)}
+                </>
+              )}
             </div>
           ))}
           {queuedRoutine && (
