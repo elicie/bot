@@ -3,9 +3,9 @@
 //   web=true|false      web UI typecheck and build
 //   rust=true|false     rustfmt check (and clippy/tests for `packages`)
 //   packages=...        `-p <crate>` flags of the changed crates, `--workspace` for Cargo.toml/Cargo.lock changes, or empty
-//   unit=...            frontend unit tests to run: `all`, a space-separated file list, or empty
-//   specs=...           Playwright specs to run: `all` for app/build/fixture/CI changes, changed specs otherwise
-//   release=true|false  standalone Rust release build and smoke check
+//   unit=...            frontend unit test files that changed (only those run), space-separated
+//   specs=...           Playwright spec files that changed (only those run), space-separated
+//   release=true|false  standalone Rust release build and smoke check, only for release-path changes
 // Usage: git diff --name-only <base>...HEAD | node scripts/ci-changes.mjs
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -21,9 +21,7 @@ const packageName = (dir) => {
   return manifest.match(/^\[package\][^[]*?^name\s*=\s*"([^"]+)"/ms)?.[1];
 };
 
-const frontendBuild = files.some(file => /^(index\.html|vite\.config\.[cm]?[jt]s|tsconfig[^/]*\.json|package(-lock)?\.json)$/.test(file));
-const buildOrCi = frontendBuild || under('.cargo/') || files.some(file => /^(scripts\/(cargo|rust-env|ci-changes(?:\.test)?|verify-release)\.mjs|\.github\/workflows\/ci\.yml|rust-toolchain(\.toml)?)$/.test(file));
-const web = under('web/') || under('shared/') || frontendBuild;
+const web = under('web/') || under('shared/') || files.some(file => /^(index\.html|vite\.config\.[cm]?[jt]s|tsconfig[^/]*\.json|package(-lock)?\.json)$/.test(file));
 
 const rootManifest = files.some(file => ['Cargo.toml', 'Cargo.lock'].includes(file));
 const crateDirs = new Set();
@@ -38,14 +36,12 @@ const packages = rootManifest
 // rustfmt.toml alone needs only the format check, not the crate lints and tests.
 const rust = packages !== '' || files.includes('rustfmt.toml');
 
-// Frontend code and build changes run the complete fast unit suite; isolated test edits stay targeted.
+// Pull requests check only what changed: no broadening to the whole unit or browser suite.
 // Deleted test/spec paths are deliberately ignored.
-const unit = web || buildOrCi ? 'all' : existingTests(/^tests\/[^/]+\.test\.ts$/).join(' ');
+const unit = existingTests(/^tests\/[^/]+\.test\.ts$/).join(' ');
+const specs = existingTests(/^tests\/[^/]+\.spec\.ts$/).join(' ');
 
-// Shared fixtures, app code, and build/CI changes can affect every browser spec. A spec-only change
-// still runs just that spec. This also gives the Node-backend removal a full Rust e2e run.
-const fixtures = files.some(file => ['tests/app-fixture.ts', 'tests/mock-provider.ts', 'playwright.config.ts'].includes(file));
-const release = web || buildOrCi || rootManifest || crateDirs.size > 0;
-const specs = release || fixtures ? 'all' : existingTests(/^tests\/[^/]+\.spec\.ts$/).join(' ');
+// The opt-level-3 release build is slow; run it only when the release path itself changes.
+const release = under('crates/server/') || files.some(file => ['crates/core/src/web.rs', 'scripts/verify-release.mjs'].includes(file));
 
 for (const [key, value] of Object.entries({ web, rust, packages, unit, specs, release })) console.log(`${key}=${value}`);
