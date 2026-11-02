@@ -277,6 +277,7 @@ pub fn router(ctx: Ctx) -> Router {
         .merge(crate::permission_rules::routes())
         .merge(crate::webhooks::api_routes())
         .merge(crate::chat_features::routes())
+        .merge(crate::canvas_http::routes())
         .merge(crate::groups_http::routes())
         .merge(crate::computer_http::routes())
         .merge(crate::vault_http::routes())

@@ -118,6 +118,30 @@ export interface Conversation {
   /** Group conversations: members still to answer the latest user message. */
   groupRound?: GroupRound;
   memberSessions?: { botId: string; sessionId: string; sessionFingerprint: string }[];
+  /** Conversation-owned text, independent of the connected workspace. */
+  canvas?: Canvas;
+}
+export interface CanvasVersion {
+  revision: number;
+  title: string;
+  /** `markdown`, `text`, or a code language identifier. Code is never executed. */
+  language: string;
+  content: string;
+  updatedAt: string;
+  source: 'user' | 'bot' | 'restore';
+  /** The public text contains masked secrets and cannot be safely edited/restored. */
+  redacted?: boolean;
+}
+export interface Canvas extends CanvasVersion {
+  /** Up to 20 older snapshots, in ascending revision order. */
+  history: CanvasVersion[];
+}
+export interface CanvasInput {
+  /** Zero creates the first version; every later write compares the current revision. */
+  revision: number;
+  title: string;
+  language: string;
+  content: string;
 }
 export interface ThreadLink { parentConversationId: string; parentMessageId: string }
 export interface GroupRound { id: string; userMessageId: string; pendingBotIds: string[]; createdAt: string }

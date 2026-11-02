@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 import { MessageSquareReply, MessagesSquare, X } from 'lucide-react';
 import type { AppState, Bot, Conversation, Message } from '../shared/types';
 import { request } from './api';
@@ -32,11 +32,16 @@ export function ThreadLinks({ data, conversation, message, busy, run, onSnapshot
 }
 
 /** The thread side panel next to the main chat (full screen on narrow windows). */
-export function ThreadPanel({ data, threadId, busy, online, run, onSnapshot, onClose, onSettings }: {
+export function ThreadPanel({ data, threadId, busy, online, run, onSnapshot, onClose, onSettings, canvasControl, draft: controlledDraft, onDraft }: {
   data: AppState; threadId: string; busy: boolean; online: boolean; run: Run;
   onSnapshot: (state: AppState) => void; onClose: () => void; onSettings: () => void;
+  canvasControl?: ReactNode; draft?: string; onDraft?: (draft: string) => void;
 }) {
-  const [draft, setDraft] = useState('');
+  const [localDraft, setLocalDraft] = useState('');
+  const draft = controlledDraft ?? localDraft;
+  const setDraft = onDraft ?? setLocalDraft;
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
   const thread = data.conversations.find(conversation => conversation.id === threadId && conversation.thread);
   const parent = thread && data.conversations.find(conversation => conversation.id === thread.thread!.parentConversationId);
   const parentMessage = parent?.messages.find(message => message.id === thread!.thread!.parentMessageId);
@@ -52,7 +57,7 @@ export function ThreadPanel({ data, threadId, busy, online, run, onSnapshot, onC
     if (!data.settings.baseUrl || !data.settings.model) { onSettings(); return; }
     await run('thread-message', async () => {
       onSnapshot(await request<AppState>(`/api/conversations/${encodeURIComponent(thread.id)}/messages`, { method: 'POST', body: { text } }));
-      setDraft(current => (current === draft ? '' : current));
+      if (draftRef.current === draft) setDraft('');
     });
   };
   const cancel = async () => {
@@ -67,6 +72,7 @@ export function ThreadPanel({ data, threadId, busy, online, run, onSnapshot, onC
   return <aside className="thread-panel reference-chat" aria-label="스레드">
     <header className="thread-header">
       <span><MessagesSquare size={16} />스레드{bot && <small>{bot.name}</small>}</span>
+      {canvasControl}
       <IconButton label="스레드 닫기" onClick={onClose}><X size={18} /></IconButton>
     </header>
     {!thread || !bot ? <p className="pair-empty">이 스레드를 찾을 수 없습니다.</p> : <>

@@ -185,6 +185,7 @@ mod tests {
             thread: None,
             group_round: None,
             member_sessions: None,
+            canvas: None,
         };
         AppState {
             revision: 3,

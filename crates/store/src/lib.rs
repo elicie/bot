@@ -22,6 +22,7 @@
 pub mod attachments;
 mod bot_activity;
 pub mod bot_messages;
+pub mod canvas;
 mod cron;
 mod disk;
 pub mod generated_images;
@@ -1028,6 +1029,7 @@ impl State {
             thread: None,
             group_round: None,
             member_sessions: None,
+            canvas: None,
         };
         self.disk_mut().conversations.push(conversation.clone());
         Ok(conversation)
@@ -1219,6 +1221,7 @@ impl State {
             thread: None,
             group_round: None,
             member_sessions: None,
+            canvas: None,
         };
         let run = RoutineRun {
             id: new_id(),
@@ -1448,6 +1451,7 @@ impl State {
             thread: None,
             group_round: None,
             member_sessions: None,
+            canvas: None,
         };
         let exchange = BotExchange {
             id: new_id(),

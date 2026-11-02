@@ -21,6 +21,7 @@ use super::text::utf16_len;
 use super::{Run, Runtime, message_mut};
 
 pub(super) mod bot_data;
+pub(super) mod canvas;
 pub(super) mod computer;
 pub(super) mod routines;
 
@@ -62,6 +63,7 @@ pub fn broker_tools() -> Value {
         list.splice(3..3, computer::tools());
         list.extend(bot_data::tools());
         list.extend(routines::tools());
+        list.extend(canvas::tools());
     }
     tools
 }
@@ -74,6 +76,7 @@ enum ToolCall {
     SendMessage(BotMessageInput),
     CreateBot(BotInput),
     BotData(bot_data::Call),
+    Canvas(canvas::Call),
     Computer(computer::Call),
     Routine(routines::Call),
     ListFiles { path: String },
@@ -108,6 +111,9 @@ fn parse_call(params: &Value) -> BrokerResult<ToolCall> {
     let arguments = params.get("arguments").and_then(Value::as_object).ok_or(BrokerError::Invalid)?;
     if let Some(call) = bot_data::parse(name, arguments) {
         return call.map(ToolCall::BotData);
+    }
+    if let Some(call) = canvas::parse(name, arguments) {
+        return call.map(ToolCall::Canvas);
     }
     if let Some(call) = routines::parse(name, arguments) {
         return call.map(ToolCall::Routine);
@@ -222,7 +228,7 @@ impl Runtime {
             "tools/call" => {
                 // Tool calls of one run execute in order; finishing waits for the one in progress.
                 let _turn = run.broker.lock().await;
-                let skill_result = matches!(params.get("name").and_then(Value::as_str), Some("list_skills" | "read_skill"))
+                let skill_result = matches!(params.get("name").and_then(Value::as_str), Some("list_skills" | "read_skill" | "read_canvas"))
                     || params.get("name").and_then(Value::as_str).is_some_and(|name| bot_data::NAMES.contains(&name));
                 match self.broker_call(&run, &params).await {
                     Ok(output) => {
@@ -323,6 +329,7 @@ impl Runtime {
             ToolCall::SendMessage(input) => self.send_bot_message(run, input).await,
             ToolCall::CreateBot(input) => self.create_bot(run, input).await,
             ToolCall::BotData(call) => self.bot_data_call(run, call).await,
+            ToolCall::Canvas(call) => self.canvas_call(run, call).await,
             ToolCall::Routine(call) => self.routine_call(run, call).await,
             ToolCall::Computer(call) => self.computer_call(run, call).await,
             call => self.file_call(run, call).await,
@@ -680,7 +687,9 @@ mod tests {
                 "list_routines",
                 "save_routine",
                 "set_routine_enabled",
-                "delete_routine"
+                "delete_routine",
+                "read_canvas",
+                "replace_canvas_range"
             ]
         );
         assert!(matches!(parse_call(&json!({"name": "computer_observe", "arguments": {}})), Ok(ToolCall::Computer(computer::Call::Observe))));
