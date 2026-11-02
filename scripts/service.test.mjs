@@ -134,8 +134,9 @@ async function fixture(t, { installed = true, seedConfig = true, seedData = true
         }
         case 'enable':
         case 'disable':
-          f.unitEnabled = operation === 'enable';
           f.events.push(operation);
+          if (operation === 'disable' && f.failDisable) throw new Error('fixture disable failed');
+          f.unitEnabled = operation === 'enable';
           return '';
         case 'reset-failed':
         case 'daemon-reload':
@@ -704,6 +705,33 @@ test('failed first-install backup never replaces an existing unit or starts the 
   assert.deepEqual(await entries(f.backups), []);
   await absent(f.deployment.current);
   await absent(f.deployment.lock);
+});
+
+test('first-install start or health failure disables before stopping and reports every cleanup failure', async t => {
+  for (const failure of ['start', 'health', 'stop', 'disable', 'disable and stop']) {
+    await t.test(failure, async t => {
+      const f = await fixture(t, { installed: false });
+      if (failure === 'start') f.onNewStart = () => { throw new Error('fixture first start failed'); };
+      else f.failNewHealth = true;
+      if (failure.includes('stop')) f.stopFailureState = 'active';
+      if (failure.includes('disable')) f.failDisable = true;
+      await assert.rejects(f.deployment.install(), error => {
+        assert.match(error.message, failure === 'start' ? /fixture first start failed/ : /Service did not become healthy/);
+        assert.match(error.message, /Pre-install backup: .*backup-/);
+        if (failure.includes('stop')) assert.match(error.message, /stop: fixture systemctl stop failed/);
+        if (failure.includes('disable')) assert.match(error.message, /disable: fixture disable failed/);
+        if (failure.includes('stop') || failure.includes('disable')) assert.match(error.message, /Recovery needs attention/);
+        return true;
+      });
+      assert.ok(f.events.indexOf('disable') > f.events.indexOf('start:new'));
+      assert.ok(f.events.indexOf('disable') < f.events.indexOf('stop'), 'stop failure must not prevent boot disabling');
+      assert.equal(f.unitEnabled, failure.includes('disable'));
+      assert.equal(f.serviceState, failure.includes('stop') ? 'active' : 'inactive');
+      assert.equal(f.events.filter(event => event === 'start:new').length, 1, 'cleanup must not start unverified code again');
+      assert.equal((await entries(f.backups)).filter(name => archivePattern.test(name)).length, 1);
+      await absent(f.deployment.lock);
+    });
+  }
 });
 
 test('first install refuses to overwrite an unrelated existing unit', async t => {

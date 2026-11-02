@@ -89,6 +89,16 @@ export class Deployment {
 
   ctl(...args) { return this.execute('systemctl', ['--user', ...args], { capture: true }); }
 
+  async disableAndStop() {
+    const failures = [];
+    // Disable first for reboot safety, but still try stopping if disabling itself fails.
+    for (const command of ['disable', 'stop']) {
+      try { await this.ctl(command, unit); }
+      catch (error) { failures.push(`${command}: ${error.message}`); }
+    }
+    if (failures.length) throw new Error(failures.join('; '));
+  }
+
   async loadConfig() {
     const config = parseConfig(await readFile(this.configFile, 'utf8'), this.home);
     // Resolve existing parents too: a symlink must not put the archive inside its source tree.
@@ -247,8 +257,7 @@ export class Deployment {
           } else {
             // Persistent safety: merely stopping is insufficient; an enabled unit would boot the old
             // binary against possibly migrated data after a power cycle.
-            await this.ctl('disable', unit);
-            await this.ctl('stop', unit);
+            await this.disableAndStop();
             await this.activate(previous);
             recovery = ` The service was disabled and stopped; previous release ${previous} was reselected but NOT started. Restore from ${archive} before re-enabling it (see the runbook).`;
           }
@@ -294,9 +303,10 @@ export class Deployment {
         await this.ctl('start', unit);
         await this.healthy();
       } catch (error) {
-        await this.ctl('stop', unit);
-        await this.ctl('disable', unit);
-        throw error;
+        let cleanup = '';
+        try { await this.disableAndStop(); }
+        catch (failure) { cleanup = ` Recovery needs attention: ${failure.message}`; }
+        throw new Error(`${error.message}${cleanup}${archive ? ` Pre-install backup: ${archive}` : ''}`);
       }
       if (archive) await this.prune(archive);
       return { release, archive };
