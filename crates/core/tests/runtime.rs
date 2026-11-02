@@ -718,6 +718,10 @@ async fn streamed_redaction(f: &Fixture) {
     }
 }
 
+// Keep the real-engine deadline test above ordinary CI scheduling latency. Approval holds below
+// still exceed this budget, so pause/resume assertions remain meaningful (production is unchanged).
+const TEST_INACTIVITY: Duration = Duration::from_secs(2);
+
 /// backend-runtime.test.ts: inactivity deadline, its pause during approvals, and cancellation.
 async fn deadlines_and_cancellation(f: &Fixture) {
     let id = f.conversation(&f.bot_id()).await;
@@ -739,7 +743,7 @@ async fn deadlines_and_cancellation(f: &Fixture) {
     f.provider.plan(vec![use_tool("write_file", json!({"path": "notes.txt", "content": "AI approved contents\n"})), text("Written.")]);
     f.runtime.start(&id, "write").await.unwrap();
     let pending = f.pending(&id).await;
-    tokio::time::sleep(Duration::from_millis(900)).await;
+    tokio::time::sleep(TEST_INACTIVITY + Duration::from_millis(500)).await;
     let still = f.get(&id);
     assert_eq!(still.run.status, RunStatus::AwaitingPermission);
     assert_eq!(still.run.permission.as_ref().map(|p| &p.id), pending.run.permission.as_ref().map(|p| &p.id));
@@ -752,7 +756,7 @@ async fn deadlines_and_cancellation(f: &Fixture) {
     f.provider.plan(vec![use_tool("write_file", json!({"path": "notes.txt", "content": "second\n"})), Reply::Hold]);
     f.runtime.start(&id, "write-hang").await.unwrap();
     f.pending(&id).await;
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    tokio::time::sleep(TEST_INACTIVITY + Duration::from_millis(500)).await;
     f.decide(&id, "allow_once").await;
     let failed = f.settled(&id).await;
     assert_eq!(failed.run.status, RunStatus::Error);
@@ -1319,7 +1323,7 @@ fn runtime_on_the_in_process_engine() {
         scenario!("fingerprint", Options::default(), fingerprint_migration);
         scenario!("provider-failure", Options::default(), provider_failure);
         scenario!("redaction", Options::default(), streamed_redaction);
-        scenario!("deadlines", Options { idle: Duration::from_millis(400), ..Options::default() }, deadlines_and_cancellation);
+        scenario!("deadlines", Options { idle: TEST_INACTIVITY, ..Options::default() }, deadlines_and_cancellation);
         scenario!("limits", Options::default(), write_limits_and_model_only);
         scenario!("skills", Options::default(), skills);
         scenario!("bot-messages", Options::default(), bot_messages);

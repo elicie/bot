@@ -33,9 +33,11 @@ export async function startMockProvider(options: MockProviderOptions = {}) {
       res.end(JSON.stringify({ error: { message: `Unknown fixture route: ${req.url}` } }));
       return;
     }
-    let body = '';
-    for await (const part of req) body += part.toString();
-    const request = JSON.parse(body) as MockProviderRequest;
+    // HTTP chunks may split a UTF-8 character in large model requests. Decode only after joining
+    // bytes, otherwise the fixture itself corrupts otherwise lossless canvas tool pages.
+    const parts: Buffer[] = [];
+    for await (const part of req) parts.push(Buffer.isBuffer(part) ? part : Buffer.from(part));
+    const request = JSON.parse(Buffer.concat(parts).toString('utf8')) as MockProviderRequest;
     requests.push(request);
     if (options.status) {
       res.writeHead(options.status, { 'Content-Type': 'application/json' });

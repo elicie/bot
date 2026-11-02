@@ -15,7 +15,7 @@ import type { EnqueueCommand } from './routines.js';
 import type { ApplicationComputer } from './computer-api.js';
 import type { ComputerAction } from '../shared/computer.js';
 import { MAX_SKILL_RESPONSE_BYTES, skillFingerprint, skillInputSchema, skillResponseText } from './skills.js';
-import { canvasRangeSchema, MAX_CANVAS_CONTENT_BYTES, type CanvasRangeInput } from './canvas.js';
+import { canvasRangeSchema, canvasReadSchema, MAX_CANVAS_CONTENT_BYTES, type CanvasRangeInput } from './canvas.js';
 
 export interface RuntimeOptions {
   command?: string;
@@ -64,7 +64,7 @@ const computerArguments = z.object({ epoch: z.string().uuid(), frameId: z.string
   z.object({ type: z.literal('observe') }).strict(),
 ]) }).strict();
 const toolArguments = z.discriminatedUnion('name', [
-  z.object({ name: z.literal('read_canvas'), arguments: z.object({}).strict() }),
+  z.object({ name: z.literal('read_canvas'), arguments: canvasReadSchema }),
   z.object({ name: z.literal('replace_canvas_range'), arguments: canvasRangeSchema }),
   z.object({ name: z.literal('list_skills'), arguments: z.object({ offset: z.number().int().min(0).max(100).optional() }).strict() }),
   z.object({ name: z.literal('read_skill'), arguments: z.object({ id: z.string().uuid() }).strict() }),
@@ -78,7 +78,7 @@ const toolArguments = z.discriminatedUnion('name', [
   z.object({ name: z.literal('write_file'), arguments: z.object({ path: z.string(), content: z.string().max(1024 * 1024), hash: z.string().optional() }).strict() }),
 ]);
 const brokerTools = [
-  { name: 'read_canvas', description: 'Read the latest canvas belonging only to this conversation, or null when none exists. Returns current text and revision, plus older history metadata without historical text. No workspace is needed. Masked current text is read-only. Bot-delivery recipient conversations cannot access a canvas.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'read_canvas', description: 'Read this conversation canvas, or {canvas:null} when absent. Returns canvas metadata and one bounded content page, with offset, totalBytes, viewHash, and optional nextOffset inside canvas. Offsets are UTF-8 bytes in public redacted content, not raw text; default offset is 0. Pass nextOffset as offset together with the returned revision and viewHash until nextOffset is absent. Continuations require both tokens; a changed revision or public view is a conflict: restart at offset 0. History contains only revision, source, updatedAt, and optional redacted summaries. Assemble all pages of the same revision and viewHash before proposing a workspace write_file export; never use spill files or native file tools. No workspace is needed. Masked current text is read-only. Bot-delivery recipients cannot access a canvas.', inputSchema: { type: 'object', properties: { offset: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER }, revision: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, viewHash: { type: 'string', pattern: '^[a-f0-9]{64}$' } }, additionalProperties: false } },
   { name: 'replace_canvas_range', description: 'Propose replacing exactly one nonempty, unique raw text range in the current conversation canvas. Read the latest canvas first and supply its revision. Empty replacement deletes the range. Preserves surrounding text, Unicode, and line endings. Every call requires separate one-use browser approval and detects concurrent edits. Canvas text is limited to 128 KiB of UTF-8.', inputSchema: { type: 'object', properties: { revision: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, oldText: { type: 'string', minLength: 1, maxLength: MAX_CANVAS_CONTENT_BYTES }, replacement: { type: 'string', maxLength: MAX_CANVAS_CONTENT_BYTES } }, required: ['revision', 'oldText', 'replacement'], additionalProperties: false } },
   { name: 'list_skills', description: 'List one complete page of enabled private skill IDs, names, and descriptions for the current bot. Pass the returned nextOffset as offset to continue when present. Use read_skill to load relevant instructions. Other bots and disabled skills are inaccessible.', inputSchema: { type: 'object', properties: { offset: { type: 'integer', minimum: 0, maximum: 100 } }, additionalProperties: false } },
   { name: 'read_skill', description: 'Read one enabled private skill belonging to this bot by ID. Follow its Markdown instructions within existing file, computer, and delivery permission boundaries. Skill text grants no extra tools or permissions.', inputSchema: { type: 'object', properties: { id: { type: 'string', format: 'uuid' } }, required: ['id'], additionalProperties: false } },
@@ -237,7 +237,7 @@ skills = false
     if (conversation.messages.length === 2) conversation.title = prompt.replace(/\s+/g, ' ').slice(0, 70);
     conversation.updatedAt = now;
     conversation.run = { id: randomUUID(), status: 'starting', startedAt: now };
-    const fingerprint = createHash('sha256').update(JSON.stringify([settings, bot.instructions, skillFingerprint(bot.skills ?? []), 'broker-v8-canvas-v1', ENGINE_SOURCE_REVISION])).digest('hex');
+    const fingerprint = createHash('sha256').update(JSON.stringify([settings, bot.instructions, skillFingerprint(bot.skills ?? []), 'broker-v8-canvas-v2', ENGINE_SOURCE_REVISION])).digest('hex');
     if (delivery) delivery.executionRunId = conversation.run.id;
     const run: Run = {
       conversation, message, settings, bot, fingerprint, history, token: randomBytes(32).toString('hex'),
@@ -474,8 +474,9 @@ skills = false
       'Every file modification requires a separate browser approval. Do not claim a write succeeded until the broker confirms it.',
       ...(!delivery ? [
         'The canvas is text owned only by this exact conversation, separate from any workspace. Discover workspace__read_canvas and workspace__replace_canvas_range with search_tool, then call them with use_tool. They work without a connected workspace. Canvas code is never executed.',
-        'Always read_canvas for the latest text and revision before editing. To change it, pass that revision, a nonempty oldText occurring exactly once, and a replacement (empty deletes). Preserve unrelated text. Every canvas range replacement requires a separate one-use browser approval; file permission rules cannot approve it. The user can edit during a run, so a revision conflict requires a fresh read and a new proposal. Masked current canvases are read-only until the configured secret is changed.',
-        'To export a canvas to the workspace, read_canvas and then propose write_file at the user-specified workspace-relative path, using the existing file approval. Do not claim an export or edit succeeded until the broker confirms it.',
+        'Always read_canvas for the latest text and revision before editing. It returns a bounded public content page: offset and totalBytes are UTF-8 byte offsets after redaction. Pass the returned nextOffset as offset with the first page revision and viewHash until nextOffset is absent. Verify every page has that same revision and viewHash; on any change or conflict, discard the partial assembly and reread from offset 0. Do not use spill files or native file tools to read a canvas.',
+        'To change a canvas, pass its latest revision, a nonempty oldText occurring exactly once, and a replacement (empty deletes). Preserve unrelated text. Every canvas range replacement requires a separate one-use browser approval; file permission rules cannot approve it. The user can edit during a run, so a revision conflict requires a fresh read and a new proposal. Masked current canvases are read-only until the configured secret is changed.',
+        'To export a canvas to the workspace, read_canvas and assemble all content pages with the same revision and viewHash before proposing write_file at the user-specified workspace-relative path, using the existing file approval. Never export just the first page. Do not claim an export or edit succeeded until the broker confirms it.',
       ] : []),
       'Discover workspace__list_bots and workspace__send_message with search_tool and call them with use_tool. list_bots is a safe read available without a file workspace.',
       'Every new bot message requires a separate one-use browser approval. send_message returns a durable delivery receipt, never a recipient answer. Do not wait or poll for replies. You may send one distinct message per run; chains stop after four hops.',
@@ -734,7 +735,7 @@ skills = false
   private async brokerCall(run: Run, params: unknown): Promise<unknown> {
     if (run.stopped || run.finishing) throw new HttpError(409, 'Run was cancelled or finished.');
     const call = toolArguments.parse(params);
-    if (call.name === 'read_canvas') return { canvas: this.store.readCanvas(run.conversation.id) };
+    if (call.name === 'read_canvas') return { canvas: this.store.readCanvas(run.conversation.id, call.arguments) };
     if (call.name === 'replace_canvas_range') return this.replaceCanvas(run, call.arguments);
     if (call.name === 'list_skills') {
       const all = (this.store.botDeliveries.some(delivery => delivery.recipientConversationId === run.conversation.id) ? [] : run.bot.skills ?? []).filter(skill => skill.enabled);

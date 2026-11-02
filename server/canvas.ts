@@ -1,9 +1,12 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { Canvas, CanvasInput, CanvasVersion } from '../shared/types.js';
 import { HttpError } from './files.js';
+import { skillResponseText } from './skills.js';
 
 export const MAX_CANVAS_CONTENT_BYTES = 128 * 1024;
 export const MAX_CANVAS_HISTORY = 20;
+export const MAX_CANVAS_READ_RESPONSE_BYTES = 18 * 1024;
 const revisionSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 // Unicode-mode matching rejects lone surrogates, not valid astral pairs.
 const wellFormed = (value: string) => !/[\uD800-\uDFFF]/u.test(value);
@@ -28,6 +31,12 @@ export const canvasRangeSchema = z.object({
   oldText: contentSchema.refine(value => value.length > 0, 'Choose a nonempty exact canvas range.'),
   replacement: contentSchema,
 }).strict();
+export const canvasReadSchema = z.object({
+  offset: revisionSchema.optional(),
+  revision: revisionSchema.min(1).optional(),
+  viewHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+}).strict();
+export type CanvasReadInput = z.infer<typeof canvasReadSchema>;
 export type CanvasRestoreInput = z.infer<typeof canvasRestoreSchema>;
 export type CanvasRangeInput = z.infer<typeof canvasRangeSchema>;
 const canvasVersionSchema = fieldsSchema.extend({
@@ -118,21 +127,76 @@ export function replaceCanvasRange(current: Canvas | undefined, proposal: Canvas
 }
 
 /** Keep structural metadata intact; redact only user-controlled fields, once. */
-export function publicCanvas(canvas: Canvas, secret: string): Canvas {
+function publicVersion(version: CanvasVersion, secret: string): CanvasVersion {
   const redact = (value: string) => secret ? value.split(secret).join('[redacted]') : value;
-  const project = (version: CanvasVersion): CanvasVersion => ({
+  return {
     ...versionOf(version), title: redact(version.title), language: redact(version.language), content: redact(version.content),
     ...(canvasHasSecret(version, secret) ? { redacted: true } : {}),
-  });
-  return {
-    ...project(canvas), history: canvas.history.map(project),
-    ...(canvasHasSecret(canvas, secret) ? { redacted: true } : {}),
   };
 }
 
-export type CanvasRead = Omit<Canvas, 'history'> & { history: Omit<CanvasVersion, 'content'>[] };
-export function readCanvas(canvas: Canvas | undefined, secret = ''): CanvasRead | null {
-  if (!canvas) return null;
-  const projected = publicCanvas(canvas, secret);
-  return { ...projected, history: projected.history.map(({ content: _content, ...metadata }) => metadata) };
+export function publicCanvas(canvas: Canvas, secret: string): Canvas {
+  return { ...publicVersion(canvas, secret), history: canvas.history.map(version => publicVersion(version, secret)) };
+}
+
+export type CanvasRead = Omit<Canvas, 'history'> & {
+  history: Pick<CanvasVersion, 'revision' | 'source' | 'updatedAt' | 'redacted'>[];
+  offset: number;
+  totalBytes: number;
+  viewHash: string;
+  nextOffset?: number;
+};
+export function readCanvas(canvas: Canvas | undefined, secret = '', input: CanvasReadInput = {}): CanvasRead | null {
+  const { offset = 0, revision, viewHash: expectedViewHash } = canvasReadSchema.parse(input);
+  if (offset > 0 && (revision === undefined || expectedViewHash === undefined)) {
+    throw new HttpError(400, 'Canvas continuation requires the revision and viewHash returned by the first page.');
+  }
+  if (revision !== undefined && canvas?.revision !== revision) {
+    throw new HttpError(409, 'Canvas changed. Read again from offset 0 before continuing.');
+  }
+  if (!canvas) {
+    if (expectedViewHash !== undefined) throw new HttpError(409, 'Canvas changed. Read again from offset 0 before continuing.');
+    return null;
+  }
+  const projected = publicVersion(canvas, secret);
+  // Bind both the raw document revision and its current public projection: masking can change without a save.
+  const viewHash = createHash('sha256').update(JSON.stringify([projected.title, projected.language, projected.content, Boolean(projected.redacted)])).digest('hex');
+  if (expectedViewHash !== undefined && expectedViewHash !== viewHash) {
+    throw new HttpError(409, 'The public canvas view changed. Read again from offset 0 before continuing.');
+  }
+  const bytes = Buffer.from(projected.content, 'utf8');
+  const totalBytes = bytes.length;
+  if (offset > totalBytes) throw new HttpError(400, 'Canvas offset exceeds the public UTF-8 content length.');
+  if (offset < totalBytes && (bytes[offset] & 0xc0) === 0x80) {
+    throw new HttpError(400, 'Canvas offset must be a public UTF-8 character boundary.');
+  }
+  // Bot reads do not project or expose historical titles, languages, or text. UI snapshots stay complete.
+  const history = canvas.history.map(version => ({
+    revision: version.revision, source: version.source, updatedAt: version.updatedAt,
+    ...(canvasHasSecret(version, secret) ? { redacted: true as const } : {}),
+  }));
+  const page = (end: number): CanvasRead => ({
+    ...projected, content: bytes.toString('utf8', offset, end), history, offset, totalBytes, viewHash,
+    ...(end < totalBytes ? { nextOffset: end } : {}),
+  });
+  // Measure exactly the literal-escaped MCP text, including its outer canvas wrapper and all metadata.
+  const fits = (value: CanvasRead) => Buffer.byteLength(skillResponseText({ canvas: value }), 'utf8') <= MAX_CANVAS_READ_RESPONSE_BYTES;
+  if (totalBytes - offset <= MAX_CANVAS_READ_RESPONSE_BYTES) {
+    const complete = page(totalBytes);
+    if (fits(complete)) return complete;
+  }
+  // Escaping only adds bytes. Search below EOF (where nextOffset is always present) for a fitting prefix.
+  let low = offset;
+  let high = Math.min(totalBytes - 1, offset + MAX_CANVAS_READ_RESPONSE_BYTES);
+  let best: CanvasRead | undefined;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    let end = middle;
+    while (end > offset && (bytes[end] & 0xc0) === 0x80) end--;
+    const candidate = page(end);
+    if (fits(candidate)) { best = candidate; low = middle + 1; }
+    else high = middle - 1;
+  }
+  if (!best?.content.length) throw new HttpError(413, 'Canvas metadata exceeds the complete read response limit.');
+  return best;
 }

@@ -8,7 +8,7 @@ import { atomicPrivateFile, canonicalDirectory, HttpError, isMissing, privateDir
 import { MAX_SKILLS_PER_BOT, newSkill, nextSkill, skillSchema, skillPatchSchema, validateSkillSet, type SkillInput } from './skills.js';
 import { latestRoutineTime, nextRoutineTime, routineInputSchema, routineRunSchema, routineSchema } from './routines.js';
 import { botDeliverySchema, botExchangeSchema, botMessageInputSchema, existingBotDelivery, MAX_BOT_DELIVERIES, MAX_BOT_HOPS, MAX_BOT_MESSAGE_BYTES, MAX_BOT_REPLY_CHARACTERS, reconcileBotDeliveries, validBotMessageReferences, type BotMessageInput } from './bot-messages.js';
-import { canvasSchema, prepareCanvasRange, publicCanvas, readCanvas, replaceCanvasRange, restoreCanvas, saveCanvas, type CanvasRangeInput, type CanvasRangeProposal, type CanvasRead, type CanvasRestoreInput } from './canvas.js';
+import { canvasSchema, prepareCanvasRange, publicCanvas, readCanvas, replaceCanvasRange, restoreCanvas, saveCanvas, type CanvasRangeInput, type CanvasRangeProposal, type CanvasRead, type CanvasReadInput, type CanvasRestoreInput } from './canvas.js';
 
 const toolSchema = z.object({
   id: z.string(), title: z.string(), kind: z.string(), status: z.enum(['pending', 'in_progress', 'completed', 'failed']),
@@ -253,8 +253,8 @@ export class Store {
     return conversation;
   }
 
-  readCanvas(id: string): CanvasRead | null {
-    return readCanvas(this.canvasConversation(id).canvas, this.settings.apiKey);
+  readCanvas(id: string, input: CanvasReadInput = {}): CanvasRead | null {
+    return readCanvas(this.canvasConversation(id).canvas, this.settings.apiKey, input);
   }
 
   async updateCanvas(id: string, input: CanvasInput): Promise<Canvas> {

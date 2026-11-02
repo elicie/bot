@@ -1,19 +1,31 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type { AppState, Canvas, CanvasInput, Conversation } from '../shared/types.js';
 import { createBackend } from '../server/app.js';
-import { canvasInputSchema, canvasRangeSchema, canvasRestoreSchema, canvasSchema, MAX_CANVAS_CONTENT_BYTES, prepareCanvasRange, publicCanvas, readCanvas, replaceCanvasRange, restoreCanvas, saveCanvas } from '../server/canvas.js';
+import { canvasInputSchema, canvasRangeSchema, canvasReadSchema, canvasRestoreSchema, canvasSchema, MAX_CANVAS_CONTENT_BYTES, MAX_CANVAS_READ_RESPONSE_BYTES, prepareCanvasRange, publicCanvas, readCanvas, replaceCanvasRange, restoreCanvas, saveCanvas, type CanvasRead, type CanvasReadInput } from '../server/canvas.js';
 import { HttpError } from '../server/files.js';
+import { skillResponseText } from '../server/skills.js';
 import { Store } from '../server/store.js';
 
 const timestamp = '2026-01-01T00:00:00.000Z';
 const input = (revision = 0, content = 'Initial text\r\n😀 end', title = 'Notes', language = 'text'): CanvasInput => ({ revision, title, language, content });
 const status = (expected: number) => (error: unknown) => error instanceof HttpError && error.status === expected;
+const sizedContent = (unit: string, bytes = MAX_CANVAS_CONTENT_BYTES) => {
+  const count = Math.floor(bytes / Buffer.byteLength(unit, 'utf8'));
+  return unit.repeat(count) + 'x'.repeat(bytes - count * Buffer.byteLength(unit, 'utf8'));
+};
+const mixedContent = () => sizedContent('😀α尾\r\n\t\b\f\u0001"\\DaTa:text/plain,literal;data:image/png;base64,not-an-image\n');
+const continuation = (page: CanvasRead, offset = page.nextOffset!): CanvasReadInput => ({ offset, revision: page.revision, viewHash: page.viewHash });
+const assertReadText = (text: string, expected: CanvasRead) => {
+  assert.ok(Buffer.byteLength(text, 'utf8') <= 18 * 1024, `Read response has ${Buffer.byteLength(text, 'utf8')} bytes.`);
+  assert.doesNotMatch(text, /data:/i);
+  assert.deepEqual(JSON.parse(text), { canvas: expected });
+};
 async function temporary() {
   const root = await mkdtemp(path.join(tmpdir(), 'grok-canvas-'));
   return { root, close: async () => {
@@ -59,6 +71,132 @@ test('canvas schemas enforce JS-unit titles, UTF-8 text limits, strict safe revi
     { ...second, history: Array.from({ length: 21 }, () => second.history[0]) },
     { ...first, updatedAt: 'invalid' }, { ...first, source: 'external' }, { ...first, unexpected: true },
   ]) assert.equal(canvasSchema.safeParse(bad).success, false);
+});
+
+test('canvas read schema accepts only optional safe offsets, positive revisions, and lowercase view hashes', () => {
+  assert.deepEqual(canvasReadSchema.parse({}), {});
+  assert.equal(canvasReadSchema.safeParse({ offset: Number.MAX_SAFE_INTEGER, revision: Number.MAX_SAFE_INTEGER, viewHash: 'a'.repeat(64) }).success, true);
+  for (const bad of [
+    ...[-1, 0.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN, '0', null].map(offset => ({ offset })),
+    ...[0, -1, 0.5, Number.MAX_SAFE_INTEGER + 1, Infinity, '1'].map(revision => ({ revision })),
+    ...['a'.repeat(63), 'a'.repeat(65), 'A'.repeat(64), 'g'.repeat(64), ''].map(viewHash => ({ viewHash })),
+    { conversationId: randomUUID() }, { offset: 0, unexpected: true },
+  ]) assert.equal(canvasReadSchema.safeParse(bad).success, false);
+});
+
+test('canvas reads reconstruct complete 128 KiB Unicode/control/data text from bounded literal-escaped JSON pages without exposing historical fields', () => {
+  const content = mixedContent();
+  assert.equal(Buffer.byteLength(content, 'utf8'), MAX_CANVAS_CONTENT_BYTES);
+  let canvas = saveCanvas(undefined, input(0, 'HISTORICAL_TEXT_CANARY', 'OLD_TITLE_CANARY', 'old-language'), timestamp);
+  for (let revision = 1; revision < 22; revision++) canvas = saveCanvas(canvas, input(revision, `HISTORICAL_TEXT_CANARY_${revision}`, 'OLD_TITLE_CANARY', 'old-language'), timestamp);
+  canvas = saveCanvas(canvas, input(canvas.revision, content, 'DaTa:"\t😀', 'markdown'), timestamp);
+  const before = structuredClone(canvas);
+  const chunks: string[] = [];
+  let request: CanvasReadInput = {};
+  let first: CanvasRead | undefined;
+  let last: CanvasRead;
+  do {
+    const page = readCanvas(canvas, '', request)!;
+    first ??= page;
+    assertReadText(skillResponseText({ canvas: page }), page);
+    assert.equal(page.offset, request.offset ?? 0);
+    assert.equal(page.totalBytes, MAX_CANVAS_CONTENT_BYTES);
+    assert.equal(page.revision, first.revision);
+    assert.equal(page.viewHash, first.viewHash);
+    assert.equal(page.viewHash, createHash('sha256').update(JSON.stringify([canvas.title, canvas.language, content, false])).digest('hex'));
+    assert.equal(page.history.length, 20);
+    assert.ok(page.history.every(version => Object.keys(version).sort().join(',') === 'revision,source,updatedAt'));
+    assert.doesNotMatch(skillResponseText({ canvas: page }), /HISTORICAL_TEXT_CANARY|OLD_TITLE_CANARY|old-language/);
+    const end = page.nextOffset ?? page.totalBytes;
+    assert.equal(Buffer.byteLength(page.content, 'utf8'), end - page.offset);
+    assert.equal(page.content, Buffer.from(content, 'utf8').toString('utf8', page.offset, end));
+    if (page.nextOffset !== undefined) {
+      assert.ok(page.content.length > 0);
+      assert.ok(page.nextOffset > page.offset && page.nextOffset < page.totalBytes);
+    }
+    chunks.push(page.content);
+    last = page;
+    request = continuation(page);
+    assert.ok(chunks.length < 1000, 'Each page must make progress.');
+  } while (last.nextOffset !== undefined);
+  assert.ok(chunks.length > 1);
+  assert.equal(chunks.join(''), content);
+  const eof = readCanvas(canvas, '', continuation(first!, first!.totalBytes))!;
+  assert.equal(eof.content, '');
+  assert.equal(eof.offset, MAX_CANVAS_CONTENT_BYTES);
+  assert.equal(Object.hasOwn(eof, 'nextOffset'), false);
+  assertReadText(skillResponseText({ canvas: eof }), eof);
+  assert.deepEqual(canvas, before);
+  assert.equal(MAX_CANVAS_READ_RESPONSE_BYTES, 18 * 1024);
+});
+
+test('canvas pages budget metadata, escaping and redaction expansion and return full content only when the complete response fits', () => {
+  for (const [content, secret] of [
+    ['Short 😀\r\nDaTa:text/plain,\\literal"\u0001', ''],
+    ['', ''],
+    [sizedContent('\u0001\b\f\r\n\t"\\'), ''],
+    [sizedContent('😀尾α'), ''],
+    [sizedContent('dAtA:image/png;base64,literal;data:text/plain,x\n'), ''],
+    ['q'.repeat(MAX_CANVAS_CONTENT_BYTES), 'q'],
+  ]) {
+    const canvas = saveCanvas(undefined, input(0, content, 'Title 😀\t"DaTa:', 'text'), timestamp);
+    const projected = publicCanvas(canvas, secret);
+    let request: CanvasReadInput = {};
+    const chunks: string[] = [];
+    let page: CanvasRead;
+    do {
+      page = readCanvas(canvas, secret, request)!;
+      assertReadText(skillResponseText({ canvas: page }), page);
+      assert.equal(page.totalBytes, Buffer.byteLength(projected.content, 'utf8'));
+      assert.equal(page.title, projected.title);
+      assert.equal(page.redacted, projected.redacted);
+      assert.equal(page.offset, request.offset ?? 0);
+      assert.equal(Buffer.byteLength(page.content, 'utf8'), (page.nextOffset ?? page.totalBytes) - page.offset);
+      if (page.nextOffset !== undefined) assert.ok(page.content.length > 0 && page.nextOffset > page.offset);
+      chunks.push(page.content);
+      request = continuation(page);
+      assert.ok(chunks.length < 1000);
+    } while (page.nextOffset !== undefined);
+    assert.equal(chunks.join(''), projected.content);
+    assert.equal(canvas.content, content);
+    if (Buffer.byteLength(content, 'utf8') < 100) {
+      assert.equal(chunks.length, 1);
+      assert.equal(Object.hasOwn(page, 'nextOffset'), false);
+    } else assert.ok(chunks.length > 1);
+  }
+});
+
+test('canvas offsets reject invalid UTF-8 boundaries and require both current revision and public view for continuation', () => {
+  const canvas = saveCanvas(undefined, input(0, 'A😀β尾\r\nZ'), timestamp);
+  const first = readCanvas(canvas)!;
+  for (const offset of [2, 3, 4, 6, 8, 9]) assert.throws(() => readCanvas(canvas, '', continuation(first, offset)), status(400));
+  for (const offset of [0, 1, 5, 7, 10, 11, 12, 13]) {
+    const page = readCanvas(canvas, '', continuation(first, offset))!;
+    assert.equal(page.content, Buffer.from(canvas.content, 'utf8').toString('utf8', offset));
+    assertReadText(skillResponseText({ canvas: page }), page);
+  }
+  assert.throws(() => readCanvas(canvas, '', continuation(first, first.totalBytes + 1)), status(400));
+  for (const request of [{ offset: 1 }, { offset: 1, revision: 1 }, { offset: 1, viewHash: first.viewHash }]) {
+    assert.throws(() => readCanvas(canvas, '', request), status(400));
+  }
+  assert.throws(() => readCanvas(canvas, '', { revision: 2 }), status(409));
+  assert.throws(() => readCanvas(canvas, '', { viewHash: 'f'.repeat(64) }), status(409));
+  const changed = saveCanvas(canvas, input(1, 'Changed'), timestamp);
+  assert.throws(() => readCanvas(changed, '', continuation(first, 1)), status(409));
+  assert.throws(() => readCanvas(undefined, '', continuation(first, 1)), status(409));
+  assert.throws(() => readCanvas(undefined, '', { viewHash: first.viewHash }), status(409));
+  assert.equal(readCanvas(undefined), null);
+  const masked = readCanvas(canvas, 'A')!;
+  assert.equal(masked.revision, first.revision);
+  assert.notEqual(masked.viewHash, first.viewHash);
+  assert.throws(() => readCanvas(canvas, 'A', continuation(first, 1)), status(409));
+  assert.throws(() => readCanvas(canvas, '', continuation(masked, 1)), status(409));
+  const clean = saveCanvas(canvas, input(1, 'Unchanged content'), timestamp);
+  const cleanRead = readCanvas(clean)!;
+  for (const field of ['title', 'language'] as const) {
+    const altered = { ...clean, [field]: `${clean[field]}a` };
+    assert.throws(() => readCanvas(altered, '', continuation(cleanRead, 1)), status(409));
+  }
 });
 
 test('canvas saves use CAS, no-ops retain identity, restore creates a new version, and revisions cannot overflow', () => {
@@ -172,6 +310,47 @@ test('store canvas CAS is atomic across concurrent callers, bounded history surv
     assert.deepEqual(reopened.conversation(conversation.id).canvas, conversation.canvas);
     assert.equal(reopened.conversation(conversation.id).run.status, 'interrupted');
     assert.equal(reopened.conversation(second.id).canvas!.content, second.canvas!.content);
+  } finally { await f.close(); }
+});
+
+test('store read continuations are pure, use public byte offsets, and reject secret masking changes at the same raw revision', async () => {
+  const f = await temporary();
+  try {
+    const store = await Store.open(f.root);
+    const conversation = await store.addConversation(store.bots[0].id);
+    await store.updateCanvas(conversation.id, input(0, 'old q secret', 'old q title', 'sql'));
+    await store.updateCanvas(conversation.id, input(1, `q😀${mixedContent().slice(4)}`, 'q title', 'text'));
+    const settings = { baseUrl: 'http://127.0.0.1:12345/v1', model: 'fixture', workspace: '' };
+    await store.updateSettings({ ...settings, apiKey: 'q' });
+    const revision = store.snapshot().revision;
+    const current = conversation.canvas;
+    const updatedAt = conversation.updatedAt;
+    let emissions = 0;
+    const unsubscribe = store.subscribe(() => { emissions++; });
+    const first = store.readCanvas(conversation.id)!;
+    assert.ok(first.nextOffset);
+    assert.equal(first.redacted, true);
+    assert.deepEqual(first.history, [{ revision: 1, source: 'user', updatedAt: current!.history[0].updatedAt, redacted: true }]);
+    const next = store.readCanvas(conversation.id, continuation(first))!;
+    assert.equal(next.offset, first.nextOffset);
+    assert.equal(next.revision, first.revision);
+    assert.equal(next.viewHash, first.viewHash);
+    assertReadText(skillResponseText({ canvas: first }), first);
+    assertReadText(skillResponseText({ canvas: next }), next);
+    assert.equal(store.snapshot().revision, revision);
+    assert.equal(conversation.canvas, current);
+    assert.equal(conversation.updatedAt, updatedAt);
+    assert.equal(emissions, 0);
+    unsubscribe();
+    await store.updateSettings({ ...settings, clearApiKey: true });
+    assert.equal(conversation.canvas!.revision, first.revision);
+    assert.throws(() => store.readCanvas(conversation.id, continuation(first)), status(409));
+    const unmasked = store.readCanvas(conversation.id)!;
+    assert.notEqual(unmasked.viewHash, first.viewHash);
+    assert.equal(unmasked.totalBytes, Buffer.byteLength(conversation.canvas!.content, 'utf8'));
+    await store.updateSettings({ ...settings, apiKey: 'q' });
+    assert.throws(() => store.readCanvas(conversation.id, continuation(unmasked)), status(409));
+    assert.equal(store.readCanvas(conversation.id)!.viewHash, first.viewHash);
   } finally { await f.close(); }
 });
 
@@ -307,12 +486,14 @@ async function apiFixture() {
     assert.equal((await api(`/api/conversations/${id}/messages`, { text: 'Hold this canvas test turn.' })).status, 202);
     await wait(() => backend.store.conversation(id).run.status === 'running');
   };
-  const tool = async (name: string, args: unknown): Promise<ToolResult> => {
+  const mcp = async (method: string, params?: unknown): Promise<unknown> => {
     const broker = JSON.parse(await readFile(path.join(f.root, 'broker.json'), 'utf8')) as { url: string; headers: { value: string }[] };
-    const response = await fetch(broker.url, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: broker.headers[0].value }, body: JSON.stringify({ jsonrpc: '2.0', id: randomUUID(), method: 'tools/call', params: { name, arguments: args } }) });
+    const response = await fetch(broker.url, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: broker.headers[0].value }, body: JSON.stringify({ jsonrpc: '2.0', id: randomUUID(), method, params }) });
     assert.equal(response.status, 200);
-    return (await response.json() as { result: ToolResult }).result;
+    return (await response.json() as { result: unknown }).result;
   };
+  const tool = async (name: string, args: unknown): Promise<ToolResult> => await mcp('tools/call', { name, arguments: args }) as ToolResult;
+  const tools = async () => await mcp('tools/list') as { tools: { name: string; description: string; inputSchema: Record<string, unknown> }[] };
   const pending = async () => {
     await wait(() => conversation.run.status === 'awaiting_permission');
     return structuredClone(conversation.run.permission!);
@@ -324,7 +505,7 @@ async function apiFixture() {
     assert.equal((await api(`/api/conversations/${conversation.id}/permissions/${permission.id}`, { optionId: permission.options.find(option => option.kind === (allow ? 'allow_once' : 'reject_once'))!.id })).status, 200);
     return permission;
   };
-  return { ...f, backend, api, workspace, origin, conversation, configure, save, restore, start, wait, tool, pending, approve, close: async () => { await backend.close(); await f.close(); } };
+  return { ...f, backend, api, workspace, origin, conversation, configure, save, restore, start, wait, tool, tools, pending, approve, close: async () => { await backend.close(); await f.close(); } };
 }
 const value = <T>(result: ToolResult): T => JSON.parse(result.content[0].text) as T;
 
@@ -371,9 +552,11 @@ test('authenticated canvas tools read only the exact run conversation and metada
     await f.save(input(1, 'current data:text/plain,😀\r\nline'));
     const read = await f.tool('read_canvas', {});
     assert.equal(read.isError, undefined);
-    assert.equal(value<{ canvas: Canvas }>(read).canvas.content, 'current data:text/plain,😀\r\nline');
-    assert.equal(value<{ canvas: Canvas }>(read).canvas.revision, 2);
-    assert.equal(Object.hasOwn(value<{ canvas: Canvas }>(read).canvas.history[0], 'content'), false);
+    const canvas = value<{ canvas: CanvasRead }>(read).canvas;
+    assert.equal(canvas.content, 'current data:text/plain,😀\r\nline');
+    assert.equal(canvas.revision, 2);
+    assert.deepEqual(canvas.history, [{ revision: 1, source: 'user', updatedAt: f.conversation.canvas!.history[0].updatedAt }]);
+    assertReadText(read.content[0].text, canvas);
     assert.doesNotMatch(read.content[0].text, /HISTORICAL_FULL_TEXT_CANARY|OTHER_CONVERSATION_CANARY|data:/);
     assert.equal((await f.tool('read_canvas', { conversationId: other.id })).isError, true);
     const unauthenticated = await fetch(`${f.origin}/internal/mcp/${f.conversation.run.id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) });
@@ -381,7 +564,88 @@ test('authenticated canvas tools read only the exact run conversation and metada
     const rules = await readFile(path.join(f.root, 'rules.txt'), 'utf8');
     assert.match(rules, /read_canvas/);
     assert.match(rules, /one-use browser approval/);
-    assert.match(rules, /read_canvas and then propose write_file/);
+    assert.match(rules, /returned nextOffset as offset with the first page revision and viewHash/);
+    assert.match(rules, /same revision and viewHash before proposing write_file/);
+    assert.match(rules, /reread from offset 0/);
+    assert.match(rules, /Do not use spill files or native file tools/);
+  } finally { await f.close(); }
+});
+
+test('direct canvas discovery declares strict page inputs and authenticated reads deliver complete bounded pages with revision/view conflicts', { timeout: 15000 }, async () => {
+  const f = await apiFixture();
+  try {
+    await f.configure();
+    await f.save(input(0, 'OLD_CONTENT_CANARY', 'OLD_TITLE_CANARY', 'old-language'));
+    const content = mixedContent();
+    await f.save(input(1, content, 'DaTa:text/plain,😀', 'markdown'));
+    await f.start();
+    const declaration = (await f.tools()).tools.find(tool => tool.name === 'read_canvas')!;
+    assert.deepEqual(declaration.inputSchema, {
+      type: 'object', properties: {
+        offset: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+        revision: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+        viewHash: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+      }, additionalProperties: false,
+    });
+    assert.match(declaration.description, /UTF-8 bytes in public redacted content/);
+    assert.match(declaration.description, /Pass nextOffset as offset together with the returned revision and viewHash/);
+    assert.match(declaration.description, /Assemble all pages of the same revision and viewHash/);
+    assert.match(declaration.description, /never use spill files or native file tools/);
+    const firstRead = await f.tool('read_canvas', {});
+    assert.equal(firstRead.isError, undefined);
+    const first = value<{ canvas: CanvasRead }>(firstRead).canvas;
+    assert.equal(first.offset, 0);
+    assert.equal(first.totalBytes, MAX_CANVAS_CONTENT_BYTES);
+    assert.ok(first.nextOffset);
+    const current = f.conversation.canvas;
+    const chunks: string[] = [];
+    let read = firstRead;
+    let page = first;
+    do {
+      assertReadText(read.content[0].text, page);
+      assert.equal(read.content[0].text, skillResponseText({ canvas: page }));
+      assert.equal(page.revision, 2);
+      assert.equal(page.viewHash, first.viewHash);
+      assert.doesNotMatch(read.content[0].text, /OLD_CONTENT_CANARY|OLD_TITLE_CANARY|old-language/);
+      assert.deepEqual(page.history, [{ revision: 1, source: 'user', updatedAt: current!.history[0].updatedAt }]);
+      chunks.push(page.content);
+      if (page.nextOffset === undefined) break;
+      assert.ok(page.content.length > 0);
+      const offset = page.nextOffset;
+      read = await f.tool('read_canvas', continuation(page));
+      assert.equal(read.isError, undefined);
+      page = value<{ canvas: CanvasRead }>(read).canvas;
+      assert.equal(page.offset, offset);
+      assert.ok(chunks.length < 1000);
+    } while (true);
+    assert.ok(chunks.length > 1);
+    assert.equal(chunks.join(''), content);
+    assert.equal(f.conversation.canvas, current);
+    assert.equal(f.conversation.run.permission, undefined);
+    for (const args of [
+      { offset: -1 }, { offset: 0.5 }, { offset: Number.MAX_SAFE_INTEGER + 1 }, { offset: '0' },
+      { offset: 1 }, { offset: 1, revision: first.revision }, { offset: 1, viewHash: first.viewHash },
+      continuation(first, 1), continuation(first, first.totalBytes + 1),
+      { revision: 0 }, { viewHash: 'A'.repeat(64) }, { offset: 0, unexpected: true },
+    ]) assert.equal((await f.tool('read_canvas', args)).isError, true, JSON.stringify(args));
+    const eof = await f.tool('read_canvas', continuation(first, first.totalBytes));
+    assert.equal(eof.isError, undefined);
+    const eofPage = value<{ canvas: CanvasRead }>(eof).canvas;
+    assert.equal(eofPage.content, '');
+    assert.equal(Object.hasOwn(eofPage, 'nextOffset'), false);
+    assertReadText(eof.content[0].text, eofPage);
+    const wrongView = await f.tool('read_canvas', { ...continuation(first), viewHash: 'f'.repeat(64) });
+    assert.equal(wrongView.isError, true);
+    assert.match(wrongView.content[0].text, /public canvas view changed/);
+    assert.equal((await f.save(input(2, 'new revision'))).status, 200);
+    const stale = await f.tool('read_canvas', continuation(first));
+    assert.equal(stale.isError, true);
+    assert.match(stale.content[0].text, /Canvas changed/);
+    assert.doesNotMatch(stale.content[0].text, /new revision/);
+    const latest = value<{ canvas: CanvasRead }>(await f.tool('read_canvas', {})).canvas;
+    assert.equal(latest.revision, 3);
+    assert.equal(latest.content, 'new revision');
+    assert.equal(Object.hasOwn(latest, 'nextOffset'), false);
   } finally { await f.close(); }
 });
 
@@ -568,7 +832,7 @@ test('workspace canvas export remains an ordinary approved write_file operation 
     await f.configure('', true);
     await f.save(input(0, 'Export 😀\r\ncomplete canvas\n'));
     await f.start();
-    const latest = value<{ canvas: Canvas }>(await f.tool('read_canvas', {})).canvas;
+    const latest = value<{ canvas: CanvasRead }>(await f.tool('read_canvas', {})).canvas;
     const file = value<{ hash: string }>(await f.tool('read_file', { path: 'export.txt' }));
     const denied = f.tool('write_file', { path: 'export.txt', content: latest.content, hash: file.hash });
     const permission = await f.pending();
