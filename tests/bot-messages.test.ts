@@ -140,6 +140,8 @@ test('real source engine discovers authenticated bot tools, approves a durable i
     for (const request of f.inference) assert.deepEqual(request.tools!.map(tool => tool.function.name).sort(), ['search_tool', 'todo_write', 'use_tool']);
     const fingerprint = createHash('sha256').update(JSON.stringify([f.backend.store.settings, f.sourceBot.instructions, 'broker-v2', '2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8'])).digest('hex');
     assert.notEqual(f.source.sessionFingerprint, fingerprint);
+    // Run completion is visible in memory before its queued atomic state write finishes.
+    await f.backend.store.flush();
     const reopened = await Store.open(f.dataDir);
     assert.deepEqual(reopened.botExchanges, f.backend.store.botExchanges);
     assert.deepEqual(reopened.botDeliveries, f.backend.store.botDeliveries);
