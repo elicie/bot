@@ -464,6 +464,12 @@ pub fn reconcile_bot_deliveries(
         let closed_recipient = owner.is_some_and(|owner| owner.status.is_terminal())
             || (owner.is_some() && matches!(source.run.status, RunStatus::Cancelled | RunStatus::Error | RunStatus::Interrupted));
         let terminated = deliveries.iter().find(|root| root.id == delivery.chain_id).and_then(|root| root.chain_termination.as_ref());
+        // PR9 could complete a parent while its forwarded child was still queued. Do not add
+        // even a skipped recipient report to that closed legacy conversation: the old reader
+        // rejects every recipient report. Failed recipients likewise have nothing left to consume.
+        if closed_recipient && terminated.is_none() {
+            continue;
+        }
         let used = deliveries
             .iter()
             .filter(|item| {
@@ -472,10 +478,8 @@ pub fn reconcile_bot_deliveries(
                     && item.report.as_ref().is_some_and(|report| report.status != ReportStatus::Skipped)
             })
             .count();
-        if closed_recipient || terminated.is_some() || (owner.is_none() && used >= MAX_BOT_REPORTS_PER_CHAIN) {
-            let error = terminated
-                .and_then(|termination| termination.error.clone())
-                .or_else(|| closed_recipient.then(|| "The sending recipient conversation already finished.".into()));
+        if terminated.is_some() || (owner.is_none() && used >= MAX_BOT_REPORTS_PER_CHAIN) {
+            let error = terminated.and_then(|termination| termination.error.clone());
             skip_report(&mut deliveries[index], error, now);
         } else {
             deliveries[index].report = Some(DeliveryReport::queued());

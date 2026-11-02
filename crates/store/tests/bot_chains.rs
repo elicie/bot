@@ -530,7 +530,7 @@ async fn legacy_completed_parent_with_pending_child_and_absent_reports_stays_loa
     assert_eq!(delivery(&f, &bc.id).status, DeliveryStatus::Queued);
     let c = receive(&f, &bc, "Legacy child eventually answered").await;
     finish(&f, &c, "Legacy child eventually answered", RunStatus::Completed).await;
-    assert_eq!(delivery(&f, &bc.id).report.unwrap().status, ReportStatus::Skipped, "do not reopen a closed legacy recipient");
+    assert!(delivery(&f, &bc.id).report.is_none(), "do not synthesize even a skipped report for a closed legacy recipient");
     assert!(delivery(&f, &ab.id).report.is_none(), "never synthesize absent reports on terminal legacy deliveries");
     assert_eq!(f.conversation(&b.conversation).messages.len(), 2);
     assert_eq!(exchange(&f, &ab).messages[1].text, "I need C's result");
@@ -550,7 +550,7 @@ async fn provider_failure_cancels_queued_descendants_but_reports_the_failed_pare
     assert_eq!(delivery(&f, &ab.id).status, DeliveryStatus::Error);
     assert_eq!(delivery(&f, &ab.id).report.unwrap().status, ReportStatus::Queued);
     assert_eq!(delivery(&f, &bc.id).status, DeliveryStatus::Cancelled);
-    assert_eq!(delivery(&f, &bc.id).report.unwrap().status, ReportStatus::Skipped);
+    assert!(delivery(&f, &bc.id).report.is_none(), "failed recipients do not receive a newly synthesized report");
     assert!(delivery(&f, &ab.id).chain_termination.is_none(), "a provider error must still be reportable upstream");
     roundtrip(&f).await;
 }
@@ -572,7 +572,7 @@ async fn failed_recipient_suppresses_waiting_descendants_once_and_preserves_term
     for child in [&bc, &cd] {
         let current = delivery(&f, &child.id);
         assert_eq!(current.status, DeliveryStatus::Cancelled);
-        assert_eq!(current.report.unwrap().status, ReportStatus::Skipped);
+        assert!(current.report.is_none(), "no new report is synthesized for a failed recipient");
         assert_eq!(exchange(&f, child).messages.len(), 1);
     }
     assert_eq!(f.conversation(&a.conversation), before_a);

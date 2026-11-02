@@ -122,7 +122,14 @@ pub const PRE_REPORTS_BACKUP: &str = "state.json.pre-bot-reports.bak";
 pub const PRE_BOT_CHAINS_BACKUP: &str = "state.json.pre-bot-chains.bak";
 
 fn uses_bot_chains(disk: &DiskState) -> bool {
-    disk.bot_deliveries.iter().any(|delivery| delivery.status == DeliveryStatus::WaitingChildren || delivery.chain_termination.is_some())
+    if disk.bot_deliveries.iter().any(|delivery| delivery.status == DeliveryStatus::WaitingChildren || delivery.chain_termination.is_some()) {
+        return true;
+    }
+    // Recipient reports/transcripts are also incompatible with PR9/PR24, even if their owning
+    // delivery became terminal before a waiting state or root latch was ever written.
+    let recipients: HashSet<&str> = disk.bot_deliveries.iter().map(|delivery| delivery.recipient_conversation_id.as_str()).collect();
+    disk.bot_deliveries.iter().any(|delivery| delivery.report.is_some() && recipients.contains(delivery.source_conversation_id.as_str()))
+        || disk.conversations.iter().any(|conversation| recipients.contains(conversation.id.as_str()) && conversation.messages.len() > 2)
 }
 
 fn uses_reports(disk: &DiskState) -> bool {

@@ -338,8 +338,8 @@ async fn report_capacity_rejection_is_atomic_and_leaves_the_store_writable() {
     f.reopen().await.unwrap().flush().await.unwrap();
 }
 
-// Admission is not a load-time schema restriction. Seed structurally valid legacy history with
-// extra recipient-local turns (empty report markers were accepted before this admission limit).
+// Admission is not a load-time schema restriction. Seed structurally valid historical records
+// with deleted-report tombstones; empty recipient markers represent preserved report history.
 async fn legacy_children(f: &Fixture, template: &BotDelivery, count: usize) {
     f.store
         .mutate(|s| {
@@ -461,4 +461,59 @@ async fn near_capacity_delivery_rejection_restores_links_and_includes_vault_byte
     f.store.read(|s| s.assert_writable()).unwrap();
     send(&f, &turn, &bots[1], "A short message fits").await.unwrap();
     f.store.flush().await.unwrap();
+}
+
+#[tokio::test]
+async fn closed_pr9_recipient_stays_old_readable_and_any_new_recipient_report_triggers_backup() {
+    let f = Fixture::new().await;
+    let bots = bots(&f, 3).await;
+    old_report(&f, &bots).await;
+    let legacy_backup = std::fs::read_to_string(f.data_dir.join(PRE_REPORTS_BACKUP)).unwrap();
+    let origin = root(&f, &bots[0]).await;
+    let ab = send(&f, &origin, &bots[1], "Old A asks B").await.unwrap();
+    finish(&f, &origin, "Sent").await;
+    let b = start(&f, &ab.recipient_conversation_id, Some(&ab), "Old B delegated").await;
+    let bc = send(&f, &b, &bots[2], "Old B asks C").await.unwrap();
+    // PR9 finalized AB immediately, before C ran. This is a supported old disk without a
+    // waiting state, root latch, or recipient report; the previous pre-reports backup is older.
+    let mut legacy = f.disk_json();
+    let now = f.iso_now();
+    let recipient = legacy["conversations"].as_array_mut().unwrap().iter_mut().find(|c| c["id"] == b.conversation).unwrap();
+    recipient["run"]["status"] = "completed".into();
+    recipient["run"]["finishedAt"] = now.clone().into();
+    let answer = recipient["messages"][1].clone();
+    let parent = legacy["botDeliveries"].as_array_mut().unwrap().iter_mut().find(|d| d["id"] == ab.id).unwrap();
+    parent["status"] = "completed".into();
+    parent["finishedAt"] = now.into();
+    parent.as_object_mut().unwrap().remove("report");
+    let exchange = legacy["botExchanges"].as_array_mut().unwrap().iter_mut().find(|e| e["id"] == ab.exchange_id).unwrap();
+    exchange["messages"].as_array_mut().unwrap().push(json!({
+        "id": answer["id"], "botId": bots[1], "text": answer["text"], "createdAt": answer["createdAt"],
+    }));
+    std::fs::write(f.state_file(), serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let f = Fixture { store: f.reopen().await.unwrap(), ..f };
+    assert!(!f.data_dir.join(PRE_BOT_CHAINS_BACKUP).exists());
+    let c = start(&f, &bc.recipient_conversation_id, Some(&bc), "Old C answer").await;
+    finish(&f, &c, "Old C answer").await;
+    assert!(f.store.read(|s| s.disk().bot_deliveries.iter().find(|d| d.id == bc.id).unwrap().report.is_none()));
+    assert!(!f.data_dir.join(PRE_BOT_CHAINS_BACKUP).exists(), "C's completion retained the old reader's no-recipient-report shape");
+    f.store.read(|s| {
+        let recipients: HashSet<_> = s.disk().bot_deliveries.iter().map(|d| d.recipient_conversation_id.as_str()).collect();
+        assert!(s.disk().bot_deliveries.iter().all(|d| d.report.is_none() || !recipients.contains(d.source_conversation_id.as_str())));
+        assert!(s.disk().conversations.iter().filter(|c| recipients.contains(c.id.as_str())).all(|c| c.messages.len() == 2));
+    });
+    // The migration guard independently covers recipient reports even if there was never a
+    // waiting/latch write (the incompatible skipped-report shape found during independent review).
+    let before = f.disk_text();
+    f.store
+        .mutate(|s| {
+            let delivery = s.disk_mut().bot_deliveries.iter_mut().find(|d| d.id == bc.id).unwrap();
+            delivery.report = Some(DeliveryReport { status: ReportStatus::Skipped, finished_at: Some(f.iso_now()), ..DeliveryReport::queued() });
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_backup(&f, &before, &legacy_backup);
+    assert!(!before.contains("waiting_children") && !before.contains("chainTermination"));
+    f.reopen().await.unwrap().flush().await.unwrap();
 }
