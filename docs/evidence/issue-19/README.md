@@ -4,24 +4,24 @@
 
 ## Before / After
 
-- **Before**: `95ffc46`의 실제 Node 앱. `git archive`로 분리한 변경 전 소스에서 실행했습니다.
-- **After**: `conversation-canvas-04dddb772d1b` 브랜치의 구현 커밋 `4f350417699dd39580e13c69cd6d9c0001a9d0fd`. 뒤의 증거 전용 커밋은 실행 코드를 변경하지 않습니다.
+- **Before**: 최신 기준 커밋 `d6c90d6698a890667a5edbbc3f898b53e26b09bc`의 실제 Node 앱. `git archive`로 분리한 소스에서 실행했습니다.
+- **After**: `conversation-canvas-04dddb772d1b` 브랜치의 통합 구현 커밋 `0877fc6a4ffd00325343f20fdae9ffb056533080`. 최신 기준을 통합한 뒤 같은 상황을 다시 캡처했으며 뒤의 증거 전용 커밋은 실행 코드를 변경하지 않습니다.
 - 공통 조건: Chrome, 어두운 테마, 같은 기본 Bot의 고정 모양·색상, 같은 합성 1회 대화, 같은 로컬 모의 공급자 응답. 데스크톱 **1040 × 760**, 모바일 **390 × 844**.
 - 같은 대화에서 문서 편집을 시작하는 상황입니다. 변경 전에는 캔버스 진입점·편집 영역이 없고 대화만 표시됩니다. 변경 후에는 그 대화 옆에 저장된 합성 마크다운 문서를 표시합니다. 모바일은 캔버스가 전체 너비를 사용하며 대화로 돌아갈 수 있습니다.
 
-### Desktop Before — `95ffc46`
+### Desktop Before — `d6c90d6`
 
 ![Before: 기존 대화만 표시](before-desktop.png)
 
-### Desktop After — `4f35041`
+### Desktop After — `0877fc6`
 
 ![After: 같은 대화 옆의 캔버스](after-desktop.png)
 
-### Mobile Before — `95ffc46`
+### Mobile Before — `d6c90d6`
 
 ![Before: 기존 모바일 대화](before-mobile.png)
 
-### Mobile After — `4f35041`
+### Mobile After — `0877fc6`
 
 ![After: 모바일 전체 너비 캔버스](after-mobile.png)
 
