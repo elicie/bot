@@ -6,6 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use common::{AppOptions, TestApp, raw, run};
+use grok_bot_model::{BotInput, BotMessageInput, Message, Role, RunState, RunStatus, iso, new_id};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -49,6 +50,7 @@ fn backend_api() {
         workspace_files(&root, &engine).await;
         provider_test(&root, &engine).await;
         invalid_state_and_interrupted_runs(&root, &engine).await;
+        cancel_pending_bot_reports(&root, &engine).await;
     });
 }
 
@@ -210,6 +212,84 @@ async fn provider_test(root: &Path, engine: &Path) {
     assert!(!failed.to_string().contains("super-secret-provider-body"));
     app.close().await;
     server.abort();
+}
+
+async fn cancel_pending_bot_reports(root: &Path, engine: &Path) {
+    let (data, _) = fixture(root, "cancel-bot-reports");
+    let app = TestApp::start(engine, data.clone()).await;
+    let bot = app.store.snapshot().bots[0].id.clone();
+    let recipient =
+        app.store.mutate(|s| s.add_bot(BotInput { name: "Recipient".into(), color: None, instructions: None, shape: None, pinned: None })).await.unwrap();
+    let source = app.store.mutate(|s| s.add_conversation(&bot)).await.unwrap().id;
+    // Keep the source run active so automatic dispatch cannot claim the queued report. The API
+    // must cancel pending reports without stopping this independent run or changing its history.
+    let delivery = app
+        .store
+        .mutate(|s| {
+            let now = s.now();
+            let (run_id, message_id) = (new_id(), new_id());
+            let c = s.conversation_mut(&source)?;
+            c.run = RunState { id: run_id.clone(), status: RunStatus::Running, started_at: Some(iso(now)), ..RunState::idle() };
+            c.messages.push(Message {
+                id: message_id.clone(),
+                role: Role::Assistant,
+                text: "Asked the recipient.".into(),
+                created_at: iso(now),
+                tools: vec![],
+                bot_exchange_ids: None,
+                source_bot_id: None,
+                attachments: None,
+                speaker_bot_id: None,
+                report_delivery_ids: None,
+            });
+            let delivery = s.queue_bot_message(
+                &source,
+                &run_id,
+                &message_id,
+                BotMessageInput { to_bot_id: recipient.id.clone(), text: "Question".into(), request_id: None },
+            )?;
+            s.fail_bot_delivery(&delivery.id, "Recipient could not start.", now)?;
+            Ok(delivery)
+        })
+        .await
+        .unwrap();
+    let route = format!("/api/conversations/{source}/bot-reports/cancel");
+    let before = app.store.read(|s| s.conversation(&source).unwrap().clone());
+    assert_eq!(app.store.snapshot().bot_deliveries[0].report.as_ref().unwrap().status, grok_bot_model::ReportStatus::Queued);
+    for headers in [vec![("X-Grok-Bot", "")], vec![("Origin", "http://evil.invalid")], vec![("Content-Type", "text/plain")]] {
+        assert_eq!(app.request("POST", &route, Some("{}".into()), &headers).await.0, 403);
+    }
+    assert_eq!(app.request("POST", &route, Some("{".into()), &[]).await.0, 400);
+    assert_eq!(app.api("POST", &route, Some(json!({"extra": true}))).await.0, 400);
+    let missing = format!("/api/conversations/{}/bot-reports/cancel", new_id());
+    assert_eq!(app.api("POST", &missing, Some(json!({}))).await.0, 404);
+
+    let (status, state) = app.api("POST", &route, Some(json!({}))).await;
+    assert_eq!(status, 200, "{state}");
+    assert_eq!(state["botDeliveries"][0]["id"], delivery.id);
+    assert_eq!(state["botDeliveries"][0]["report"]["status"], "cancelled");
+    assert!(state["botDeliveries"][0]["report"].get("runId").is_none());
+    assert!(state["botDeliveries"][0]["report"]["finishedAt"].is_string());
+    assert_eq!(app.store.read(|s| s.conversation(&source).unwrap().clone()), before);
+    let (status, repeated) = app.api("POST", &route, Some(json!({}))).await;
+    assert_eq!(status, 200);
+    assert_eq!(repeated, state, "cancelling again does not write or alter the finish timestamp");
+    app.store
+        .mutate(|s| {
+            let now = iso(s.now());
+            let run = &mut s.conversation_mut(&source)?.run;
+            run.status = RunStatus::Completed;
+            run.finished_at = Some(now);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    app.close().await;
+
+    let restarted = TestApp::start(engine, data).await;
+    let (_, state) = restarted.api("GET", "/api/state", None).await;
+    assert_eq!(state["botDeliveries"][0]["report"], repeated["botDeliveries"][0]["report"], "cancellation survives a backend restart");
+    restarted.close().await;
 }
 
 async fn invalid_state_and_interrupted_runs(root: &Path, engine: &Path) {
