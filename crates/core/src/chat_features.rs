@@ -36,6 +36,37 @@ pub(crate) fn routes() -> Router<Ctx> {
             post(send_with_attachments).layer(DefaultBodyLimit::max(MAX_ATTACHMENT_REQUEST_BYTES)),
         )
         .route("/conversations/{id}/attachments/{attachment_id}", get(attachment))
+        .route("/generated-images/{id}", get(generated_image))
+}
+
+/// Unreferenced generated images are kept this long: a streaming reply that links one has not been
+/// committed to a message yet.
+const GENERATED_IMAGE_GRACE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Sweep generated images that no stored message references (`grok_bot_store::generated_images`).
+pub(crate) async fn prune_generated_images(store: &std::sync::Arc<grok_bot_store::Store>) {
+    let referenced: std::collections::HashSet<String> = store.read(|s| {
+        s.disk()
+            .conversations
+            .iter()
+            .flat_map(|conversation| conversation.messages.iter())
+            .flat_map(|message| grok_bot_store::generated_images::referenced_ids(&message.text).map(str::to_owned).collect::<Vec<_>>())
+            .collect()
+    });
+    let data_dir = store.data_dir().to_path_buf();
+    let _ = tokio::task::spawn_blocking(move || grok_bot_store::generated_images::prune_generated_images(&data_dir, &referenced, GENERATED_IMAGE_GRACE)).await;
+}
+
+/// A model-generated image (`crate::provider_relay`), served like an image attachment.
+async fn generated_image(State(ctx): State<Ctx>, Path(id): Path<String>) -> ApiResult {
+    let data_dir = ctx.store.data_dir().to_path_buf();
+    let (bytes, mime) = tokio::task::spawn_blocking(move || grok_bot_store::generated_images::read_generated_image(&data_dir, &id)).await.map_err(|_| failed())??;
+    let mut response = bytes.into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+    headers.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox"));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=31536000, immutable"));
+    Ok(response)
 }
 
 #[derive(Deserialize)]
@@ -78,6 +109,7 @@ async fn delete_bot(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(id
         }
     })
     .await;
+    prune_generated_images(&ctx.store).await;
     Ok(state_reply(&ctx, StatusCode::OK, &remote))
 }
 

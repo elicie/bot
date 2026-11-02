@@ -28,8 +28,8 @@ use super::cdp::{self, CdpError, Chrome, Event};
 use super::network::{Lookup, NetworkPolicy};
 use super::proxy::{ComputerProxy, DENIED_BODY};
 use super::{
-    COMPUTER_KEYS, ComputerControl, ComputerFrame, ComputerObservation, ComputerScreenshot, ComputerService, ComputerState, ComputerStatus, VIEWPORT, VIEWPORT_HEIGHT,
-    VIEWPORT_WIDTH, is_uuid, safe_label, scripts, test_mode, utf16_len,
+    COMPUTER_KEYS, ComputerControl, ComputerFrame, ComputerObservation, ComputerScreenshot, ComputerService, ComputerState, ComputerStatus, PAGE_TEXT_LIMIT, PAGE_TEXT_NODE_LIMIT, VIEWPORT,
+    VIEWPORT_HEIGHT, VIEWPORT_WIDTH, bounded_text, is_uuid, safe_label, scripts, test_mode, utf16_len,
 };
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
@@ -378,9 +378,12 @@ fn key_definition(key: &str) -> (&'static str, &'static str, i64, &'static str) 
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct View {
     title: String,
     controls: Vec<ComputerControl>,
+    text: String,
+    text_truncated: bool,
 }
 
 #[derive(Deserialize)]
@@ -905,13 +908,14 @@ impl Core {
         let page = session.page()?;
         for _ in 0..3 {
             let navigation = session.navigation.load(Ordering::SeqCst);
-            let view = interruptible(session, evaluate(&page, &scripts::capture(&session.policy.origins))).await?;
+            let view = interruptible(session, evaluate(&page, &scripts::capture(&session.policy.origins, PAGE_TEXT_LIMIT * 2, PAGE_TEXT_NODE_LIMIT))).await?;
             let view: View = serde_json::from_value(view).map_err(|_| Fault::Other)?;
             let png = interruptible(session, screenshot(&page)).await?;
             self.assert_live(session)?;
             if navigation != session.navigation.load(Ordering::SeqCst) {
                 continue;
             }
+            let (page_text, cut) = bounded_text(&view.text, PAGE_TEXT_LIMIT);
             let frame = ComputerFrame {
                 id: new_id(),
                 epoch: session.epoch.clone(),
@@ -920,6 +924,8 @@ impl Core {
                 viewport: VIEWPORT,
                 controls: view.controls,
                 mime_type: "image/png".into(),
+                page_text,
+                text_truncated: view.text_truncated || cut,
             };
             *lock(&session.frame) = Some(frame.clone());
             return Ok((frame, png));

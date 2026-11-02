@@ -125,3 +125,36 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
     }
   });
 }
+
+// The Rust server relays provider traffic and turns OpenRouter-style `images` into stored, linked
+// images; the Node backend has no relay.
+test('provider-generated images appear in the reply and open full screen', async ({ page }) => {
+  test.skip(process.env.GROK_BOT_BACKEND !== 'rust', 'The provider relay exists only in the Rust server.');
+  const app = await startTestApp();
+  const provider = await startMockProvider({ reply: request => request.tools?.some(tool => tool.function.name === 'search_tool') ? { images: [`data:image/png;base64,${pixel}`] } : { text: '차트' } });
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    await page.goto(app.url);
+    await page.evaluate(async baseUrl => {
+      const response = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Grok-Bot': '1' }, body: JSON.stringify({ baseUrl, model: 'local-test-model', workspace: '' }) });
+      if (!response.ok) throw new Error(await response.text());
+    }, provider.baseUrl);
+    await expect(page.getByRole('heading', { name: 'Grok', exact: true })).toBeVisible();
+    await page.getByLabel('메시지', { exact: true }).fill('막대 차트로 보여줘');
+    await page.getByRole('button', { name: '메시지 보내기', exact: true }).click();
+    await expect.poll(async () => (await snapshot(page)).conversations[0]?.run.status, { timeout: 30_000 }).toBe('completed');
+    const message = page.getByRole('article', { name: 'Grok 메시지', exact: true }).last();
+    const image = message.getByRole('img', { name: '생성된 이미지', exact: true });
+    await expect(image).toBeVisible();
+    await expect.poll(() => image.evaluate((element: HTMLImageElement) => element.complete && element.naturalWidth)).toBe(1);
+    expect(await image.getAttribute('src')).toMatch(/^\/api\/generated-images\/[0-9a-f-]{36}$/);
+    await image.click();
+    await expect(page.getByRole('dialog')).toBeVisible();
+    await page.keyboard.press('Escape');
+    expect(errors).toEqual([]);
+  } finally {
+    await provider.close();
+    await app.stop();
+  }
+});

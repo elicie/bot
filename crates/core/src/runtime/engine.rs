@@ -13,6 +13,7 @@ use grok_bot_model::PrivateSettings;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use super::Runtime;
+use crate::provider_relay::RelayEndpoint;
 
 /// Engine-side alias of the single configured provider model.
 pub const MODEL_ALIAS: &str = "local";
@@ -37,14 +38,19 @@ impl ProviderKey {
 
 /// Engine configuration for one provider, matching the configuration the Node runtime generated
 /// per process (single `local` model, broker MCP tools pre-allowed, 120 s inference idle timeout).
-pub fn engine_settings(engine_root: &Path, key: &ProviderKey) -> EngineSettings {
+/// With a relay the engine talks to it (and holds only the relay token, not the provider key).
+pub fn engine_settings(engine_root: &Path, key: &ProviderKey, relay: Option<&RelayEndpoint>) -> EngineSettings {
+    let (base_url, api_key) = match relay {
+        Some(relay) => (relay.base_url.clone(), Some(relay.token.clone())),
+        None => (key.base_url.clone(), (!key.api_key.is_empty()).then(|| key.api_key.clone())),
+    };
     EngineSettings {
         grok_home: engine_root.join("home").join(".grok"),
         models: vec![ModelSpec {
             id: MODEL_ALIAS.into(),
             model: key.model.clone(),
-            base_url: key.base_url.clone(),
-            api_key: (!key.api_key.is_empty()).then(|| key.api_key.clone()),
+            base_url,
+            api_key,
         }],
         default_model: MODEL_ALIAS.into(),
         allow: vec!["MCPTool(workspace__*)".into()],
@@ -102,6 +108,7 @@ impl EngineManager {
         runtime: &Arc<Runtime>,
         engine_root: &Path,
         key: &ProviderKey,
+        relay: Option<&RelayEndpoint>,
     ) -> Result<Engine> {
         let mut slot = self.slot.lock().await;
         if let Some(current) = slot.as_ref()
@@ -112,7 +119,7 @@ impl EngineManager {
         if let Some(previous) = slot.take() {
             stop(previous.engine).await;
         }
-        let (host, events) = EngineHost::start(engine_settings(engine_root, key))
+        let (host, events) = EngineHost::start(engine_settings(engine_root, key, relay))
             .await
             .map_err(|error| anyhow!("Could not start the application engine. {error:#}"))?;
         let (barrier, barriers) = mpsc::unbounded_channel();

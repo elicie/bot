@@ -316,6 +316,42 @@ fn chrome_available() -> bool {
     available
 }
 
+/// Visible text next to everything the page-text walk must leave out: unrendered content, page
+/// scripts, and form state (prefilled, typed, selected, and editable values).
+const ARTICLE: &str = r#"<!doctype html><html><head><title>Article fixture</title><style>.gone{display:none}</style></head>
+<body style="margin:24px;font:16px sans-serif">
+<h1>Example   Domain</h1>
+<p>This domain is for use in
+   illustrative    examples in documents.</p>
+<p>Second paragraph with <b>bold</b> and <a href="/more">a link</a>.</p>
+<ul><li>First item</li><li>Second item</li></ul>
+<pre>line one
+  indented line two</pre>
+<div class="gone">hidden by class</div>
+<div hidden>hidden attribute</div>
+<div style="visibility:hidden">invisible text <span style="visibility:visible">revealed child</span></div>
+<div style="opacity:0">transparent text</div>
+<details><summary>Summary line</summary>closed details body <p>closed details paragraph</p></details>
+<noscript>noscript text</noscript>
+<template>template text</template>
+<script>window.scriptOnly = "script text";</script>
+<div id="host">unslotted light text</div>
+<label>Query <input id="query" aria-label="Query" type="text" value="prefilled-value"></label>
+<textarea aria-label="Notes">textarea-default</textarea>
+<select aria-label="Choice"><option>select-option-value</option></select>
+<form><input type="password" value="hunter2-password"></form>
+<div contenteditable="true">editable-content</div>
+<script>
+document.querySelector('#host').attachShadow({ mode: 'open' }).innerHTML = '<p>shadow paragraph</p>';
+</script>
+</body></html>"#;
+
+/// Far more than the observation limit, with multi-byte characters at the cut.
+fn long_page() -> String {
+    let paragraphs: String = (0..2000).map(|i| format!("<p>Paragraph {i} 한글 😀 filler text.</p>")).collect();
+    format!("<!doctype html><html><head><meta charset=\"utf-8\"><title>Long fixture</title></head><body>{paragraphs}</body></html>")
+}
+
 struct Fixture {
     computer: ManagedComputer,
     site: Site,
@@ -338,6 +374,8 @@ impl Fixture {
             "/download" => text("200 OK", "Content-Disposition: attachment; filename=\"denied.txt\"\r\n", "not a file"),
             "/worker.js" => text("200 OK", "Content-Type: application/javascript\r\n", "self.addEventListener(\"install\",()=>{});"),
             "/popup" => text("200 OK", "", "popup must not load"),
+            "/article" => html(ARTICLE, ""),
+            "/long" => html(&long_page(), ""),
             _ => html(
                 &format!(
                     r#"<!doctype html><html><head><title>Managed computer fixture</title></head>
@@ -460,6 +498,56 @@ async fn real_chrome_blocks_private_redirects_subresources_sensitive_controls_do
     f.computer.stop().await;
 }
 
+#[test]
+fn page_text_is_bounded_by_characters_without_splitting_one_and_keeps_only_line_breaks_and_tabs() {
+    assert_eq!(bounded_text("short\ttext\nkept", 100), ("short\ttext\nkept".to_owned(), false));
+    assert_eq!(bounded_text("a\u{0}b\u{7f}c\rd", 100), ("a b c d".to_owned(), false));
+    assert_eq!(bounded_text("한글😀abc", 3), ("한글😀".to_owned(), true));
+    assert_eq!(bounded_text("word     next", 6), ("word".to_owned(), true));
+    assert_eq!(bounded_text("exact", 5), ("exact".to_owned(), false));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_chrome_observations_carry_visible_page_text_without_hidden_text_or_form_values_and_truncate_long_pages() {
+    if !chrome_available() {
+        return;
+    }
+    let f = Fixture::new().await;
+    f.start().await;
+    let article = f.computer.perform(command(&f.computer, json!({ "type": "navigate", "url": format!("{}/article", f.site.origin) }))).await.unwrap();
+    assert_eq!(article.frame.title, "Article fixture");
+    f.click_label("Query").await.unwrap();
+    f.computer.perform(command(&f.computer, json!({ "type": "key", "key": "End" }))).await.unwrap();
+    f.computer.perform(command(&f.computer, json!({ "type": "type", "text": "typed-value" }))).await.unwrap();
+    let observed = f.computer.perform(command(&f.computer, json!({ "type": "observe" }))).await.unwrap();
+    let text = &observed.frame.page_text;
+    assert!(!observed.frame.text_truncated);
+    assert!(
+        text.starts_with("Example Domain\n\nThis domain is for use in illustrative examples in documents.\n\nSecond paragraph with bold and a link.\n\nFirst item\nSecond item\nline one\n  indented line two"),
+        "{text:?}"
+    );
+    for visible in ["revealed child", "Summary line", "shadow paragraph", "Query"] {
+        assert!(text.contains(visible), "{visible}: {text:?}");
+    }
+    for absent in [
+        "hidden by class", "hidden attribute", "invisible text", "transparent text", "closed details", "noscript text", "template text", "script text", "unslotted light text",
+        "prefilled-value", "typed-value", "textarea-default", "select-option-value", "hunter2", "editable-content",
+    ] {
+        assert!(!text.contains(absent), "{absent}: {text:?}");
+    }
+    let frame = serde_json::to_value(&observed.frame).unwrap();
+    assert_eq!(frame["pageText"], json!(text));
+    assert_eq!(frame["textTruncated"], json!(false));
+
+    let long = f.computer.perform(command(&f.computer, json!({ "type": "navigate", "url": format!("{}/long", f.site.origin) }))).await.unwrap();
+    assert!(long.frame.text_truncated);
+    assert!(long.frame.page_text.starts_with("Paragraph 0 한글 😀 filler text.\n\nParagraph 1 "), "{:?}", long.frame.page_text.chars().take(80).collect::<String>());
+    let count = long.frame.page_text.chars().count();
+    assert!((PAGE_TEXT_LIMIT - 10..=PAGE_TEXT_LIMIT).contains(&count), "{count}");
+    assert!(!long.frame.page_text.contains('\u{fffd}'));
+    f.computer.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stop_aborts_an_awaiting_navigation_and_queued_actions_and_destroys_the_upstream_connection() {
     if !chrome_available() {
@@ -556,7 +644,7 @@ impl ComputerService for Fake {
     fn screenshot(&self, _: Value) -> BoxFuture<'_, HttpResult<ComputerScreenshot>> {
         Box::pin(async move {
             let status = self.status();
-            let frame = ComputerFrame { id: status.frame_id.clone().unwrap(), epoch: status.epoch.clone(), url: "about:blank".into(), title: "Fixture".into(), viewport: VIEWPORT, controls: vec![], mime_type: "image/png".into() };
+            let frame = ComputerFrame { id: status.frame_id.clone().unwrap(), epoch: status.epoch.clone(), url: "about:blank".into(), title: "Fixture".into(), viewport: VIEWPORT, controls: vec![], mime_type: "image/png".into(), page_text: String::new(), text_truncated: false };
             Ok(ComputerScreenshot { status, frame, png: b"fixture PNG".to_vec() })
         })
     }

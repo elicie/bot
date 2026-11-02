@@ -149,7 +149,7 @@ TS 대비 의도된 차이:
 - 엔진 세션은 턴이 끝날 때 닫고 다음 턴에 디스크에서 다시 load합니다. 턴마다 MCP 브로커 주소와 토큰이 새로 발급되기 때문입니다.
 - 취소 기한 안에 엔진이 멈추지 않으면 세션을 버리고 다음 턴은 새 세션으로 시작합니다. 강제 종료할 프로세스가 없기 때문입니다.
 - 세션 fingerprint 태그를 `broker-v7-inprocess`로 바꿨습니다. 이전 엔진 세션은 load하지 않고 최근 대화 64KiB를 넘겨 이어갑니다.
-- API 키를 엔진 설정 파일(`<data>/engine/home/.grok/config.toml`, 0600)에도 저장합니다.
+- ~~API 키를 엔진 설정 파일(`<data>/engine/home/.grok/config.toml`, 0600)에도 저장합니다.~~ 2026-11-02부터 엔진은 loopback 공급자 중계기(`crates/core/src/provider_relay.rs`)와 통신하고, 설정 파일에는 프로세스마다 새로 만드는 중계기 토큰만 들어갑니다.
 - 공급자 오류 메시지에 엔진이 보고한 상세(상태 코드 등)가 함께 표시됩니다.
 - 파일 목록 정렬은 ICU `localeCompare`를 근사합니다. ASCII와 일반 문자는 같고, 드문 기호나 로캘별 규칙은 다를 수 있습니다.
 - 시간대는 chrono-tz(tz database)를 씁니다. ICU만 아는 일부 별칭(예: `US/Pacific-New`)은 거절합니다.

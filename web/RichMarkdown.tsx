@@ -122,9 +122,11 @@ const textOf = (node: HastNode): string => node.type === 'text' ? node.value ?? 
 const MAX_DATA_IMAGE = 8 * 1024 * 1024;
 const dataImage = /^data:image\/(?:png|jpeg|gif|webp|avif|bmp|svg\+xml);base64,[A-Za-z0-9+/=\s]+$/;
 const attachmentImage = /^\/api\/conversations\/[A-Za-z0-9-]{1,64}\/attachments\/[A-Za-z0-9-]{1,64}$/;
+// Images a provider model generated in a reply, stored by the server's provider relay.
+const generatedImage = /^\/api\/generated-images\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export function previewableImageSource(src: string | undefined): string | null {
   if (!src) return null;
-  if (attachmentImage.test(src)) return src;
+  if (attachmentImage.test(src) || generatedImage.test(src)) return src;
   if (src.length <= MAX_DATA_IMAGE && dataImage.test(src)) return src;
   return null;
 }

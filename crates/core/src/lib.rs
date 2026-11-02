@@ -17,6 +17,7 @@ mod http_bots;
 mod main_bot;
 pub mod permission_rules;
 pub mod provider;
+pub mod provider_relay;
 pub mod public_state;
 pub mod queue;
 pub mod runtime;

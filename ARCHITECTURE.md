@@ -78,6 +78,8 @@ Attachments are sent with `POST /api/conversations/:id/attachment-messages` (bas
 
 Assistant Markdown renders KaTeX math (`$…$`, `$$…$$`, `trust: false`) and Mermaid fences (`securityLevel: 'strict'`, shown as an `<img>` of the generated SVG). Both libraries load on first use; formulas that fail show their source, and diagrams that fail show their code. Raw HTML stays skipped.
 
+The Rust server runs the engine against a loopback provider relay (own random port, per-process bearer token) instead of the provider itself. The relay forwards requests with the real API key, which never reaches the engine configuration, streams responses through, and turns OpenRouter-style `images` (generated images with no `content`, which the engine would treat as an empty reply) into images stored under `<data>/generated-images` and linked from the reply text. Unreferenced generated images are swept after a one-hour grace period.
+
 ## File access
 
 Chat needs a configured provider and model. File access additionally needs an explicitly selected workspace. HTTP and MCP reads and writes use the same confined file service and reject symbolic links, hard links, traversal, binary documents, and oversized files. Linux opens parent directories through pinned descriptors and uses no-follow flags. Explicit Save uses a content hash to detect external changes. The agent runs in an app-private working directory and accesses the user workspace through the MCP broker. Native file tools, shell execution, subagents, and external tools are disabled. The profile declares its exact discovery/invocation tools and disables ambient instruction-file discovery. Attachment-shaped text and leading slash commands are delegated as a literal JSON string so upstream's pre-tool parser cannot expand local paths or dispatch native commands. The visible transcript preserves the original text. This is application-level confinement. It does not claim an OS sandbox against other programs running as the same user.
@@ -124,6 +126,7 @@ All JSON mutations send `Content-Type: application/json` and `X-Grok-Bot: 1`. Th
 | POST | `/api/conversations/:id/messages` | `{ text }` | `AppState`, status 202 |
 | POST | `/api/conversations/:id/attachment-messages` | `{ text, attachments: [{ name, mimeType, data }] }` (body up to about 15 MiB) | `AppState`, status 202 |
 | GET | `/api/conversations/:id/attachments/:attachmentId` | | stored bytes (`text/plain` or image) |
+| GET | `/api/generated-images/:id` | | image a provider model generated in a reply (Rust server) |
 | POST | `/api/conversations/:id/cancel` | `{}` | `AppState` |
 | POST | `/api/conversations/:id/permissions/:permissionId` | `{ optionId }` | `AppState` |
 | POST | `/api/groups` | `{ name, color?, shape?, memberBotIds }` | `{ group, state }`, status 201 |
