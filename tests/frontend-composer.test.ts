@@ -2,12 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { registerHooks } from 'node:module';
+import { register } from 'node:module';
 
 // These SSR assertions cover action availability, not styling; real-app browser tests cover CSS.
-registerHooks({ load(url, context, nextLoad) {
-  return url.endsWith('.css') ? { format: 'module', source: '', shortCircuit: true } : nextLoad(url, context);
-} });
+// register (Node 20.6+) also supports the project's Node 22.12 floor, unlike registerHooks.
+register(`data:text/javascript,${encodeURIComponent(`
+  export async function load(url, context, nextLoad) {
+    return url.endsWith('.css') ? { format: 'module', source: '', shortCircuit: true } : nextLoad(url, context);
+  }
+`)}`, import.meta.url);
 const { Composer } = await import('../web/Conversation.js');
 const { botReportDescription } = await import('../web/BotChat.js');
 
