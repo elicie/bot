@@ -124,6 +124,8 @@ HOST=0.0.0.0 PORT=7777 ./target/debug/grok-bot
 
 `npm run test:rust`는 Rust workspace 테스트를, `npm run test:e2e:rust`는 Rust 서버를 대상으로 브라우저 테스트를 실행합니다. 처음 빌드할 때는 Rust 의존성을 컴파일하므로 시간이 걸립니다.
 
+7777 서버를 상시 운영하려면 [release 사용자 서비스·백업·업데이트 안내](docs/server-operations.md)를 따릅니다. `node scripts/service.mjs install`로 release 실행·부팅 자동 시작·journald 로그를 구성하고, 이후 `node scripts/service.mjs update` 한 번으로 빌드 → 답변 실행 차단 → 데이터 백업 → 재시작 → 상태 확인을 수행합니다. 기존 debug 서버의 첫 전환과 lingering 설정은 안내의 준비 절차가 필요합니다.
+
 ## 검증 명령
 
 ```sh

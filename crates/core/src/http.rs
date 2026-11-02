@@ -191,6 +191,9 @@ async fn guard(State(ctx): State<Ctx>, request: Request, next: Next) -> Response
             return secure((StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "The server is shutting down." }))).into_response(), api);
         }
     }
+    if !matches!(*request.method(), Method::GET | Method::HEAD) && ctx.runtime.is_paused() && request.uri().path() != "/api/maintenance" {
+        return secure((StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "The server is paused for update maintenance." }))).into_response(), api);
+    }
     secure(next.run(request).await, api)
 }
 
@@ -225,6 +228,7 @@ pub fn router(ctx: Ctx) -> Router {
     // Feature modules add their `/api` routes here, one `.merge(...)` line each.
     let api = Router::new()
         .route("/state", get(get_state))
+        .route("/maintenance", post(maintenance).delete(maintenance))
         .route("/events", get(events))
         .route("/settings", axum::routing::put(put_settings))
         .route("/provider/test", post(provider_test))
@@ -286,6 +290,26 @@ async fn spa_fallback(request: Request, index: PathBuf) -> Response {
 
 async fn get_state(State(ctx): State<Ctx>, ConnectInfo(remote): Remote) -> Response {
     state_reply(&ctx, StatusCode::OK, &remote)
+}
+
+/// The updater prepares under the same queue as every turn admission, then stops the service before
+/// copying data. Maintenance is reversible until shutdown, and does not cancel durable queued work.
+async fn maintenance(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, method: Method, body: Result<JsonBody<Empty>, ApiError>) -> ApiResult {
+    if !is_local(&remote) {
+        return Err(ApiError(HttpError::forbidden("Update maintenance requires a local loopback connection.")));
+    }
+    let JsonBody(_) = body?;
+    let paused = method == Method::POST;
+    ctx.queue
+        .run(async {
+            if ctx.closing.load(Ordering::SeqCst) {
+                return Err(HttpError::unavailable("The server is shutting down."));
+            }
+            if paused { ctx.runtime.pause_if_idle() } else { ctx.runtime.resume() }
+        })
+        .await?;
+    let body = if paused { json!({ "maintenance": true, "dataDir": ctx.store.data_dir() }) } else { json!({ "maintenance": false }) };
+    Ok(Json(body).into_response())
 }
 
 async fn events(State(ctx): State<Ctx>, ConnectInfo(remote): Remote) -> impl IntoResponse {
