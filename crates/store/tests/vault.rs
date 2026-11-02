@@ -229,6 +229,67 @@ async fn mcp_drafts_resolve_scopes_and_ephemeral_secrets_without_mutating_the_st
 }
 
 #[tokio::test]
+async fn form_credentials_and_servers_commit_together_or_leave_no_changes() {
+    let f = Fixture::new().await;
+    let bot = f.bot_id();
+    let document = r#"{"draft":{"url":"https://example.com/mcp","headers":{"X":"${secret:NEW_TOKEN}"}}}"#;
+    let original = f.disk_text();
+    let before = serde_json::to_value(f.store.snapshot()).unwrap();
+    let mut events = f.store.subscribe();
+    for (json, inputs) in [
+        ("{", vec![secret("NEW_TOKEN", VALUE, Some(&bot))]),
+        (document, vec![secret("NEW_TOKEN", VALUE, Some(&bot)), secret("NEW_TOKEN", "duplicate-value", Some(&bot))]),
+        (document, vec![secret("NEW_TOKEN", VALUE, Some(&bot)), secret("UNUSED_TOKEN", "unused-value", Some(&bot))]),
+        (document, vec![secret("NEW_TOKEN", "short", Some(&bot))]),
+        (document, vec![secret("NEW_TOKEN", VALUE, Some(&new_id()))]),
+    ] {
+        assert!(f.store.mutate(|s| s.set_mcp_servers_with_secrets(&bot, json, &inputs, true)).await.is_err());
+        assert_eq!(serde_json::to_value(f.store.snapshot()).unwrap(), before);
+        assert_eq!(f.disk_text(), original);
+        assert!(events.try_recv().is_err(), "failed batch never commits or broadcasts partial secrets");
+    }
+    assert_eq!(f.store.mutate(|s| s.set_mcp_servers_with_secrets(&bot, document, &[secret("NEW_TOKEN", VALUE, None)], false)).await.unwrap_err().status, 403);
+    f.store.mutate(|s| s.set_mcp_servers_with_secrets(&bot, document, &[secret("NEW_TOKEN", VALUE, None)], true)).await.unwrap();
+    let state = f.store.snapshot();
+    assert_eq!(state.secrets.len(), 1);
+    assert_eq!(state.secrets[0].bot_id.as_deref(), Some(bot.as_str()));
+    assert_eq!(state.mcp_servers.len(), 1);
+    assert!(!state.mcp_servers[0].enabled);
+    assert_eq!(state.mcp_servers[0].secret_refs, ["NEW_TOKEN"]);
+    assert!(!serde_json::to_string(&state).unwrap().contains(VALUE));
+    assert_eq!(state.revision, serde_json::from_value::<grok_bot_model::AppState>(before).unwrap().revision + 1);
+    assert!(events.try_recv().is_ok());
+    assert!(events.try_recv().is_err(), "batch emits one complete state, not a partial-secret event");
+    f.reopen().await.unwrap();
+}
+
+#[tokio::test]
+async fn probe_errors_name_the_invalid_field_without_echoing_credential_material() {
+    let f = Fixture::new().await;
+    let bot = f.bot_id();
+    for (document, field) in [
+        (json!({"workspace-canary-secret": {"url":"https://example.com"}}), "이름(name)"),
+        (json!({"draft":{"command":"./credential-canary"}}), "명령(command)"),
+        (json!({"draft":{"command":"node","args":[""]}}), "인자(args)"),
+        (json!({"draft":{"command":"node","args":["   "]}}), "인자(args)"),
+        (json!({"draft":{"command":"node","args":[false]}}), "인자(args)"),
+        (json!({"draft":{"url":"https://user:credential-canary@example.com"}}), "URL(url)"),
+        (json!({"draft":{"url":"https://example.com","headers":{"bad credential-canary":"secret-value"}}}), "헤더(headers)"),
+        (json!({"draft":{"command":"node","env":{"TOKEN":"${secret:MISSING}"}}}), "환경 변수(env)"),
+        (json!({"draft":{"url":"https://example.com","credential-canary":true}}), "JSON(json)"),
+    ] {
+        let error = f.store.read(|s| s.resolve_mcp_draft(&bot, &document.to_string(), &[], true)).unwrap_err();
+        assert_eq!(error.status, 400);
+        assert!(error.message.contains(field), "{field}: {}", error.message);
+        for value in ["credential-canary", "secret-value", "MISSING", "workspace-canary-secret"] {
+            assert!(!error.message.contains(value));
+        }
+    }
+    // Advanced JSON callers retain intentional empty argv; the form/probe alone rejects blank rows.
+    f.store.mutate(|s| s.set_mcp_servers(&bot, r#"{"legacy":{"command":"node","args":[""]}}"#, true)).await.unwrap();
+}
+
+#[tokio::test]
 async fn bot_deletion_removes_its_secrets_and_servers() {
     let f = Fixture::new().await;
     let other = f.store.mutate(|s| s.add_bot(BotInput { name: "Other".into(), color: None, instructions: None, shape: None, pinned: None })).await.unwrap().id;

@@ -654,7 +654,12 @@ async fn cancelling_queued_nested_report_cancels_parent_without_publishing_provi
     let before_exchanges = f.store.read(|state| state.disk().bot_exchanges.clone());
 
     f.set_time("2026-01-01T00:01:00.000Z");
-    f.store.mutate(|state| state.cancel_bot_reports(&b.conversation)).await.unwrap();
+    let before_selection = f.store.read(|state| state.disk().clone());
+    assert_eq!(f.store.mutate(|state| state.cancel_bot_reports(&b.conversation, &[])).await.unwrap_err().status, 400);
+    assert!(f.store.mutate(|state| state.cancel_bot_reports(&b.conversation, &[new_id()])).await.unwrap().is_empty());
+    assert_eq!(f.store.read(|state| state.disk().clone()), before_selection, "invalid and unmatched selections cannot cancel a waiting aggregate");
+    let selected = std::slice::from_ref(&bc.id);
+    assert_eq!(f.store.mutate(|state| state.cancel_bot_reports(&b.conversation, selected)).await.unwrap(), selected);
     let cancelled = delivery(&f, &bc.id);
     assert_eq!(cancelled.status, DeliveryStatus::Completed, "the child's completed exchange is historical");
     assert_eq!(cancelled.report.unwrap(), DeliveryReport { status: ReportStatus::Cancelled, finished_at: Some(f.iso_now()), ..DeliveryReport::queued() });
@@ -673,7 +678,7 @@ async fn cancelling_queued_nested_report_cancels_parent_without_publishing_provi
     assert_eq!(f.conversation(&unrelated.conversation), before_unrelated, "unrelated global activity is untouched");
     assert_eq!(f.store.read(|state| state.disk().bot_exchanges.clone()), before_exchanges);
     let revision = f.store.snapshot().revision;
-    f.store.mutate(|state| state.cancel_bot_reports(&b.conversation)).await.unwrap();
+    assert!(f.store.mutate(|state| state.cancel_bot_reports(&b.conversation, selected)).await.unwrap().is_empty());
     assert_eq!(f.store.snapshot().revision, revision, "cancellation is idempotent");
     roundtrip(&f).await;
 
@@ -728,7 +733,11 @@ async fn cancelling_next_nested_report_preserves_previous_completed_receipt_and_
     let history = f.conversation(&b.conversation).messages;
 
     f.set_time("2026-01-01T00:02:00.000Z");
-    f.store.mutate(|state| state.cancel_bot_reports(&b.conversation)).await.unwrap();
+    let before_selection = f.store.read(|state| state.disk().clone());
+    assert!(f.store.mutate(|state| state.cancel_bot_reports(&b.conversation, std::slice::from_ref(&bc.id))).await.unwrap().is_empty());
+    assert_eq!(f.store.read(|state| state.disk().clone()), before_selection, "selecting an already completed report must leave B waiting for D");
+    let requested = [bc.id.clone(), bd.id.clone(), bd.id.clone(), new_id()];
+    assert_eq!(f.store.mutate(|state| state.cancel_bot_reports(&b.conversation, &requested)).await.unwrap(), std::slice::from_ref(&bd.id));
     assert_eq!(delivery(&f, &bc.id).report.unwrap(), consumed, "a prior consumed report is immutable");
     assert_eq!(delivery(&f, &bd.id).report.unwrap().status, ReportStatus::Cancelled);
     assert_eq!(delivery(&f, &ab.id).status, DeliveryStatus::Cancelled);

@@ -213,7 +213,41 @@ fn no_secret_reference(server: &str, field: &str, value: &str) -> HttpResult<()>
     Ok(())
 }
 
-fn server_config(name: &str, value: &Value) -> HttpResult<McpServerConfig> {
+#[derive(Clone, Copy, Default)]
+enum McpField {
+    #[default]
+    Json,
+    Name,
+    Transport,
+    Command,
+    Args,
+    Env,
+    Url,
+    Headers,
+}
+
+impl McpField {
+    /// Static field labels and recovery hints: never echo peer-supplied keys, URLs or values.
+    fn message(self) -> &'static str {
+        match self {
+            Self::Json => "MCP 구성 JSON(json): 서버 이름을 키로 하는 객체와 지원하는 항목을 확인해 주세요. JSON은 64 KiB 이하여야 해요.",
+            Self::Name => "서버 이름(name): 소문자·숫자로 시작하는 32자 이하 이름을 쓰고, __와 workspace로 시작하는 이름은 피해주세요.",
+            Self::Transport => "서버 종류(type): 로컬 명령(command·args·env) 또는 원격 URL(url·headers) 중 하나만 입력해 주세요.",
+            Self::Command => {
+                "명령(command): PATH의 실행 파일 이름이나 절대 경로를 입력해 주세요. 비어 있거나 시크릿 참조·제어 문자를 포함할 수 없고 최대 1,024자예요."
+            }
+            Self::Args => "인자(args): 빈 칸은 삭제하거나 값을 입력해 주세요. 인자는 최대 64개, 각 4,096자 이하의 문자열이며 시크릿 참조와 NUL은 쓸 수 없어요.",
+            Self::Env => "환경 변수(env): 항목 이름·값·시크릿 참조를 확인해 주세요. 최대 64개, 값은 제어 문자 없이 8,192자 이하여야 해요.",
+            Self::Url => "서버 URL(url): 인증 정보와 # 없이 http:// 또는 https://로 시작하는 2,048자 이하 주소를 입력해 주세요.",
+            Self::Headers => {
+                "헤더(headers): 이름·값·시크릿 참조와 대소문자 구분 없는 중복을 확인해 주세요. 최대 64개, 값은 제어 문자 없이 8,192자 이하여야 해요."
+            }
+        }
+    }
+}
+
+fn server_config(name: &str, value: &Value, field: &mut McpField) -> HttpResult<McpServerConfig> {
+    *field = McpField::Json;
     let Value::Object(entry) = value else {
         return Err(bad(format!("서버 \"{name}\"의 구성이 올바르지 않아요. 객체여야 해요.")));
     };
@@ -222,6 +256,7 @@ fn server_config(name: &str, value: &Value) -> HttpResult<McpServerConfig> {
             return Err(bad(format!("서버 \"{name}\"의 구성이 올바르지 않아요. 알 수 없는 항목 \"{key}\"이(가) 있어요.")));
         }
     }
+    *field = McpField::Transport;
     let kind = match entry.get("type") {
         None => None,
         Some(Value::String(kind)) => match kind.as_str() {
@@ -239,6 +274,7 @@ fn server_config(name: &str, value: &Value) -> HttpResult<McpServerConfig> {
             if kind == Some(McpTransportKind::Http) || entry.contains_key("headers") {
                 return Err(bad(format!("서버 \"{name}\": 명령(stdio) 서버에는 type http나 headers를 쓸 수 없어요.")));
             }
+            *field = McpField::Command;
             let Value::String(command) = command else {
                 return Err(bad(format!("\"{name}\".command: 문자열이어야 해요.")));
             };
@@ -250,6 +286,7 @@ fn server_config(name: &str, value: &Value) -> HttpResult<McpServerConfig> {
             if command.contains('/') && !command.starts_with('/') {
                 return Err(bad(format!("\"{name}\".command: 명령은 절대 경로이거나 PATH에서 찾을 이름이어야 해요.")));
             }
+            *field = McpField::Args;
             let args = match entry.get("args") {
                 None => Vec::new(),
                 Some(Value::Array(items)) => {
@@ -271,6 +308,7 @@ fn server_config(name: &str, value: &Value) -> HttpResult<McpServerConfig> {
                 }
                 Some(_) => return Err(bad(format!("\"{name}\".args: 문자열 배열이어야 해요."))),
             };
+            *field = McpField::Env;
             let env = pairs(name, "env", entry.get("env"), false)?;
             Ok(McpServerConfig::Stdio { command: command.to_owned(), args, env })
         }
@@ -278,6 +316,7 @@ fn server_config(name: &str, value: &Value) -> HttpResult<McpServerConfig> {
             if kind == Some(McpTransportKind::Stdio) || entry.contains_key("args") || entry.contains_key("env") {
                 return Err(bad(format!("서버 \"{name}\": URL(http) 서버에는 type stdio, args, env를 쓸 수 없어요.")));
             }
+            *field = McpField::Url;
             let Value::String(url) = url else {
                 return Err(bad(format!("\"{name}\".url: 문자열이어야 해요.")));
             };
@@ -293,6 +332,7 @@ fn server_config(name: &str, value: &Value) -> HttpResult<McpServerConfig> {
             if parsed.is_none() || js_len(url) > MAX_URL_CHARS {
                 return Err(bad(format!("\"{name}\".url: 인증 정보와 # 없이 http:// 또는 https://로 시작하는 {MAX_URL_CHARS}자 이하의 서버 URL이어야 해요.")));
             }
+            *field = McpField::Headers;
             let headers = pairs(name, "headers", entry.get("headers"), true)?;
             Ok(McpServerConfig::Http { url: url.to_owned(), headers })
         }
@@ -302,6 +342,11 @@ fn server_config(name: &str, value: &Value) -> HttpResult<McpServerConfig> {
 /// Parse and validate an "MCP 서버 JSON" document: `{"mcpServers": {...}}` or the bare server
 /// object. Returns the servers sorted by name.
 pub fn parse_mcp_json(text: &str) -> HttpResult<Vec<(String, McpServerConfig)>> {
+    parse_mcp_json_field(text, &mut McpField::Json)
+}
+
+fn parse_mcp_json_field(text: &str, field: &mut McpField) -> HttpResult<Vec<(String, McpServerConfig)>> {
+    *field = McpField::Json;
     if text.len() > MAX_MCP_JSON_BYTES {
         return Err(HttpError::too_large(format!("MCP 서버 JSON은 {} KiB 이하여야 해요.", MAX_MCP_JSON_BYTES / 1024)));
     }
@@ -330,6 +375,7 @@ pub fn parse_mcp_json(text: &str) -> HttpResult<Vec<(String, McpServerConfig)>> 
     }
     let mut parsed = BTreeMap::new();
     for (name, value) in &servers {
+        *field = McpField::Name;
         let trimmed = js_trim(name);
         if trimmed.is_empty() {
             return Err(bad("서버 이름은 비워 둘 수 없어요"));
@@ -339,7 +385,8 @@ pub fn parse_mcp_json(text: &str) -> HttpResult<Vec<(String, McpServerConfig)>> 
                 "서버 이름 \"{trimmed}\"을(를) 쓸 수 없어요. 소문자, 숫자, -, _로 된 32자 이하 이름을 쓰고(__ 제외), workspace로 시작하지 않게 해 주세요."
             )));
         }
-        let config = server_config(trimmed, value)?;
+        let config = server_config(trimmed, value, field)?;
+        *field = McpField::Name;
         if parsed.insert(trimmed.to_owned(), config).is_some() {
             return Err(bad(format!("서버 이름 \"{trimmed}\"이(가) 중복되었어요.")));
         }
@@ -634,6 +681,44 @@ impl State {
         Ok(())
     }
 
+    /// Save a form's new credentials and configuration in one store mutation/state-file write.
+    /// Existing `{json}` callers keep the exact JSON editor contract (including literal argv).
+    pub fn set_mcp_servers_with_secrets(&mut self, bot_id: &str, json: &str, secrets: &[SecretInput], local: bool) -> HttpResult<()> {
+        if secrets.is_empty() {
+            return self.set_mcp_servers(bot_id, json, local);
+        }
+        require_local(local, MCP_REQUIRES_LOOPBACK)?;
+        self.assert_idle()?;
+        self.bot(bot_id)?;
+        let mut field = McpField::Json;
+        let parsed = parse_mcp_json_field(json, &mut field).map_err(|error| HttpError::new(error.status, field.message()))?;
+        if secrets.len() > MAX_SECRETS {
+            return Err(bad("새 시크릿(secrets): 항목이 너무 많아요."));
+        }
+        let referenced: HashSet<String> = parsed.iter().flat_map(|(_, config)| config_references(config)).collect();
+        // Checkpoint only the two collections this module mutates, not unrelated app state.
+        let previous = (self.disk.secrets.clone(), self.disk.mcp_servers.clone(), self.dirty);
+        let result = (|| {
+            for input in secrets {
+                if input.bot_id.as_deref().is_some_and(|scope| scope != bot_id) || !referenced.contains(js_trim(&input.name)) {
+                    return Err(bad("새 시크릿(secrets): 현재 Bot의 구성에서 참조하는 값만 저장할 수 있어요."));
+                }
+                secret_name(&input.name).map_err(|error| {
+                    HttpError::new(error.status, "새 시크릿 이름(secrets.name): A-Z로 시작하는 A-Z, 0-9, _ 이름을 64자 이내로 입력해 주세요.")
+                })?;
+                secret_value(&input.value)
+                    .map_err(|error| HttpError::new(error.status, "새 시크릿 값(secrets.value): 제어 문자 없이 8~8,192자로 입력해 주세요."))?;
+                self.add_secret(SecretInput { bot_id: Some(bot_id.into()), ..input.clone() }, local)
+                    .map_err(|error| HttpError::new(error.status, "새 시크릿 이름(secrets.name): 같은 이름의 Bot 시크릿이 있거나 보관함이 가득 찼어요."))?;
+            }
+            self.set_mcp_servers(bot_id, json, local)
+        })();
+        if result.is_err() {
+            (self.disk.secrets, self.disk.mcp_servers, self.dirty) = previous;
+        }
+        result
+    }
+
     /// Turn one server on or off. Enabling needs a loopback client; disabling is allowed from any
     /// client (it only removes capability).
     pub fn set_mcp_server_enabled(&mut self, bot_id: &str, name: &str, enabled: bool, local: bool) -> HttpResult<()> {
@@ -678,7 +763,8 @@ impl State {
         self.assert_idle()?;
         self.bot(bot_id)?;
         // Parser diagnostics may contain literal credentials from the draft (e.g. unknown keys).
-        let mut parsed = parse_mcp_json(json).map_err(|error| HttpError::new(error.status, "MCP 구성 오류: 올바른 MCP 서버 JSON을 입력해 주세요."))?;
+        let mut field = McpField::Json;
+        let mut parsed = parse_mcp_json_field(json, &mut field).map_err(|error| HttpError::new(error.status, field.message()))?;
         if parsed.len() != 1 {
             return Err(bad("MCP 구성 오류: 연결 테스트에는 서버를 정확히 하나만 넣어 주세요."));
         }
@@ -690,8 +776,10 @@ impl State {
             if input.bot_id.as_deref().is_some_and(|scope| scope != bot_id) {
                 return Err(bad("MCP 시크릿 오류: 현재 Bot의 시크릿만 테스트할 수 있어요."));
             }
-            let name = secret_name(&input.name)?;
-            let value = secret_value(&input.value)?;
+            let name = secret_name(&input.name)
+                .map_err(|error| HttpError::new(error.status, "새 시크릿 이름(secrets.name): A-Z로 시작하는 A-Z, 0-9, _ 이름을 64자 이내로 입력해 주세요."))?;
+            let value = secret_value(&input.value)
+                .map_err(|error| HttpError::new(error.status, "새 시크릿 값(secrets.value): 제어 문자 없이 8~8,192자로 입력해 주세요."))?;
             if self.disk.secrets.iter().any(|secret| secret.name == name && secret.bot_id.as_deref() == Some(bot_id)) {
                 return Err(HttpError::conflict("MCP 시크릿 오류: 현재 Bot에 같은 이름의 시크릿이 이미 있어요."));
             }
@@ -709,8 +797,17 @@ impl State {
                 .or_else(|| self.disk.secrets.iter().find(|secret| secret.name == name && secret.bot_id.is_none()).map(|secret| secret.value.as_str()))
         };
         let (name, config) = parsed.pop().expect("exactly one validated server");
+        if let McpServerConfig::Stdio { args, .. } = &config
+            && args.iter().any(|arg| js_trim(arg).is_empty())
+        {
+            return Err(bad(McpField::Args.message()));
+        }
+        let field = match config {
+            McpServerConfig::Stdio { .. } => "환경 변수(env)",
+            McpServerConfig::Http { .. } => "헤더(headers)",
+        };
         let config =
-            resolve_mcp_config(&config, lookup).map_err(|_| bad("MCP 시크릿 오류: 참조한 시크릿이 없어요. 보관함 또는 테스트 시크릿을 확인해 주세요."))?;
+            resolve_mcp_config(&config, lookup).map_err(|_| bad(format!("{field}: 참조한 시크릿이 없어요. 보관함 또는 테스트 시크릿을 확인해 주세요.")))?;
         Ok(ResolvedMcpServer { name, config })
     }
 

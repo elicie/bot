@@ -592,9 +592,12 @@ async fn cancelling_queued_reports_is_scoped_idempotent_and_survives_restart() {
 
     f.set_time("2026-01-01T00:01:00.000Z");
     let before = f.store.read(|s| s.disk().clone());
-    f.store.mutate(|s| s.cancel_bot_reports(&x.source)).await.unwrap();
+    let requested =
+        [cancelled.clone(), vec![cancelled[0].clone(), completed.id.clone(), pending.id.clone(), other.id.clone(), running.id.clone(), new_id()]].concat();
+    let actual = f.store.mutate(|s| s.cancel_bot_reports(&x.source, &requested)).await.unwrap();
+    assert_eq!(actual, cancelled, "only still-queued requested IDs are returned, once each");
     let after = f.store.read(|s| s.disk().clone());
-    assert_eq!(after.revision, before.revision + 1, "one durable mutation cancels every queued report");
+    assert_eq!(after.revision, before.revision + 1, "one durable mutation cancels the selected queued reports");
     assert_eq!(after.conversations, before.conversations, "no run or hidden report message is created or changed");
     assert_eq!(after.bot_exchanges, before.bot_exchanges, "recipient answers stay in their exchanges");
     let mut expected = before.bot_deliveries;
@@ -609,11 +612,11 @@ async fn cancelling_queued_reports_is_scoped_idempotent_and_survives_restart() {
     assert_eq!((delivery_status(&f, &pending.id), report_of(&f, &pending.id)), (DeliveryStatus::Queued, None));
 
     let revision = after.revision;
-    f.store.mutate(|s| s.cancel_bot_reports(&x.source)).await.unwrap();
-    f.store.mutate(|s| s.cancel_bot_reports(&z.source)).await.unwrap();
+    assert!(f.store.mutate(|s| s.cancel_bot_reports(&x.source, &requested)).await.unwrap().is_empty());
+    assert!(f.store.mutate(|s| s.cancel_bot_reports(&z.source, std::slice::from_ref(&running.id))).await.unwrap().is_empty());
     assert_eq!(f.store.snapshot().revision, revision, "repeated cancellation and a running-only report are no-ops");
     let missing = new_id();
-    assert_eq!(f.store.mutate(|s| s.cancel_bot_reports(&missing)).await.unwrap_err().status, 404);
+    assert_eq!(f.store.mutate(|s| s.cancel_bot_reports(&missing, &requested)).await.unwrap_err().status, 404);
     assert_eq!(f.store.snapshot().revision, revision, "invalid requests do not write");
 
     f.finish(&z.source).await;
@@ -630,6 +633,138 @@ async fn cancelling_queued_reports_is_scoped_idempotent_and_survives_restart() {
             }
             assert_eq!(s.conversation(&x.source).unwrap(), &f.conversation(&x.source));
         });
+    }
+}
+
+#[tokio::test]
+async fn a_selected_report_does_not_cancel_a_later_arrival_and_backup_precedes_the_first_shape_write() {
+    let f = Fixture::new().await;
+    let backup = f.data_dir.join(grok_bot_store::PRE_UNSTARTED_REPORT_CANCELLATION_BACKUP);
+    let a = f.bot_id();
+    let b = add_bot(&f, "B").await;
+    let x = sending(&f, &a).await;
+    let first = send(&f, &x, &b, "Selected A").await;
+    f.finish(&x.source).await;
+    receive(&f, &first, true).await;
+    let selected = vec![first.id.clone()];
+    // The UI selected A before B's report arrived in this same source conversation.
+    let next = sending_from(&f, &x.source).await;
+    let later = send(&f, &next, &b, "Later B").await;
+    f.finish(&x.source).await;
+    receive(&f, &later, true).await;
+    let before = f.disk_text();
+    let original_backup = std::fs::read(f.data_dir.join(grok_bot_store::PRE_REPORTS_BACKUP)).unwrap();
+    for invalid in [vec![], vec![first.id.clone(), "not-a-uuid".into()], vec![first.id.clone(); grok_bot_store::bot_messages::MAX_BOT_DELIVERIES + 1]] {
+        assert_eq!(f.store.mutate(|s| s.cancel_bot_reports(&x.source, &invalid)).await.unwrap_err().status, 400);
+        assert_eq!(f.disk_text(), before, "invalid input never falls back to broad cancellation");
+    }
+    assert!(f.store.mutate(|s| s.cancel_bot_reports(&x.source, &[new_id()])).await.unwrap().is_empty());
+    assert_eq!(f.disk_text(), before);
+    assert!(!backup.exists(), "rejected selections and actual no-ops create no backup");
+    assert_eq!(f.store.mutate(|s| s.cancel_bot_reports(&x.source, &selected)).await.unwrap(), selected);
+    assert_eq!(std::fs::read_to_string(&backup).unwrap(), before, "the exact compatible bytes precede the first incompatible write");
+    assert_eq!(std::fs::metadata(&backup).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(std::fs::read(f.data_dir.join(grok_bot_store::PRE_REPORTS_BACKUP)).unwrap(), original_backup);
+    assert_eq!(report_status(&f, &first.id), Some(ReportStatus::Cancelled));
+    assert_eq!(report_status(&f, &later.id), Some(ReportStatus::Queued));
+    let (_, ids) = start_report(&f, &x.source).await;
+    assert_eq!(ids, std::slice::from_ref(&later.id), "only B is still eligible to execute");
+    f.finish(&x.source).await;
+    assert_eq!(report_status(&f, &later.id), Some(ReportStatus::Completed));
+    let reopened = f.reopen().await.unwrap();
+    assert!(reopened.mutate(|s| s.cancel_bot_reports(&x.source, &selected)).await.unwrap().is_empty());
+    assert_eq!(std::fs::read_to_string(&backup).unwrap(), before, "later writes and restarts never replace the backup");
+}
+
+#[tokio::test]
+async fn cancellation_keeps_an_existing_private_backup_and_does_not_fabricate_one_after_upgrade() {
+    let f = Fixture::new().await;
+    let a = f.bot_id();
+    let b = add_bot(&f, "B").await;
+    let x = sending(&f, &a).await;
+    let first = send(&f, &x, &b, "Question").await;
+    f.finish(&x.source).await;
+    receive(&f, &first, true).await;
+    let before = f.disk_json();
+    let backup = f.data_dir.join(grok_bot_store::PRE_UNSTARTED_REPORT_CANCELLATION_BACKUP);
+    let saved = serde_json::to_vec(&before).unwrap();
+    std::fs::write(&backup, &saved).unwrap();
+    std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o600)).unwrap();
+    f.store.mutate(|s| s.cancel_bot_reports(&x.source, std::slice::from_ref(&first.id))).await.unwrap();
+    f.reopen().await.unwrap();
+    assert_eq!(std::fs::read(&backup).unwrap(), saved, "a pre-existing private backup is never overwritten");
+
+    // Simulate an install that already wrote the new shape without this backup implementation.
+    // Reopening must not pretend that those incompatible bytes are a usable rollback backup.
+    let g = Fixture::new().await;
+    let b = add_bot(&g, "B").await;
+    let y = sending(&g, &g.bot_id()).await;
+    let delivery = send(&g, &y, &b, "Already cancelled on disk").await;
+    g.finish(&y.source).await;
+    receive(&g, &delivery, true).await;
+    let mut existing = g.disk_json();
+    delivery_json(&mut existing, &delivery.id)["report"] = json!({"status": "cancelled", "finishedAt": g.iso_now()});
+    write_json(&g.state_file(), &existing);
+    let reopened = g.reopen().await.unwrap();
+    assert_eq!(reopened.read(|s| s.disk().bot_deliveries[0].report.as_ref().unwrap().status), ReportStatus::Cancelled);
+    assert!(!g.data_dir.join(grok_bot_store::PRE_UNSTARTED_REPORT_CANCELLATION_BACKUP).exists());
+}
+
+#[tokio::test]
+async fn a_required_cancellation_backup_failure_leaves_compatible_state_on_disk() {
+    for obstruction in [
+        "directory",
+        "symlink",
+        "hard-link",
+        "public-file",
+        "truncated-file",
+        "incompatible-file",
+        "version-two",
+        "version-99",
+        "empty-bots",
+        "dangling-conversation-bot",
+    ] {
+        let f = Fixture::new().await;
+        let a = f.bot_id();
+        let b = add_bot(&f, "B").await;
+        let x = sending(&f, &a).await;
+        let first = send(&f, &x, &b, "Question").await;
+        f.finish(&x.source).await;
+        receive(&f, &first, true).await;
+        let before = f.disk_text();
+        let backup = f.data_dir.join(grok_bot_store::PRE_UNSTARTED_REPORT_CANCELLATION_BACKUP);
+        let outside = f.root.path().join("untouched");
+        std::fs::write(&outside, &before).unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o600)).unwrap();
+        match obstruction {
+            "directory" => std::fs::create_dir(&backup).unwrap(),
+            "symlink" => std::os::unix::fs::symlink(&outside, &backup).unwrap(),
+            "hard-link" => std::fs::hard_link(&outside, &backup).unwrap(),
+            _ => {
+                let mut state = f.disk_json();
+                match obstruction {
+                    "incompatible-file" => delivery_json(&mut state, &first.id)["report"] = json!({"status": "cancelled", "finishedAt": f.iso_now()}),
+                    "version-two" => state["version"] = json!(2),
+                    "version-99" => state["version"] = json!(99),
+                    "empty-bots" => state["bots"] = json!([]),
+                    "dangling-conversation-bot" => state["conversations"][0]["botId"] = json!(new_id()),
+                    _ => {}
+                }
+                let bytes = if obstruction == "truncated-file" { "{\"version\":1,".into() } else { serde_json::to_string(&state).unwrap() };
+                std::fs::write(&backup, bytes).unwrap();
+                let mode = if obstruction == "public-file" { 0o644 } else { 0o600 };
+                std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(mode)).unwrap();
+            }
+        }
+        let backup_before = (obstruction != "directory").then(|| std::fs::read(&backup).unwrap());
+        let error = f.store.mutate(|s| s.cancel_bot_reports(&x.source, std::slice::from_ref(&first.id))).await.unwrap_err();
+        assert_eq!(error.status, 500, "{obstruction}");
+        assert_eq!(f.disk_text(), before, "failed backup cannot persist an unreadable new shape: {obstruction}");
+        assert_eq!(f.store.read(|s| s.assert_writable()).unwrap_err().status, 503);
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), before, "{obstruction}");
+        if let Some(backup_before) = backup_before {
+            assert_eq!(std::fs::read(&backup).unwrap(), backup_before, "the invalid backup is never overwritten: {obstruction}");
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 import { useId, useRef, useState, type FormEvent } from 'react';
 import { KeyRound, Plug, Plus, ShieldAlert, Trash2, X } from 'lucide-react';
 import type { AppState, Bot } from '../shared/types';
-import type { McpConfigDocument, McpConnectionTestInput, McpConnectionTestResult, PublicSecret } from '../shared/vault';
+import type { McpConfigDocument, McpConfigInput, McpConnectionTestInput, McpConnectionTestResult } from '../shared/vault';
 import { errorText, request } from './api';
 import { ErrorNotice, IconButton, Modal } from './ui';
 import { appendMcpDraft, availableMcpSecrets, buildMcpDraft, credentialRows, emptyMcpDraft, mcpDraftProblems, type McpCredential, type McpDraft } from './mcp-form';
@@ -11,20 +11,19 @@ import { appendMcpDraft, availableMcpSecrets, buildMcpDraft, credentialRows, emp
  * STORY: Choose transport, supply connection and write-only credentials, test, then add disabled.
  * FIRST VIEWPORT: Safety note, transport and name, connection fields; actions stay at the foot.
  * FORM: Local Operate extension. JSON remains the advanced editor and storage source of truth. */
-export function McpServerForm({ bot, data, canEdit, running, onClose, onState, onSaved }: {
+export function McpServerForm({ bot, data, canEdit, running, onClose, onSaved }: {
   bot: Bot; data: AppState; canEdit: boolean; running: boolean; onClose: () => void;
-  onState: (state: AppState) => void; onSaved: (state: AppState) => void;
+  onSaved: (state: AppState) => void;
 }) {
   const [draft, setDraft] = useState(emptyMcpDraft);
   const [pending, setPending] = useState<'test' | 'save' | null>(null);
   const [attempted, setAttempted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tested, setTested] = useState<number | null>(null);
-  const [created, setCreated] = useState<PublicSecret[]>([]);
   const lock = useRef(false);
   const form = useRef<HTMLFormElement>(null);
   const prefix = useId();
-  const secrets = availableMcpSecrets([...(data.secrets ?? []), ...created], bot.id);
+  const secrets = availableMcpSecrets(data.secrets ?? [], bot.id);
   const servers = (data.mcpServers ?? []).filter(server => server.botId === bot.id);
   const problems = attempted ? mcpDraftProblems(draft, servers, secrets) : {};
   const blocked = !!pending || !canEdit || running;
@@ -65,26 +64,16 @@ export function McpServerForm({ bot, data, canEdit, running, onClose, onState, o
     event.preventDefault(); event.stopPropagation();
     if (lock.current || blocked || !validate()) return;
     lock.current = true; setPending('save'); setError(null);
-    let savedSecrets = 0;
     try {
       const input = buildMcpDraft(draft, bot.id);
       const path = `/api/bots/${encodeURIComponent(bot.id)}/mcp-servers`;
-      // Re-read immediately before merging so additions never replace the form-opening snapshot.
+      // One existing PUT saves the new secrets and merged server document together, or neither.
       const latest = await request<McpConfigDocument>(path);
-      let json = appendMcpDraft(latest.json, input);
-      for (const secret of input.secrets) {
-        const state = await request<AppState>('/api/secrets', { method: 'POST', body: secret });
-        savedSecrets++;
-        const stored = (state.secrets ?? []).find(item => item.name === secret.name && item.botId === bot.id);
-        if (stored) setCreated(current => [...current, stored]);
-        // A failed subsequent request must not POST the same secret again on retry.
-        setDraft(current => ({ ...current, env: current.env.map(row => row.source === 'new' && row.secret === secret.name ? { ...row, source: 'vault', value: '' } : row), headers: current.headers.map(row => row.source === 'new' && row.secret === secret.name ? { ...row, source: 'vault', value: '' } : row) }));
-        onState(state);
-      }
-      if (savedSecrets) json = appendMcpDraft((await request<McpConfigDocument>(path)).json, input);
-      onSaved(await request<AppState>(path, { method: 'PUT', body: { json } }));
+      const json = appendMcpDraft(latest.json, input);
+      const body: McpConfigInput = { json, secrets: input.secrets };
+      onSaved(await request<AppState>(path, { method: 'PUT', body }));
     } catch (failure) {
-      setError(`${savedSecrets ? '새 시크릿은 보관함에 저장됐지만 서버는 추가되지 않았어요. 입력을 유지했으니 다시 추가해 주세요. ' : '서버가 추가되지 않았어요. '}${errorText(failure)}`);
+      setError(`서버가 추가되지 않았어요. 입력을 유지했으니 확인 후 다시 추가해 주세요. ${errorText(failure)}`);
     } finally { lock.current = false; setPending(null); }
   };
   const dirty = JSON.stringify(draft) !== JSON.stringify(emptyMcpDraft());
@@ -108,9 +97,9 @@ export function McpServerForm({ bot, data, canEdit, running, onClose, onState, o
             <label className="vault-field"><span>명령</span><input aria-label="명령" value={draft.command} onChange={event => change({ ...draft, command: event.target.value })} placeholder="node 또는 /절대/경로/명령" maxLength={1024} autoComplete="off" spellCheck={false} aria-invalid={!!problems.command} aria-describedby={described('command')} />{problem('command')}</label>
             <section className="mcp-form-section" aria-label="명령 인자">
               <header><h3>인자</h3><button type="button" className="text-button" disabled={draft.args.length >= 64} onClick={() => change({ ...draft, args: [...draft.args, ''] })}><Plus size={13} />인자 추가</button></header>
-              <p className="mcp-form-note">인자 하나를 한 칸에 입력하세요. 공백이나 따옴표로 나누지 않아요.</p>
-              {draft.args.map((arg, index) => <div className="mcp-arg-row" key={index}><label className="vault-field"><span>인자 {index + 1}</span><input aria-label={`인자 ${index + 1}`} value={arg} onChange={event => change({ ...draft, args: draft.args.map((value, i) => i === index ? event.target.value : value) })} maxLength={4096} spellCheck={false} aria-invalid={!!problems.args} aria-describedby={described('args')} /></label><IconButton label={`인자 ${index + 1} 삭제`} onClick={() => change({ ...draft, args: draft.args.filter((_, i) => i !== index) })}><Trash2 size={14} /></IconButton></div>)}
-              {problem('args')}
+              <p className="mcp-form-note">인자 하나를 한 칸에 입력하세요. 공백이나 따옴표로 나누지 않아요. 빈 칸은 삭제해 주세요.</p>
+              {draft.args.map((arg, index) => <div className="mcp-arg-row" key={index}><label className="vault-field"><span>인자 {index + 1}</span><input aria-label={`인자 ${index + 1}`} value={arg} onChange={event => change({ ...draft, args: draft.args.map((value, i) => i === index ? event.target.value : value) })} maxLength={4096} spellCheck={false} aria-invalid={!!problems[`arg-${index}`]} aria-describedby={problems[`arg-${index}`] ? `${prefix}-arg-${index}-error` : undefined} />{problem(`arg-${index}`)}</label><IconButton label={`인자 ${index + 1} 삭제`} onClick={() => change({ ...draft, args: draft.args.filter((_, i) => i !== index) })}><Trash2 size={14} /></IconButton></div>)}
+              {draft.args.length > 64 && problem('args')}
             </section>
           </> : <label className="vault-field"><span>서버 URL</span><input aria-label="서버 URL" type="url" value={draft.url} onChange={event => change({ ...draft, url: event.target.value })} placeholder="https://example.com/mcp" maxLength={2048} autoComplete="off" spellCheck={false} aria-invalid={!!problems.url} aria-describedby={described('url')} />{problem('url')}<small className="mcp-form-note">Streamable HTTP 주소를 입력하세요. 인증 정보는 아래 헤더에서 설정해요.</small></label>}
           <section className="mcp-form-section" aria-label={pairKind}>
@@ -133,7 +122,6 @@ export function McpServerForm({ bot, data, canEdit, running, onClose, onState, o
           </section>
         </fieldset>
         {(running || !canEdit) && <p className="mcp-form-note" role="note">{running ? '실행 중인 작업을 마친 뒤 연결을 테스트하거나 서버를 추가해 주세요. 입력은 유지돼요.' : '서버 컴퓨터의 localhost 연결에서만 서버를 추가하고 테스트할 수 있어요.'}</p>}
-        {created.length > 0 && <p className="mcp-form-note" role="status">새 시크릿은 보관함에 저장됐어요. 서버 추가를 취소해도 남아 있으니 필요 없으면 보관함에서 삭제해 주세요.</p>}
       </div>
       {(error || tested !== null) && <div className="mcp-form-feedback">
         {error && <ErrorNotice>{error}</ErrorNotice>}

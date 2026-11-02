@@ -50,7 +50,7 @@ export function BotMessageLinks({ message, data, onOpen, onCancelReports, cancel
   message: Message;
   data: AppState;
   onOpen: (id: string) => void;
-  onCancelReports?: (conversationId: string) => void;
+  onCancelReports?: (conversationId: string, deliveryIds: string[]) => void;
   cancelReportsDisabled?: boolean;
 }) {
   const exchanges = (message.botExchangeIds ?? []).map(id => data.botExchanges?.find(exchange => exchange.id === id)).filter((item): item is BotExchange => Boolean(item));
@@ -59,14 +59,15 @@ export function BotMessageLinks({ message, data, onOpen, onCancelReports, cancel
     const other = data.bots.find(bot => bot.id === otherId);
     const delivery = data.botDeliveries?.find(item => item.exchangeId === exchange.id);
     const report = delivery?.report;
+    const waitingRecipient = data.botDeliveries?.some(item => item.recipientConversationId === exchange.sourceConversationId && item.status === 'waiting_children');
     return <div className="bot-exchange-summary" key={exchange.id}>
       <ArrowLeftRight size={13} /><span>메시지 {exchange.messages.length}개 ·</span>
       <button type="button" onClick={() => onOpen(exchange.id)} aria-label={`${other?.name ?? 'Bot'}와의 대화 열기`}>{other && <Avatar color={other.color} seed={other.id} shape={other.shape} size={18} />}{other?.name ?? 'Bot'}</button>
       {delivery && <span className="bot-exchange-status" data-status={delivery.status} aria-label={`${other?.name ?? 'Bot'} 답변 상태`}>{exchangeStatus[delivery.status]}</span>}
       {report && <span className="bot-report-summary">
         <span>이어서 답하기</span>
-        <span className="bot-exchange-status" data-status={report.status} role="status" aria-label={`${other?.name ?? 'Bot'} 답변 이어서 답하기 상태`} title={botReportDescription(report)}>{report.status === 'skipped' && report.error ? '건너뜀' : reportStatus[report.status]}</span>
-        {report.status === 'queued' && onCancelReports && <button type="button" disabled={cancelReportsDisabled} onClick={() => onCancelReports(exchange.sourceConversationId)} aria-label="대기 중인 이어서 답하기 모두 취소" title="이 대화의 대기 중인 이어서 답하기를 모두 취소합니다.">취소</button>}
+        <span className="bot-exchange-status" data-status={report.status} role={report.status === 'queued' ? 'status' : undefined} aria-live={report.status === 'queued' ? undefined : 'off'} aria-label={`${other?.name ?? 'Bot'} 답변 이어서 답하기 상태`} title={botReportDescription(report)}>{report.status === 'skipped' && report.error ? '건너뜀' : reportStatus[report.status]}</span>
+        {report.status === 'queued' && onCancelReports && <button type="button" disabled={cancelReportsDisabled} onClick={() => onCancelReports(exchange.sourceConversationId, [delivery.id])} aria-label={`${other?.name ?? 'Bot'} 답변: 이 보고 취소`} title={waitingRecipient ? '이 보고를 취소하면 그 답을 기다리는 상위 Bot 작업도 취소됩니다.' : '이 보고만 취소합니다. 나중에 도착하는 답변은 취소하지 않습니다.'}>이 보고 취소</button>}
       </span>}
     </div>;
   })}</>;
@@ -96,7 +97,7 @@ export function BotChat({ data, exchangeId, onClose, onExecution }: { data: AppS
         {exchange.messages.map(message => { const bot = data.bots.find(item => item.id === message.botId); return <article className="pair-message" key={message.id} aria-label={`${bot?.name ?? 'Bot'} 메시지`}><Avatar color={bot?.color} seed={message.botId} shape={bot?.shape} size={28} /><div><strong>{bot?.name ?? 'Bot'}</strong><p>{message.text}</p><small>{new Date(message.createdAt).toLocaleTimeString('ko-KR', { hour: 'numeric', minute: '2-digit' })}</small></div></article>; })}
         {delivery && ['queued', 'running', 'waiting_children'].includes(delivery.status) && <div className="pair-delivery" role="status"><Clock3 size={14} /><span>{delivery.status === 'queued' ? 'Bot의 응답을 기다리고 있습니다.' : delivery.status === 'waiting_children' ? '하위 Bot의 답변을 기다리고 있습니다.' : 'Bot이 작업 중입니다.'}</span><button className="text-button" onClick={() => onExecution(delivery.toBotId, delivery.recipientConversationId)}>실행 대화 열기</button></div>}
         {delivery && ['error', 'cancelled', 'interrupted'].includes(delivery.status) && <p className="terminal-note">{delivery.error || (delivery.status === 'cancelled' ? 'Bot 작업이 취소됐습니다.' : 'Bot 작업이 중단됐습니다.')}<button className="text-button" onClick={() => onExecution(delivery.toBotId, delivery.recipientConversationId)}>실행 대화 확인</button></p>}
-        {delivery?.report && <p className="pair-report" role="status"><CornerDownRight size={13} aria-hidden="true" />{botReportDescription(delivery.report)}</p>}
+        {delivery?.report && <p className="pair-report" role={delivery.report.status === 'queued' ? 'status' : undefined} aria-live={delivery.report.status === 'queued' ? undefined : 'off'}><CornerDownRight size={13} aria-hidden="true" />{botReportDescription(delivery.report)}</p>}
       </>}
     </div></div>
     <footer className="pair-close"><button type="button" className="small-button" onClick={onClose}><X size={14} />채팅 닫기</button></footer>

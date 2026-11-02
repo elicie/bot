@@ -13,6 +13,7 @@
 pub mod attachments;
 mod broker;
 mod custom_mcp;
+pub(crate) use custom_mcp::McpLaunchContext;
 mod engine;
 mod permissions;
 pub mod text;
@@ -211,6 +212,7 @@ pub struct Runtime {
     options: RuntimeOptions,
     origin: Mutex<String>,
     closing: AtomicBool,
+    maintenance: AtomicBool,
     runs: Mutex<Vec<Arc<Run>>>,
     engine: EngineManager,
     /// Notified whenever a run settles, so the dispatcher can start the next queued turn at once.
@@ -337,6 +339,7 @@ impl Runtime {
             options,
             origin: Mutex::new(String::new()),
             closing: AtomicBool::new(false),
+            maintenance: AtomicBool::new(false),
             runs: Mutex::new(Vec::new()),
             engine: EngineManager::default(),
             settled: tokio::sync::Notify::new(),
@@ -393,6 +396,37 @@ impl Runtime {
         self.runs().iter().find(|run| run.run_id == run_id).cloned()
     }
 
+    /// Whether update maintenance has paused turn admission and the scheduler.
+    pub fn is_paused(&self) -> bool {
+        self.maintenance.load(Ordering::SeqCst)
+    }
+
+    /// Refuse maintenance while a reply is active or still settling. The HTTP caller holds the
+    /// command queue, so accepted starts finish registering before this check. The store lock also
+    /// serializes the latch with direct runtime starts. Durable queued work is left untouched.
+    pub fn pause_if_idle(&self) -> HttpResult<()> {
+        self.store.read(|state| {
+            if self.closing.load(Ordering::SeqCst) {
+                return Err(HttpError::unavailable("The server is shutting down."));
+            }
+            state.assert_idle()?;
+            if !self.runs().is_empty() {
+                return Err(HttpError::conflict(RUN_BUSY));
+            }
+            self.maintenance.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+
+    /// Undo an update preparation that did not stop the server. Shutdown is irreversible.
+    pub fn resume(&self) -> HttpResult<()> {
+        if self.closing.load(Ordering::SeqCst) {
+            return Err(HttpError::unavailable("The server is shutting down."));
+        }
+        self.maintenance.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
     /// Resolves after the next run settles.
     pub async fn settled(&self) {
         self.settled.notified().await;
@@ -424,8 +458,11 @@ impl Runtime {
     }
 
     async fn start_turn(&self, conversation_id: &str, turn: Turn, attachments: Vec<PreparedAttachment>) -> HttpResult<()> {
-        self.expire_bot_chains(self.store.now()).await?;
-        let closing = self.closing.load(Ordering::SeqCst);
+        // Maintenance admission must not mutate even an expired chain before rejecting the turn.
+        // The store mutation below rechecks both guards under the normal admission path.
+        if !self.closing.load(Ordering::SeqCst) && !self.is_paused() {
+            self.expire_bot_chains(self.store.now()).await?;
+        }
         let origin = self.origin.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
         let id = conversation_id.to_owned();
         let metas: Vec<grok_bot_model::Attachment> = attachments.iter().map(|a| a.meta.clone()).collect();
@@ -437,8 +474,11 @@ impl Runtime {
                     return Err(HttpError::conflict(RUN_BUSY));
                 }
                 state.assert_idle()?;
-                if closing {
+                if self.closing.load(Ordering::SeqCst) {
                     return Err(HttpError::unavailable("The server is shutting down."));
+                }
+                if self.is_paused() {
+                    return Err(HttpError::unavailable("The server is paused for update maintenance."));
                 }
                 if !state.runtime().available {
                     let error = state.runtime().error.clone().unwrap_or_else(|| "Grok Build is unavailable.".into());
@@ -1216,8 +1256,10 @@ impl Runtime {
     /// Active engine turns owned by these chains. A queued report does not own an unrelated
     /// user turn that happened to start in the same source conversation.
     fn runs_in_bot_chains(&self, chain_ids: &HashSet<String>) -> Vec<Arc<Run>> {
-        self.runs()
-            .iter()
+        // pause_if_idle takes the store lock before the runs lock. Do not hold runs while
+        // reading the store here, including for a direct start racing maintenance admission.
+        let runs = self.runs().clone();
+        runs.into_iter()
             .filter(|run| {
                 self.store.read(|state| {
                     state.disk().bot_deliveries.iter().any(|delivery| {
@@ -1228,7 +1270,6 @@ impl Runtime {
                     })
                 })
             })
-            .cloned()
             .collect()
     }
 
@@ -1253,12 +1294,19 @@ impl Runtime {
     /// Called inside the scheduler command queue: signal cancellation, but do not await engine
     /// settlement here (a broker call may itself be waiting for that queue).
     pub async fn expire_bot_chains(&self, now: chrono::DateTime<chrono::Utc>) -> HttpResult<()> {
-        let chain_ids = self.store.read(|state| state.expired_bot_chains(now));
+        let chain_ids = self.store.read(|state| {
+            if self.closing.load(Ordering::SeqCst) || self.is_paused() { HashSet::new() } else { state.expired_bot_chains(now) }
+        });
         if chain_ids.is_empty() {
             return Ok(());
         }
         let runs = self.stop_bot_chain_runs(&chain_ids, Some(BOT_CHAIN_TIMEOUT_ERROR));
-        self.store.mutate(|state| state.terminate_bot_chains(&chain_ids, RunStatus::Error, Some(BOT_CHAIN_TIMEOUT_ERROR), now)).await?;
+        self.store.mutate(|state| {
+            // Maintenance sets its latch under this store lock as well. Direct runtime starts
+            // cannot race preparation into modifying the durable queues after it succeeded.
+            if self.closing.load(Ordering::SeqCst) || self.is_paused() { return Ok(()); }
+            state.terminate_bot_chains(&chain_ids, RunStatus::Error, Some(BOT_CHAIN_TIMEOUT_ERROR), now)
+        }).await?;
         for run in runs {
             self.stop_run_computer(&run).await;
         }

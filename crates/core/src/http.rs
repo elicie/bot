@@ -41,8 +41,8 @@ pub struct HttpContext {
     pub closing: AtomicBool,
     /// Built frontend (`dist/`). `None` serves the API only.
     pub web_root: Option<PathBuf>,
-    /// Cancels disposable MCP probes before the command queue is drained on shutdown.
-    pub mcp_test_stopping: tokio::sync::watch::Sender<bool>,
+    /// Bounded disposable probes, tracked independently of the app command queue for shutdown.
+    pub(crate) mcp_tests: crate::mcp_probe::Probes,
     /// Flips to `true` after final state flush; open SSE streams can then finish.
     pub stopping: tokio::sync::watch::Sender<bool>,
 }
@@ -191,6 +191,9 @@ async fn guard(State(ctx): State<Ctx>, request: Request, next: Next) -> Response
             return secure((StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "The server is shutting down." }))).into_response(), api);
         }
     }
+    if !matches!(*request.method(), Method::GET | Method::HEAD) && ctx.runtime.is_paused() && request.uri().path() != "/api/maintenance" {
+        return secure((StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "The server is paused for update maintenance." }))).into_response(), api);
+    }
     secure(next.run(request).await, api)
 }
 
@@ -225,6 +228,7 @@ pub fn router(ctx: Ctx) -> Router {
     // Feature modules add their `/api` routes here, one `.merge(...)` line each.
     let api = Router::new()
         .route("/state", get(get_state))
+        .route("/maintenance", post(maintenance).delete(maintenance))
         .route("/events", get(events))
         .route("/settings", axum::routing::put(put_settings))
         .route("/provider/test", post(provider_test))
@@ -285,6 +289,26 @@ async fn spa_fallback(request: Request, index: PathBuf) -> Response {
 
 async fn get_state(State(ctx): State<Ctx>, ConnectInfo(remote): Remote) -> Response {
     state_reply(&ctx, StatusCode::OK, &remote)
+}
+
+/// The updater prepares under the same queue as every turn admission, then stops the service before
+/// copying data. Maintenance is reversible until shutdown, and does not cancel durable queued work.
+async fn maintenance(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, method: Method, body: Result<JsonBody<Empty>, ApiError>) -> ApiResult {
+    if !is_local(&remote) {
+        return Err(ApiError(HttpError::forbidden("Update maintenance requires a local loopback connection.")));
+    }
+    let JsonBody(_) = body?;
+    let paused = method == Method::POST;
+    ctx.queue
+        .run(async {
+            if ctx.closing.load(Ordering::SeqCst) {
+                return Err(HttpError::unavailable("The server is shutting down."));
+            }
+            if paused { ctx.runtime.pause_if_idle() } else { ctx.runtime.resume() }
+        })
+        .await?;
+    let body = if paused { json!({ "maintenance": true, "dataDir": ctx.store.data_dir() }) } else { json!({ "maintenance": false }) };
+    Ok(Json(body).into_response())
 }
 
 async fn events(State(ctx): State<Ctx>, ConnectInfo(remote): Remote) -> impl IntoResponse {
@@ -511,13 +535,30 @@ async fn cancel(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(id): P
     Ok(state_reply(&ctx, StatusCode::OK, &remote))
 }
 
-/// `POST /api/conversations/:id/bot-reports/cancel` with `{}`: cancel all still-queued
-/// reports and return the public AppState. Serialize with dispatch so none can start between
-/// selection and the durable cancellation. Running reports use the existing Stop endpoint.
-async fn cancel_bot_reports(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(id): Path<String>, JsonBody(_): JsonBody<Empty>) -> ApiResult {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CancelBotReports {
+    delivery_ids: Vec<String>,
+}
+
+/// Cancel only the selected delivery IDs that are still queued, serialized with dispatch. An empty
+/// actual result tells the caller that nothing was cancelled (for example, dispatch started first).
+/// Running reports use the existing Stop endpoint; a later arrival is not part of this selection.
+async fn cancel_bot_reports(
+    State(ctx): State<Ctx>,
+    ConnectInfo(remote): Remote,
+    Path(id): Path<String>,
+    JsonBody(input): JsonBody<CancelBotReports>,
+) -> ApiResult {
     let store = ctx.store.clone();
-    ctx.queue.run(async move { store.mutate(|s| s.cancel_bot_reports(&id)).await }).await?;
-    Ok(state_reply(&ctx, StatusCode::OK, &remote))
+    let (state, cancelled_delivery_ids) = ctx
+        .queue
+        .run(async move {
+            let cancelled = store.mutate(|s| s.cancel_bot_reports(&id, &input.delivery_ids)).await?;
+            Ok::<_, HttpError>((store.snapshot(), cancelled))
+        })
+        .await?;
+    Ok(reply(StatusCode::OK, json!({ "state": state, "cancelledDeliveryIds": cancelled_delivery_ids }), &remote))
 }
 
 #[derive(Deserialize)]

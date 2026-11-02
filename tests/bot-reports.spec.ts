@@ -1,4 +1,5 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test, expect, type Page } from '@playwright/test';
@@ -88,14 +89,17 @@ test('a finished bot delivery is reported back in a follow-up reply with a marke
   } finally { await app.stop(); await provider.close(); }
 });
 
-for (const viewport of [{ width: 1040, height: 760 }, { width: 390, height: 844 }]) {
-  test(`queued follow-up can be cancelled without a run and stays cancelled after restart at ${viewport.width}px`, async ({ page }, testInfo) => {
+for (const viewport of [{ width: 1040, height: 760, startFirst: false }, { width: 390, height: 844, startFirst: false }, { width: 1040, height: 760, startFirst: true }, { width: 390, height: 844, startFirst: true }]) {
+  test(`${viewport.startFirst ? 'scheduler-first cancellation reports a no-op' : 'queued cancellation survives restart'} at ${viewport.width}px`, async ({ page }, testInfo) => {
     const dataDir = await mkdtemp(path.join(tmpdir(), 'grok-bot-report-cancel-'));
     let app = await startTestApp({ env: { GROK_BOT_DATA_DIR: dataDir } });
     let recipientId = '';
     let stage = 0;
     const recipient = gate();
     const blocker = gate();
+    const resumedBlocker = gate();
+    const report = gate();
+    let slotBlocker = blocker;
     const provider = await startMockProvider({ reply: request => {
       if (!request.tools?.some(tool => tool.function.name === 'search_tool')) return { text: '검토 요청' };
       const replies: Array<MockCompletion | Promise<MockCompletion>> = [
@@ -103,7 +107,8 @@ for (const viewport of [{ width: 1040, height: 760 }, { width: 390, height: 844 
         { tool: { name: 'use_tool', arguments: { tool_name: 'workspace__send_message', tool_input: { toBotId: recipientId, text: '계획을 검토해 주세요.' } } } },
         { text: 'Reviewer에게 검토를 요청했습니다.' },
         recipient.promise,
-        blocker.promise,
+        slotBlocker.promise,
+        report.promise,
       ];
       return replies[stage++] ?? { text: 'CANCELLED_REPORT_MUST_NOT_RUN' };
     } });
@@ -132,13 +137,40 @@ for (const viewport of [{ width: 1040, height: 760 }, { width: 390, height: 844 
       const before = await snapshot(page);
       const delivery = before.botDeliveries![0];
       const source = before.conversations.find(conversation => conversation.id === delivery.sourceConversationId)!;
+      if (viewport.startFirst) {
+        // Seed a loader-validated synthetic long history, not a mocked DOM. Its older selected
+        // report stays queued behind an older routine after restarting the actual server.
+        const seeded = JSON.parse(await readFile(path.join(dataDir, 'state.json'), 'utf8'));
+        const history = seeded.conversations.find((conversation: AppState['conversations'][number]) => conversation.id === source.id);
+        for (let index = 0; index < 25; index++) {
+          for (const role of ['user', 'assistant']) history.messages.push({ id: randomUUID(), role, text: `이미 이어진 대화 ${index + 1}: 추가 검토 내용입니다.`, createdAt: source.updatedAt, tools: [] });
+        }
+        for (const conversation of seeded.conversations) { delete conversation.sessionId; delete conversation.sessionFingerprint; }
+        const routine = seeded.routineRuns[0];
+        delete routine.executionRunId;
+        delete routine.result;
+        const routineConversation = seeded.conversations.find((conversation: AppState['conversations'][number]) => conversation.id === routine.conversationId);
+        routineConversation.messages = [];
+        routineConversation.run = { id: '', status: 'idle' };
+        blocker.release({ text: '이전 fixture 종료' });
+        await app.stop();
+        await writeFile(path.join(dataDir, 'state.json'), JSON.stringify(seeded), { mode: 0o600 });
+        slotBlocker = resumedBlocker;
+        stage = 4;
+        app = await startTestApp({ env: { GROK_BOT_DATA_DIR: dataDir } });
+        await page.goto(`${app.url}/?bot=${source.botId}&conversation=${source.id}`);
+        await expect.poll(() => stage, { timeout: 60_000 }).toBe(5);
+      }
       const log = page.getByRole('log', { name: '대화 메시지', exact: true });
       const reportStatus = log.getByLabel('Reviewer 답변 이어서 답하기 상태', { exact: true });
-      const cancel = log.getByRole('button', { name: '대기 중인 이어서 답하기 모두 취소', exact: true });
+      const cancel = log.getByRole('button', { name: 'Reviewer 답변: 이 보고 취소', exact: true });
       await expect(log.getByLabel('Reviewer 답변 상태', { exact: true })).toHaveText('답변 도착');
       await expect(reportStatus).toHaveText('대기 중');
       await expect(cancel).toBeEnabled();
-      expect(await cancel.textContent()).toBe('취소');
+      await cancel.scrollIntoViewIfNeeded();
+      if (viewport.startFirst) expect(await log.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight > 500)).toBe(true);
+      expect(await cancel.textContent()).toBe('이 보고 취소');
+      await expect(reportStatus).toHaveAttribute('role', 'status');
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await page.screenshot({ path: testInfo.outputPath(`report-queued-${viewport.width}.png`) });
 
@@ -155,14 +187,43 @@ for (const viewport of [{ width: 1040, height: 760 }, { width: 390, height: 844 
       // announce cancellation until the server accepts the actual command.
       let releaseRequest!: () => void;
       const inFlight = new Promise<void>(resolve => { releaseRequest = resolve; });
-      await page.route(endpoint, async route => { await inFlight; await route.continue(); }, { times: 1 });
+      await page.route(endpoint, async route => {
+        expect(route.request().postDataJSON()).toEqual({ deliveryIds: [delivery.id] });
+        await inFlight;
+        await route.continue();
+      }, { times: 1 });
       await cancel.focus();
       await page.keyboard.press('Enter');
       try {
         await expect(cancel).toBeDisabled();
         await expect(reportStatus).toHaveText('대기 중');
+        if (viewport.startFirst) {
+          slotBlocker.release({ text: '정기 점검을 마쳤습니다.' });
+          await expect.poll(() => stage, { timeout: 60_000 }).toBe(6);
+          await expect(reportStatus).toHaveText('답변 중');
+        }
       } finally { releaseRequest(); }
+      if (viewport.startFirst) {
+        const notice = page.getByRole('status', { name: '보고 취소 결과', exact: true });
+        await expect(notice).toContainText('취소한 보고가 없습니다.');
+        await expect(notice).toBeInViewport();
+        await expect(reportStatus).toBeInViewport();
+        expect(await log.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight > 500)).toBe(true);
+        await page.screenshot({ path: testInfo.outputPath(`report-noop-scrolled-${viewport.width}.png`) });
+        await page.getByRole('button', { name: '보고 취소 안내 닫기', exact: true }).click();
+        await expect(notice).toHaveCount(0);
+        await expect(reportStatus).not.toHaveAttribute('role', 'status');
+        await expect(reportStatus).toHaveAttribute('aria-live', 'off');
+        await expect(cancel).toHaveCount(0);
+        report.release({ text: '이미 시작한 후속 답변은 계속 실행됩니다.' });
+        await expect(reportStatus).toHaveText('완료');
+        expect((await snapshot(page)).botDeliveries![0].report!.status).toBe('completed');
+        expect(errors).toEqual([]);
+        return;
+      }
       await expect(reportStatus).toHaveText('취소됨');
+      await expect(reportStatus).not.toHaveAttribute('role', 'status');
+      await expect(reportStatus).toHaveAttribute('aria-live', 'off');
       await expect(cancel).toHaveCount(0);
       const cancelled = (await snapshot(page)).botDeliveries![0].report!;
       expect(cancelled).toMatchObject({ status: 'cancelled', finishedAt: expect.any(String) });
@@ -198,6 +259,8 @@ for (const viewport of [{ width: 1040, height: 760 }, { width: 390, height: 844 
     } finally {
       recipient.release({ text: '테스트 종료' });
       blocker.release({ text: '테스트 종료' });
+      resumedBlocker.release({ text: '테스트 종료' });
+      report.release({ text: '테스트 종료' });
       await app.stop();
       await provider.close();
       if (path.dirname(dataDir) !== tmpdir() || !path.basename(dataDir).startsWith('grok-bot-report-cancel-')) throw Error('Unexpected test data path');
@@ -451,7 +514,7 @@ test('cancelling C follow-up in waiting B reports one non-success to A without a
     await expect.poll(() => stage, { timeout: 60_000 }).toBe(7);
 
     // This is real native FIFO work, not a state override: an older routine takes the global slot
-    // after held C finishes, keeping C's follow-up queued in B long enough to use the PR24 action.
+    // after held C finishes, keeping C's follow-up queued in B for PR39's selected-report action.
     const scheduled = await chainApi<AppState>(page, 'POST', '/api/routines', {
       botId: bots.c, name: 'Unrelated FIFO review blocker', prompt: 'Finish an unrelated routine.', enabled: false,
       schedule: { kind: 'interval', minutes: 60 },
@@ -470,14 +533,21 @@ test('cancelling C follow-up in waiting B reports one non-success to A without a
 
     await page.goto(`${app.url}/?bot=${bots.b}&conversation=${root.recipientConversationId}`);
     const bLog = page.getByRole('log', { name: '대화 메시지', exact: true });
-    const cancel = bLog.getByRole('button', { name: '대기 중인 이어서 답하기 모두 취소', exact: true });
+    const cancel = bLog.getByRole('button', { name: 'Chain C 답변: 이 보고 취소', exact: true });
     await expect(bLog).toContainText(provisional);
     await expect(bLog.getByLabel('Chain C 답변 이어서 답하기 상태', { exact: true })).toHaveText('대기 중');
     await expect(cancel).toBeEnabled();
     await page.setViewportSize({ width: 320, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: testInfo.outputPath('review-nested-report-queued-320.png') });
+    await page.screenshot({ path: testInfo.outputPath('integration-nested-report-queued-320.png') });
+    const cancellationResponse = page.waitForResponse(response => response.url().endsWith(`/api/conversations/${root.recipientConversationId}/bot-reports/cancel`) && response.request().method() === 'POST');
     await cancel.click();
+    const response = await cancellationResponse;
+    expect(response.ok()).toBe(true);
+    expect(response.request().postDataJSON()).toEqual({ deliveryIds: [leaf.id] });
+    const result = await response.json() as { state: AppState; cancelledDeliveryIds: string[] };
+    expect(result.cancelledDeliveryIds).toEqual([leaf.id]);
+    expect(result.state.botDeliveries!.find(delivery => delivery.id === leaf.id)!.report?.status).toBe('cancelled');
     await expect(bLog.getByLabel('Chain C 답변 이어서 답하기 상태', { exact: true })).toHaveText('취소됨');
     await expect(cancel).toHaveCount(0);
     const cancelled = await snapshot(page);
@@ -517,7 +587,7 @@ test('cancelling C follow-up in waiting B reports one non-success to A without a
     await expect(aLog.getByRole('note', { name: '이어서 답한 Bot 답변', exact: true })).toHaveCount(1);
     await expect(aLog).not.toContainText(provisional);
     await expect(aLog).not.toContainText('Automatic follow-up');
-    await page.screenshot({ path: testInfo.outputPath('review-nested-report-cancelled-320.png') });
+    await page.screenshot({ path: testInfo.outputPath('integration-nested-report-cancelled-320.png') });
     await app.stop();
     app = await startTestApp({ env: { GROK_BOT_DATA_DIR: dataDir } });
     await page.goto(app.url + sourceUrl);

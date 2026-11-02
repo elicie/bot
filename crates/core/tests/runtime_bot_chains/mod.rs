@@ -337,6 +337,17 @@ pub(super) async fn expire_nested_bot_chains(f: &Fixture) {
         no_pending(&chain(f, &root));
         no_replay(f, &scheduler, &root, boundary).await;
     }
+    // Update maintenance preserves even already-expired durable work until it resumes.
+    let paused = self::root(f, &b).await;
+    f.runtime.pause_if_idle().unwrap();
+    let before = f.public();
+    let deadline = chrono::DateTime::parse_from_rfc3339(&paused.created_at).unwrap().with_timezone(&chrono::Utc) + chrono::Duration::minutes(31);
+    f.runtime.expire_bot_chains(deadline).await.unwrap();
+    assert_eq!(f.runtime.start(&paused.recipient_conversation_id, &paused.text).await.unwrap_err().status, 503);
+    assert_eq!(f.public(), before, "maintenance must reject admission without changing queued chains");
+    f.runtime.resume().unwrap();
+    f.runtime.expire_bot_chains(deadline).await.unwrap();
+    no_replay(f, &scheduler, &paused, "maintenance-expired").await;
     scheduler.close().await;
 }
 
@@ -399,7 +410,9 @@ pub(super) async fn nested_report_start_failure(f: &Fixture) {
     let cancelled = self::root(f, &b).await;
     let child_delivery = child(f, &scheduler, &cancelled, &c).await;
     answer(f, &scheduler, &child_delivery.recipient_conversation_id, "C final that B will not consume.").await;
-    f.store.mutate(|state| state.cancel_bot_reports(&cancelled.recipient_conversation_id)).await.unwrap();
+    let selected = [child_delivery.id.clone()];
+    let cancelled_ids = f.store.mutate(|state| state.cancel_bot_reports(&cancelled.recipient_conversation_id, &selected)).await.unwrap();
+    assert_eq!(cancelled_ids, selected);
     assert_eq!(delivery(f, &cancelled).status, DeliveryStatus::Cancelled);
     assert_eq!(delivery(f, &child_delivery).report.unwrap().status, ReportStatus::Cancelled);
     assert_eq!(exchange_texts(f, &cancelled).as_slice(), std::slice::from_ref(&cancelled.text));

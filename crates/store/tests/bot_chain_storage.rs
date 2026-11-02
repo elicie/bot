@@ -228,13 +228,60 @@ async fn an_existing_chain_backup_is_never_overwritten_and_symlinks_fail_closed(
 }
 
 #[tokio::test]
-async fn a_successful_backup_does_not_mask_a_failed_state_write() {
+async fn invalid_or_already_incompatible_chain_backups_fail_closed_without_replacing_history() {
+    for invalid in ["truncated", "schema", "references", "incompatible", "public", "hardlink"] {
+        let f = Fixture::new().await;
+        let bots = bots(&f, 2).await;
+        let origin = root(&f, &bots[0]).await;
+        let delivery = send(&f, &origin, &bots[1], "Stop").await.unwrap();
+        finish(&f, &origin, "Sent").await;
+        let before = f.disk_text();
+        let mut saved = f.disk_json();
+        match invalid {
+            "schema" => saved["version"] = 99.into(),
+            "references" => saved["botDeliveries"][0]["exchangeId"] = new_id().into(),
+            "incompatible" => {
+                // A valid already-stopped chain cannot roll back the chain-format upgrade.
+                let time = f.iso_now();
+                saved["botDeliveries"][0]["status"] = "cancelled".into();
+                saved["botDeliveries"][0]["finishedAt"] = time.clone().into();
+                saved["botDeliveries"][0]["chainTermination"] = json!({ "status": "cancelled", "finishedAt": time });
+                let recipient = saved["conversations"].as_array_mut().unwrap().iter_mut().find(|c| c["id"] == delivery.recipient_conversation_id).unwrap();
+                recipient["run"]["status"] = "cancelled".into();
+                recipient["run"]["finishedAt"] = time.into();
+            }
+            _ => {}
+        }
+        let backup = f.data_dir.join(PRE_BOT_CHAINS_BACKUP);
+        let bytes = if invalid == "truncated" { "{truncated".to_owned() } else { serde_json::to_string(&saved).unwrap() };
+        if invalid == "incompatible" {
+            let copy = tempfile::tempdir().unwrap();
+            std::fs::write(copy.path().join("state.json"), &bytes).unwrap();
+            grok_bot_store::Store::open(copy.path(), f.clock()).await.expect("the incompatible backup is otherwise a valid state");
+        }
+        std::fs::write(&backup, &bytes).unwrap();
+        std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(if invalid == "public" { 0o644 } else { 0o600 })).unwrap();
+        if invalid == "hardlink" {
+            std::fs::hard_link(&backup, f.root.path().join("backup-alias.json")).unwrap();
+        }
+        let ids = HashSet::from([delivery.chain_id]);
+        let error = f.store.mutate(|s| s.terminate_bot_chains(&ids, RunStatus::Cancelled, None, f.now())).await.unwrap_err();
+        assert_eq!(error.status, 500, "{invalid}");
+        assert_eq!(f.disk_text(), before, "{invalid}: old-readable state must remain untouched");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), bytes, "{invalid}: never replace old backup history");
+        assert_eq!(f.store.read(|s| s.assert_writable()).unwrap_err().status, 503, "{invalid}");
+    }
+}
+
+#[tokio::test]
+async fn an_existing_backup_does_not_mask_an_invalid_state_target() {
     let f = Fixture::new().await;
     let bots = bots(&f, 2).await;
     let origin = root(&f, &bots[0]).await;
     let delivery = send(&f, &origin, &bots[1], "Stop").await.unwrap();
     finish(&f, &origin, "Sent").await;
-    // A pre-existing valid backup allows the actual state writer to reach its own failure.
+    // Even a valid existing rollback point cannot excuse an invalid current state target. The
+    // hardened helper validates the previous real state before trusting or creating any backup.
     let backup = f.data_dir.join(PRE_BOT_CHAINS_BACKUP);
     let history = f.disk_text();
     std::fs::write(&backup, &history).unwrap();
