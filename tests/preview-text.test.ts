@@ -40,6 +40,9 @@ const cases: [string, string, string][] = [
   ['math and code in visible link label', '[\\(x_i * y_j\\)와 `\\(literal\\)`](https://example.com/?currency=$) $z$', 'x_i * y_j와 \\(literal\\) z'],
   ['reference definition with formula-looking URL', '[ref]: https://example.com/\\(x\\)?currency=$\n\n[price][ref] and $x_i * y_j$.', 'price and x_i * y_j.'],
   ['image destination before math', '![alt](https://example.com/?currency=$) and $x_i * y_j$.', '이미지 and x_i * y_j.'],
+  ['label currency before outside math', '[Product $5](https://example.com) and $x_i * y_j$.', 'Product $5 and x_i * y_j.'],
+  ['reference label currency before outside math', '[Product $5][p] and $x_i * y_j$.\n\n[p]: https://example.com', 'Product $5 and x_i * y_j.'],
+  ['outside currency before label math', 'Product $5 then [$x_i$](https://example.com).', 'Product $5 then x_i.'],
   ['generated Markdown image', `![생성 결과](${image})`, '이미지'],
   ['generated Markdown link', `[다운로드](${image})`, '이미지'],
   ['generated reference link', `[다운로드][img]\n\n[img]: ${image}`, '이미지'],
@@ -59,6 +62,17 @@ const cases: [string, string, string][] = [
 ];
 for (const [name, input, expected] of cases) {
   test(`preview text: ${name}`, () => assert.equal(previewText(input), expected));
+}
+for (const label of ['$x_i$', '\\(x_i\\)']) {
+  for (const suffix of ['', '[]', '[ref]']) {
+    for (const generated of [false, true]) {
+      test(`reference label math: ${label} ${suffix || 'shortcut'} ${generated ? 'image' : 'link'}`, () => {
+        const identifier = suffix === '[ref]' ? 'ref' : label;
+        const source = `[${label}]${suffix} and $z$\n\n[${identifier}]: ${generated ? image : 'https://example.com'}`;
+        assert.equal(previewText(source), generated ? '이미지 and z' : 'x_i and z');
+      });
+    }
+  }
 }
 for (const language of ['mermaid', 'html', 'svg', 'visualization', 'HTML']) {
   test(`preview text: ${language} visualization is a short chart label`, () => {

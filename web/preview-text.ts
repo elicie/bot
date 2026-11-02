@@ -35,26 +35,29 @@ function deepContainers(source: string): boolean {
 function parsePreview(text: string) {
   const tree = parser.parse(text);
   const math = new Map<string, string>();
-  if (!/[\\$]/.test(text)) return { tree, math };
+  if (!/[\\$]/.test(text)) return { tree, math, source: text };
   const literals: Range[] = [];
   const quotes: Range[] = [];
+  const boundaries = new Set<number>();
   visit(tree, node => {
     if (!node.position) return;
-    const range = { start: node.position.start.offset!, end: node.position.end.offset!, block: node.type === 'code' };
-    if (['code', 'inlineCode', 'html', 'image', 'imageReference', 'definition'].includes(node.type)) literals.push(range);
-    if (node.type === 'link' || node.type === 'linkReference') {
-      // Only the label is visible prose; URLs, titles and reference IDs are not math.
+    const range = { start: node.position.start.offset!, end: node.position.end.offset!, block: !['inlineCode', 'html'].includes(node.type) };
+    if (['code', 'inlineCode', 'html', 'image', 'imageReference', 'definition', 'linkReference'].includes(node.type)) literals.push(range);
+    if (node.type === 'link') {
+      // A label is its own prose region; destinations/titles must not participate in math.
+      boundaries.add(range.start);
       const labelEnd = node.children.at(-1)?.position?.end.offset;
       literals.push({ ...range, start: text[range.start] === '<' ? range.start : labelEnd ?? range.start });
     }
     if (node.type === 'blockquote') quotes.push(range);
   });
   literals.sort((a, b) => a.start - b.start || b.end - a.end);
-  const occupied = new Set(text + plainText(tree, new Map()));
+  const occupied = new Set(text + plainText(tree, new Map(), text));
   const tokens: { index: number; token: string; block?: boolean }[] = [];
   const lastClose = new Map<string, number>();
   let literalIndex = 0;
   for (let index = 0; index < text.length;) {
+    if (boundaries.has(index)) tokens.push({ index, token: '', block: true });
     while (literals[literalIndex]?.end <= index) literalIndex++;
     const literal = literals[literalIndex];
     if (literal && literal.start <= index) {
@@ -76,7 +79,7 @@ function parsePreview(text: string) {
   let marker = 0xe000;
   let open: { start: number; body: number; close: string } | undefined;
   for (const { index, token, block } of tokens) {
-    if (block) { open = undefined; continue; } // Never consume a fenced/indented code block.
+    if (block) { open = undefined; continue; } // Pair math only within one visible prose/label region.
     if (open && token === open.close) {
       let value = text.slice(open.body, index);
       const depth = quotes.filter(range => open!.start >= range.start && open!.start < range.end).length;
@@ -96,10 +99,11 @@ function parsePreview(text: string) {
     }
   }
   parts.push(text.slice(end));
-  return { tree: math.size ? parser.parse(parts.join('')) : tree, math };
+  const source = parts.join('');
+  return { tree: math.size ? parser.parse(source) : tree, math, source };
 }
 
-function plainText(node: Nodes, definitions: ReadonlyMap<string, string>): string {
+function plainText(node: Nodes, definitions: ReadonlyMap<string, string>, source: string): string {
   switch (node.type) {
     case 'text': return node.value.replace(generatedImage, '이미지');
     case 'inlineCode': return node.value;
@@ -112,9 +116,14 @@ function plainText(node: Nodes, definitions: ReadonlyMap<string, string>): strin
     case 'link':
       if (generatedImageLink.test(node.url)) return '이미지';
       break;
-    case 'linkReference':
+    case 'linkReference': {
       if (generatedImageLink.test(definitions.get(node.identifier) ?? '')) return '이미지';
+      // Keep the original collapsed/shortcut identifier; format only its visible label.
+      const start = node.children[0]?.position?.start.offset;
+      const end = node.children.at(-1)?.position?.end.offset;
+      if (start !== undefined && end !== undefined) return previewText(source.slice(start, end));
       break;
+    }
     case 'break': return ' ';
     case 'html':
     case 'definition':
@@ -122,7 +131,7 @@ function plainText(node: Nodes, definitions: ReadonlyMap<string, string>): strin
   }
   if (!('children' in node)) return '';
   const separator = ['root', 'blockquote', 'list', 'listItem'].includes(node.type) ? ' ' : '';
-  return node.children.map(child => plainText(child, definitions)).join(separator);
+  return node.children.map(child => plainText(child, definitions, source)).join(separator);
 }
 
 /** Bounded plain-text copy. The message-ID cache survives fresh SSE objects without retaining full replies. */
@@ -135,10 +144,10 @@ export function previewText(text: string, messageId?: string): string {
   let result = '메시지';
   try {
     if (!deepContainers(source)) {
-      const { tree, math } = parsePreview(source);
+      const { tree, math, source: parsedSource } = parsePreview(source);
       const definitions = new Map<string, string>();
       visit(tree, node => { if (node.type === 'definition' && !definitions.has(node.identifier)) definitions.set(node.identifier, node.url); });
-      result = plainText(tree, definitions)
+      result = plainText(tree, definitions, parsedSource)
         .replace(/[\ue000-\uf8ff]/g, token => math.get(token) ?? token)
         .replace(/\s+/g, ' ').trim().slice(0, maxPreviewLength);
     }
