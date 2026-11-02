@@ -56,7 +56,10 @@ jobs:
       - run: node scripts/cargo.mjs clippy --locked --workspace --all-targets -- -D warnings
       # The Node backend tests drive the real engine binary; it reuses the workspace build above.
       - run: npm run build:engine
-      - run: npm test
+      # Per-test timeout so a hang names the test instead of stalling the job.
+      - name: Node tests
+        run: npx tsx --test --test-timeout=180000 --test-reporter=spec tests/*.test.ts
+        timeout-minutes: 20
       - run: npm run build
       - run: npm run build:server
       - name: End-to-end tests (Rust backend, system Chrome)
