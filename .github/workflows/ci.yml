@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    name: Web (typecheck, build, Node tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  rust:
+    name: Rust (fmt, tests, clippy, e2e)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      # The pinned Grok Build engine is a large source build; the default runner disk is tight.
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install ripgrep (bundled into the engine build)
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - run: cargo fmt --all --check
+      - run: npm ci
+      # scripts/cargo.mjs stages a checksum-verified protoc and sets the ripgrep paths.
+      - run: npm run test:rust
+      - run: node scripts/cargo.mjs clippy --locked --workspace --all-targets -- -D warnings
+      - run: npm run build
+      - run: npm run build:server
+      - name: End-to-end tests (Rust backend, system Chrome)
+        run: npx playwright test
+        env:
+          GROK_BOT_BACKEND: rust
+          GROK_BOT_SERVER_BIN: ${{ github.workspace }}/target/debug/grok-bot
+      - name: Upload Playwright results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results
+          path: /tmp/grok-bot-playwright-results
+          retention-days: 7
