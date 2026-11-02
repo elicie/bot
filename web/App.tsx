@@ -44,6 +44,7 @@ import {
   isDirty,
   readRoute,
   queuedRoutineRun,
+  pendingBotWork,
   reducer,
   runningConversation,
   selectedBot,
@@ -99,6 +100,7 @@ export function App() {
   const busy = state.command !== null;
   const data = state.data;
   const queuedRun = queuedRoutineRun(data, conversation);
+  const botWork = pendingBotWork(data, conversation);
   const selectionKey = draftKey(state.selection);
   const draft = state.drafts[selectionKey] ?? '';
   const [pendingFiles, setPendingFiles] = useState<Record<string, PendingAttachment[]>>({});
@@ -463,7 +465,7 @@ export function App() {
   const cancel = async () => {
     const before = current.current;
     const active = selectedConversation(before);
-    if (!active || (!activeRun(active.run.status) && !queuedRoutineRun(before.data, active))) return;
+    if (!active || (!activeRun(active.run.status) && !queuedRoutineRun(before.data, active) && !pendingBotWork(before.data, active))) return;
     await command('cancel', async () => {
       const snapshot = await request<AppState>(
         `/api/conversations/${encodeURIComponent(active.id)}/cancel`,
@@ -763,7 +765,7 @@ export function App() {
               onSend={() => void send()}
               onFiles={() => toggleComputer(true)}
               onCancel={() => void cancel()}
-              running={!!queuedRun || (!!conversation && activeRun(conversation.run.status))}
+              running={!!queuedRun || botWork || (!!conversation && activeRun(conversation.run.status))}
               disabled={state.connection !== 'online' || !!globalRun || !!queuedRun}
               busy={busy}
               model={data.settings.model}

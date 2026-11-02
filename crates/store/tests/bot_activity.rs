@@ -210,6 +210,8 @@ async fn chain(f: &Fixture) -> (String, String, String, BotDelivery, BotDelivery
     let second = send(f, &y, &c, "B to C").await;
     f.finish(&y.source).await;
     receive(f, &second, true).await;
+    start_report(f, &first.recipient_conversation_id).await;
+    f.finish(&first.recipient_conversation_id).await;
     add_conversation(f, &c).await;
     let input =
         RoutineInput { bot_id: b.clone(), name: "B routine".into(), prompt: "Run".into(), schedule: RoutineSchedule::Interval { minutes: 30 }, enabled: true };
@@ -454,8 +456,9 @@ async fn start_report(f: &Fixture, conversation: &str) -> (Sending, Vec<String>)
     let ids = f
         .store
         .mutate(move |s| {
-            let ids: Vec<String> = queued_reports(&s.disk().bot_deliveries, &id).iter().map(|d| d.id.clone()).collect();
-            assert!(!ids.is_empty(), "a report is queued");
+            let queued = queued_reports(&s.disk().bot_deliveries, &id);
+            let chain = queued.first().expect("a report is queued").chain_id.clone();
+            let ids: Vec<String> = queued.iter().filter(|delivery| delivery.chain_id == chain).map(|delivery| delivery.id.clone()).collect();
             let conversation = s.conversation_mut(&id)?;
             let marker = Some(ids.clone());
             conversation.messages.push(Message { id: input, report_delivery_ids: marker, ..message(Role::User, "{\"botReplies\":[]}", &now) });
@@ -500,17 +503,21 @@ async fn finished_deliveries_queue_reports_only_for_plain_conversations_and_back
     let y = receive(&f, &first, false).await;
     assert_eq!(report_of(&f, &first.id), None);
 
-    // B forwards to C from its recipient conversation; that level is not reported.
+    // B forwards to C, waits, and consumes C's result before reporting its own final answer.
     let second = send(&f, &y, &c, "B to C").await;
     let before_reports = f.disk_text();
     assert!(!backup.exists());
     f.finish(&y.source).await;
-    assert_eq!(report_status(&f, &first.id), Some(ReportStatus::Queued), "the completed delivery from A's chat is reported");
-    assert_eq!(std::fs::read_to_string(&backup).unwrap(), before_reports, "the state before the first report is kept");
+    assert_eq!(delivery_status(&f, &first.id), DeliveryStatus::WaitingChildren);
+    assert_eq!(report_of(&f, &first.id), None, "the initial B answer is not final");
+    assert_eq!(std::fs::read_to_string(&backup).unwrap(), before_reports, "the first waiting_children write is already incompatible and backed up");
     assert_eq!(std::fs::metadata(&backup).unwrap().permissions().mode() & 0o777, 0o600);
     receive(&f, &second, true).await;
     assert_eq!(second.hop, 2);
-    assert_eq!(report_of(&f, &second.id), None, "a recipient conversation's delivery is not reported");
+    assert_eq!(report_status(&f, &second.id), Some(ReportStatus::Queued));
+    start_report(&f, &y.source).await;
+    f.finish(&y.source).await;
+    assert_eq!(report_status(&f, &first.id), Some(ReportStatus::Queued));
     let public = serde_json::to_value(f.store.snapshot()).unwrap();
     assert_eq!(public["botDeliveries"][0]["report"], json!({"status": "queued"}));
 
@@ -535,7 +542,7 @@ async fn finished_deliveries_queue_reports_only_for_plain_conversations_and_back
     receive(&f, &from_routine, true).await;
     assert_eq!(report_of(&f, &from_routine.id), None);
     assert!(f.store.read(|s| !s.reports_to_conversation(&claimed.conversation_id) && s.reports_to_conversation(&x.source)));
-    assert!(f.store.read(|s| !s.reports_to_conversation(&first.recipient_conversation_id)));
+    assert!(f.store.read(|s| s.reports_to_conversation(&first.recipient_conversation_id)));
 
     // Later writes never replace the backup.
     let other = add_conversation(&f, &a).await;
@@ -660,9 +667,8 @@ async fn report_turns_continue_the_chain_and_a_chain_gets_two_reports() {
     let fourth = send(&f, &answered, &a, "Hop 4").await;
     assert_eq!(fourth.hop, 4);
     f.finish(&answered.source).await;
-    assert_eq!(delivery_status(&f, &third.id), DeliveryStatus::Completed);
-    let skipped = report_of(&f, &third.id).unwrap();
-    assert_eq!((skipped.status, skipped.run_id, skipped.finished_at.is_some()), (ReportStatus::Skipped, None, true));
+    assert_eq!(delivery_status(&f, &third.id), DeliveryStatus::WaitingChildren);
+    assert_eq!(report_of(&f, &third.id), None);
     assert!(f.store.read(|s| queued_reports(&s.disk().bot_deliveries, &x.source).is_empty()));
     assert_eq!(MAX_BOT_REPORTS_PER_CHAIN, 2);
 
@@ -671,6 +677,12 @@ async fn report_turns_continue_the_chain_and_a_chain_gets_two_reports() {
     let error = f.store.mutate(|s| s.queue_bot_message(&last.source, &last.run, &last.message, input)).await.unwrap_err();
     assert_eq!((error.status, error.message.as_str()), (409, "Bot message chains are limited to four hops."));
     f.finish(&last.source).await;
+    assert_eq!(report_status(&f, &fourth.id), Some(ReportStatus::Queued), "mandatory internal hop4 report bypasses cap2");
+    start_report(&f, &answered.source).await;
+    f.finish(&answered.source).await;
+    assert_eq!(delivery_status(&f, &third.id), DeliveryStatus::Completed);
+    let skipped = report_of(&f, &third.id).unwrap();
+    assert_eq!((skipped.status, skipped.run_id, skipped.finished_at.is_some()), (ReportStatus::Skipped, None, true));
     f.reopen().await.expect("report chains pass reference validation");
 }
 
@@ -697,10 +709,12 @@ async fn forged_report_state_is_rejected_on_load() {
     let first = send(&f, &x, &b, "Question 1").await;
     f.finish(&x.source).await;
     let y = receive(&f, &first, false).await;
-    // An unreported delivery from B's recipient conversation.
+    // An internal recipient report must finish before A receives B's report.
     let forward = send(&f, &y, &a, "Forwarded").await;
     f.finish(&y.source).await;
     receive(&f, &forward, true).await;
+    start_report(&f, &y.source).await;
+    f.finish(&y.source).await;
     let (report, _) = start_report(&f, &x.source).await;
     let second = send(&f, &report, &b, "Question 2").await;
     f.finish(&x.source).await;
@@ -737,7 +751,7 @@ async fn forged_report_state_is_rejected_on_load() {
                 delivery["report"] = json!({"status": "queued"});
             }),
         ),
-        ("report on a delivery from a recipient conversation", Box::new(|s| delivery_json(s, &forward.id)["report"] = json!({"status": "queued"}))),
+        ("internal report reset after its hidden turn was consumed", Box::new(|s| delivery_json(s, &forward.id)["report"] = json!({"status": "queued"}))),
         ("third report in a chain", Box::new(|s| delivery_json(s, &third.id)["report"] = json!({"status": "queued"}))),
         (
             "report marker on an assistant message",

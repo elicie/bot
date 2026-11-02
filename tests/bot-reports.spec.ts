@@ -205,3 +205,171 @@ for (const viewport of [{ width: 1040, height: 760 }, { width: 390, height: 844 
     }
   });
 }
+
+async function chainApi<T>(page: Page, method: string, path: string, body?: unknown): Promise<T> {
+  return page.evaluate(async ({ method, path, body }) => {
+    const response = await fetch(path, { method, headers: { 'Content-Type': 'application/json', 'X-Grok-Bot': '1' }, body: body === undefined ? undefined : JSON.stringify(body) });
+    if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+    return response.json();
+  }, { method, path, body });
+}
+
+async function chainBots(page: Page, baseUrl: string, workspace = '') {
+  await chainApi(page, 'PUT', '/api/settings', { baseUrl, model: 'local-test-model', workspace });
+  for (const name of ['Chain B', 'Chain C']) await chainApi(page, 'POST', '/api/bots', { name, instructions: 'Review public fixture data only.' });
+  const state = await snapshot(page);
+  return { b: state.bots.find(bot => bot.name === 'Chain B')!.id, c: state.bots.find(bot => bot.name === 'Chain C')!.id };
+}
+
+async function approveChainTurn(page: Page, conversationId: string) {
+  await expect.poll(async () => (await snapshot(page)).conversations.find(conversation => conversation.id === conversationId)?.run.status, { timeout: 60_000 }).toBe('awaiting_permission');
+  const permission = (await snapshot(page)).conversations.find(conversation => conversation.id === conversationId)!.run.permission!;
+  await chainApi(page, 'POST', `/api/conversations/${conversationId}/permissions/${permission.id}`, { optionId: permission.options.find(option => option.kind === 'allow_once')!.id });
+}
+
+test('a nested review waits for C, then reports B and A exactly once with hidden report inputs on mobile', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const app = await startTestApp();
+  let bots = { b: '', c: '' };
+  let stage = 0;
+  const reportInputs: string[] = [];
+  let releaseC!: () => void;
+  const cGate = new Promise<void>(resolve => { releaseC = resolve; });
+  const provider = await startMockProvider({ reply: async request => {
+    if (!request.tools?.some(tool => tool.function.name === 'search_tool')) return { text: 'Nested report fixture' };
+    switch (stage++) {
+      case 0: return { tool: { name: 'search_tool', arguments: { query: 'workspace send_message', limit: 3 } } };
+      case 1: return { tool: { name: 'use_tool', arguments: { tool_name: 'workspace__send_message', tool_input: { toBotId: bots.b, text: 'Ask C for a final review.' } } } };
+      case 2: return { text: 'A asked Chain B to review.' };
+      case 3: return { tool: { name: 'search_tool', arguments: { query: 'workspace send_message', limit: 3 } } };
+      case 4: return { tool: { name: 'use_tool', arguments: { tool_name: 'workspace__send_message', tool_input: { toBotId: bots.c, text: 'Give the final review verdict.' } } } };
+      case 5: return { text: 'B_DELEGATED_ONLY: I asked C; this is not the final review.' };
+      case 6: await cGate; return { text: 'C_FINAL_CANARY: the public fixture plan is approved.' };
+      case 7:
+        reportInputs.push(request.messages.filter(message => message.role === 'user').map(message => text(message.content)).join('\n'));
+        return { text: 'B_SUMMARY: C reviewed the plan and approved it.' };
+      case 8:
+        reportInputs.push(request.messages.filter(message => message.role === 'user').map(message => text(message.content)).join('\n'));
+        return { text: 'A_SUMMARY: B and C approved the plan; we can proceed.' };
+      default: return { text: 'Unexpected repeated follow-up.' };
+    }
+  } });
+  try {
+    await page.goto(app.url);
+    bots = await chainBots(page, provider.baseUrl);
+    await page.getByLabel('메시지', { exact: true }).fill('Ask B and C for a nested review.');
+    await page.getByRole('button', { name: '메시지 보내기', exact: true }).click();
+    const permission = page.getByRole('region', { name: '작업 승인 요청', exact: true });
+    await expect(permission).toContainText('Ask C for a final review.');
+    await permission.getByRole('button', { name: 'Send once', exact: true }).click();
+    await expect.poll(async () => (await snapshot(page)).botDeliveries?.length ?? 0, { timeout: 60_000 }).toBe(1);
+    const root = (await snapshot(page)).botDeliveries![0];
+    await approveChainTurn(page, root.recipientConversationId);
+    await expect.poll(() => stage, { timeout: 60_000 }).toBe(7);
+
+    const waiting = await snapshot(page);
+    const leaf = waiting.botDeliveries!.find(delivery => delivery.hop === 2)!;
+    expect(waiting.botDeliveries!.find(delivery => delivery.id === root.id)!.status).toBe('waiting_children');
+    expect(waiting.botDeliveries!.find(delivery => delivery.id === root.id)!.report).toBeUndefined();
+    expect(waiting.botExchanges!.find(exchange => exchange.id === root.exchangeId)!.messages).toHaveLength(1);
+    expect(waiting.conversations.find(conversation => conversation.id === root.sourceConversationId)!.messages).toHaveLength(2);
+    const log = page.getByRole('log', { name: '대화 메시지', exact: true });
+    await expect(log.getByLabel('Chain B 답변 상태', { exact: true })).toHaveText('하위 답변 대기 중');
+    await expect(page.getByText('Bot 답변 대기 중', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: '작업 중단', exact: true })).toBeVisible();
+    await expect(log.getByRole('note', { name: '이어서 답한 Bot 답변', exact: true })).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+    releaseC();
+    await expect.poll(async () => (await snapshot(page)).botDeliveries?.find(delivery => delivery.id === root.id)?.report?.status, { timeout: 60_000 }).toBe('completed');
+    const final = await snapshot(page);
+    const a = final.conversations.find(conversation => conversation.id === root.sourceConversationId)!;
+    const b = final.conversations.find(conversation => conversation.id === root.recipientConversationId)!;
+    expect(a.messages.map(message => message.role)).toEqual(['user', 'assistant', 'user', 'assistant']);
+    expect(b.messages.map(message => message.role)).toEqual(['user', 'assistant', 'user', 'assistant']);
+    expect(a.messages[2].reportDeliveryIds).toEqual([root.id]);
+    expect(b.messages[2].reportDeliveryIds).toEqual([leaf.id]);
+    expect(final.botDeliveries!.find(delivery => delivery.id === root.id)!.executionRunId).toBe(b.run.id);
+    expect(reportInputs[0]).toContain('C_FINAL_CANARY');
+    expect(reportInputs[1]).toContain('B_SUMMARY');
+    expect(final.botExchanges!.find(exchange => exchange.id === root.exchangeId)!.messages.map(message => message.text)).toEqual([root.text, 'B_SUMMARY: C reviewed the plan and approved it.']);
+    await expect(log).toContainText('A_SUMMARY');
+    await expect(log).not.toContainText('C_FINAL_CANARY');
+    await expect(log).not.toContainText('Automatic follow-up');
+    await expect(log.getByRole('article', { name: '내 메시지', exact: true })).toHaveCount(1);
+    await expect(log.getByRole('note', { name: '이어서 답한 Bot 답변', exact: true })).toHaveCount(1);
+    await expect(page.getByRole('button', { name: '작업 중단', exact: true })).toHaveCount(0);
+
+    // The same hidden-input/marker contract holds in the recipient's execution conversation.
+    await page.goto(`${app.url}/?bot=${bots.b}&conversation=${root.recipientConversationId}`);
+    const executionLog = page.getByRole('log', { name: '대화 메시지', exact: true });
+    await expect(executionLog).toContainText('B_SUMMARY');
+    await expect(executionLog.getByRole('note', { name: '이어서 답한 Bot 답변', exact: true })).toContainText('Chain C의 답변을 받아 이어서 답함');
+    await expect(executionLog).not.toContainText('Automatic follow-up');
+    await expect(executionLog).not.toContainText('C_FINAL_CANARY');
+    await page.reload();
+    await expect(executionLog.getByRole('note', { name: '이어서 답한 Bot 답변', exact: true })).toHaveCount(1);
+    expect(stage).toBe(9);
+    expect((await snapshot(page)).conversations.find(conversation => conversation.id === root.sourceConversationId)!.messages).toHaveLength(4);
+  } finally { releaseC(); await app.stop(); await provider.close(); }
+});
+
+test('Stop in the waiting root cancels C approval and leaves no descendant or report to replay', async ({ page }) => {
+  test.setTimeout(120_000);
+  const app = await startTestApp();
+  let bots = { b: '', c: '' };
+  let stage = 0;
+  const provider = await startMockProvider({ reply: request => {
+    if (!request.tools?.some(tool => tool.function.name === 'search_tool')) return { text: 'Nested Stop fixture' };
+    const replies: MockCompletion[] = [
+      { tool: { name: 'search_tool', arguments: { query: 'workspace send_message', limit: 3 } } },
+      { tool: { name: 'use_tool', arguments: { tool_name: 'workspace__send_message', tool_input: { toBotId: bots.b, text: 'Ask C before giving the final verdict.' } } } },
+      { text: 'A delegated to B.' },
+      { tool: { name: 'search_tool', arguments: { query: 'workspace send_message', limit: 3 } } },
+      { tool: { name: 'use_tool', arguments: { tool_name: 'workspace__send_message', tool_input: { toBotId: bots.c, text: 'Prepare a review note.' } } } },
+      { text: 'B delegated to C.' },
+      { tool: { name: 'search_tool', arguments: { query: 'workspace send_message', limit: 3 } } },
+      { tool: { name: 'use_tool', arguments: { tool_name: 'workspace__send_message', tool_input: { toBotId: bots.b, text: 'An unapproved follow-up that root Stop must cancel.' } } } },
+    ];
+    return replies[stage++] ?? { text: 'Unexpected answer after root Stop.' };
+  } });
+  try {
+    await page.goto(app.url);
+    bots = await chainBots(page, provider.baseUrl, app.workspace);
+    await page.getByLabel('메시지', { exact: true }).fill('Start a review that I can stop at C.');
+    await page.getByRole('button', { name: '메시지 보내기', exact: true }).click();
+    const permission = page.getByRole('region', { name: '작업 승인 요청', exact: true });
+    await expect(permission).toContainText('Ask C before giving the final verdict.');
+    await permission.getByRole('button', { name: 'Send once', exact: true }).click();
+    await expect.poll(async () => (await snapshot(page)).botDeliveries?.length ?? 0, { timeout: 60_000 }).toBe(1);
+    const root = (await snapshot(page)).botDeliveries![0];
+    await approveChainTurn(page, root.recipientConversationId);
+    await expect.poll(async () => {
+      const state = await snapshot(page);
+      const leaf = state.botDeliveries?.find(delivery => delivery.hop === 2);
+      return state.conversations.find(conversation => conversation.id === leaf?.recipientConversationId)?.run.status;
+    }, { timeout: 60_000 }).toBe('awaiting_permission');
+    const waiting = await snapshot(page);
+    const leaf = waiting.botDeliveries!.find(delivery => delivery.hop === 2)!;
+    const stale = waiting.conversations.find(conversation => conversation.id === leaf.recipientConversationId)!.run.permission!;
+    await expect(page.getByLabel('Chain B 답변 상태', { exact: true })).toHaveText('하위 답변 대기 중');
+    await page.getByRole('button', { name: '작업 중단', exact: true }).click();
+    await expect.poll(async () => (await snapshot(page)).conversations.find(conversation => conversation.id === leaf.recipientConversationId)?.run.status, { timeout: 30_000 }).toBe('cancelled');
+    const stopped = await snapshot(page);
+    expect(stopped.botDeliveries!.find(delivery => delivery.id === root.id)!.chainTermination?.status).toBe('cancelled');
+    expect(stopped.botDeliveries!.every(delivery => !['queued', 'running', 'waiting_children'].includes(delivery.status) && !['queued', 'running'].includes(delivery.report?.status ?? ''))).toBe(true);
+    expect(stopped.conversations.find(conversation => conversation.id === leaf.recipientConversationId)!.run.permission).toBeUndefined();
+    const lateStatus = await page.evaluate(async ({ id, permission }) => (await fetch(`/api/conversations/${id}/permissions/${permission.id}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Grok-Bot': '1' }, body: JSON.stringify({ optionId: permission.options[0].id }) })).status, { id: leaf.recipientConversationId, permission: stale });
+    expect(lateStatus).toBe(409);
+    await page.reload();
+    await expect(page.getByRole('button', { name: '작업 중단', exact: true })).toHaveCount(0);
+    await expect(page.getByLabel('Chain B 답변 상태', { exact: true })).toHaveText('중단됨');
+    await expect(page.getByText('Bot 작업을 중단했습니다.', { exact: true })).toBeVisible();
+    await expect(page.getByText('작업 완료', { exact: true })).toHaveCount(0);
+    await expect(page.getByRole('note', { name: '이어서 답한 Bot 답변', exact: true })).toHaveCount(0);
+    await page.waitForTimeout(1200); // Cross a real scheduler poll after reload: no follow-up may restart.
+    expect(stage).toBe(8);
+    expect((await snapshot(page)).conversations.find(conversation => conversation.id === root.sourceConversationId)!.messages).toHaveLength(2);
+  } finally { await app.stop(); await provider.close(); }
+});

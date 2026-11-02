@@ -9,7 +9,9 @@ use grok_bot_model::{
     BotDelivery, BotInput, BotMessageInput, HttpError, HttpResult, PendingPermission, PermissionCategory, PermissionOption, SkillInput, ToolActivity,
     ToolStatus, new_id,
 };
-use grok_bot_store::bot_messages::{MAX_BOT_HOPS, MAX_BOT_MESSAGE_BYTES, bot_delivery_receipt, chain_parent, validate_bot_message_input};
+use grok_bot_store::bot_messages::{
+    BOT_CHAIN_TIMEOUT_ERROR, MAX_BOT_HOPS, MAX_BOT_MESSAGE_BYTES, bot_delivery_receipt, chain_parent, validate_bot_message_input,
+};
 use grok_bot_store::skills::{MAX_SKILL_RESPONSE_BYTES, skill_response_text, validate_skill_input};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -425,6 +427,14 @@ impl Runtime {
             let recipient = state.bot(&input.to_bot_id)?;
             // A report turn's message continues the reported delivery's chain (see `chain_parent`).
             let parent = chain_parent(&state.disk().bot_deliveries, state.conversation(&run.conversation_id)?, &run.message_id);
+            if let Some(parent) = parent {
+                if state.expired_bot_chains(state.now()).contains(&parent.chain_id) {
+                    return Err(HttpError::conflict(BOT_CHAIN_TIMEOUT_ERROR));
+                }
+                if state.disk().bot_deliveries.iter().any(|delivery| delivery.id == parent.chain_id && delivery.chain_termination.is_some()) {
+                    return Err(HttpError::conflict("This bot message chain was stopped."));
+                }
+            }
             Ok((recipient.id.clone(), recipient.name.clone(), parent.map(|d| d.hop).unwrap_or(0)))
         })?;
         if recipient_id == run.bot.id {

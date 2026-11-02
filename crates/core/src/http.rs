@@ -505,14 +505,9 @@ async fn send_message(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(
 }
 
 async fn cancel(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(id): Path<String>, JsonBody(_): JsonBody<Empty>) -> ApiResult {
-    let store = ctx.store.clone();
-    let queued_id = id.clone();
-    let cancelled_queued = ctx.queue.run(async move { store.mutate(|s| s.cancel_queued_work(&queued_id)).await }).await?;
-    if !cancelled_queued {
-        // Runtime cancellation waits for the run to settle; it is not held inside the command queue
-        // (the Node handler awaited `done` outside the queue as well).
-        ctx.runtime.cancel(&id).await?;
-    }
+    // Runtime resolves both the selected turn and its durable Bot chain. Waiting parents can
+    // own an active descendant in another conversation; do not stop at a queued receipt here.
+    ctx.runtime.cancel(&id).await?;
     Ok(state_reply(&ctx, StatusCode::OK, &remote))
 }
 

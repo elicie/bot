@@ -68,6 +68,13 @@ export const activeRun = (status: RunStatus) =>
   status === 'starting' || status === 'running' || status === 'awaiting_permission';
 export const runningConversation = (data: AppState | null) =>
   data?.conversations.find((conversation) => activeRun(conversation.run.status));
+/** A waiting Bot chain can own descendants even when this conversation has no active engine turn. */
+export const pendingBotWork = (data: AppState | null, conversation: Conversation | undefined) =>
+  !!data?.runtime.botMessageChains && !!conversation && !!data.botDeliveries?.some(delivery =>
+    ((delivery.sourceConversationId === conversation.id || delivery.recipientConversationId === conversation.id)
+      && ['queued', 'running', 'waiting_children'].includes(delivery.status))
+    || (delivery.sourceConversationId === conversation.id && !!delivery.report
+      && ['queued', 'running'].includes(delivery.report.status)));
 export const queuedRoutineRun = (data: AppState | null, conversation: Conversation | undefined) =>
   conversation?.run.status === 'idle'
     ? data?.routineRuns.find((run) => run.conversationId === conversation.id && !run.result)

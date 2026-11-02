@@ -23,7 +23,7 @@ import type {
   RoutineRun,
   ToolActivity,
 } from '../shared/types';
-import { activeRun, runLabels } from './state';
+import { activeRun, pendingBotWork, runLabels } from './state';
 import { Avatar, ErrorNotice, IconButton } from './ui';
 import { BotMessageLinks, BotReportMarker } from './BotChat';
 import { RichMarkdown } from './RichMarkdown';
@@ -281,6 +281,9 @@ export function Transcript({
     return () => observer.disconnect();
   }, []);
   const running = conversation && activeRun(conversation.run.status);
+  const waitingBotWork = !running && pendingBotWork(data ?? null, conversation);
+  const tailDelivery = data?.botDeliveries?.find(delivery => delivery.sourceConversationId === conversation?.id && delivery.sourceMessageId === tail?.id);
+  const chainTermination = tailDelivery && data?.botDeliveries?.find(delivery => delivery.id === tailDelivery.chainId)?.chainTermination;
   const status = conversation?.run.status;
   return (
     <div className="transcript-container">
@@ -378,8 +381,8 @@ export function Transcript({
           )}
           {status === 'completed' && (
             <p className="terminal-note" role="status">
-              <CheckCircle2 size={13} />
-              작업 완료
+              {waitingBotWork ? <Clock3 size={13} /> : chainTermination ? <Square size={12} /> : <CheckCircle2 size={13} />}
+              {waitingBotWork ? 'Bot 답변 대기 중' : chainTermination ? (chainTermination.status === 'cancelled' ? 'Bot 작업을 중단했습니다.' : 'Bot 작업이 실패했습니다.') : '작업 완료'}
             </p>
           )}
           {!runtimeAvailable && (

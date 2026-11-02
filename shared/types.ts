@@ -61,12 +61,14 @@ export interface BotDelivery {
   chainId: string;
   hop: number;
   createdAt: string;
-  status: 'queued' | 'running' | 'completed' | 'cancelled' | 'error' | 'interrupted';
+  status: 'queued' | 'running' | 'waiting_children' | 'completed' | 'cancelled' | 'error' | 'interrupted';
   requestId?: string;
   executionRunId?: string;
   startedAt?: string;
   finishedAt?: string;
   error?: string;
+  /** Root-only durable Stop/deadline latch for the entire chain, including queued descendants. */
+  chainTermination?: { status: 'cancelled' | 'error'; finishedAt: string; error?: string };
   /** The follow-up turn that reports this delivery's result to the sender conversation. */
   report?: DeliveryReport;
 }
@@ -171,6 +173,8 @@ export interface SettingsInput {
 }
 export interface RuntimeInfo {
   available: boolean;
+  /** Logical chain cancellation is available only on the Rust backend. */
+  botMessageChains?: boolean;
   version?: string;
   error?: string;
 }

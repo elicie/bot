@@ -112,7 +112,9 @@ enum Job {
 pub const PRE_REPORTS_BACKUP: &str = "state.json.pre-bot-reports.bak";
 
 fn uses_reports(disk: &DiskState) -> bool {
-    disk.bot_deliveries.iter().any(|delivery| delivery.report.is_some())
+    disk.bot_deliveries
+        .iter()
+        .any(|delivery| delivery.report.is_some() || delivery.status == DeliveryStatus::WaitingChildren || delivery.chain_termination.is_some())
         || disk.conversations.iter().flat_map(|conversation| &conversation.messages).any(|message| message.report_delivery_ids.is_some())
 }
 
@@ -252,7 +254,12 @@ fn writer_loop(shared: Arc<Shared>, path: PathBuf, jobs: mpsc::Receiver<Job>) {
                         let snapshot = {
                             let mut state = shared.lock();
                             state.write_failed = true;
-                            state.runtime = RuntimeInfo { available: false, version: state.runtime.version.clone(), error: Some(SAVE_FAILED_RUNTIME.into()) };
+                            state.runtime = RuntimeInfo {
+                                available: false,
+                                bot_message_chains: state.runtime.bot_message_chains,
+                                version: state.runtime.version.clone(),
+                                error: Some(SAVE_FAILED_RUNTIME.into()),
+                            };
                             Arc::new(state.snapshot())
                         };
                         let _ = shared.events.send(snapshot);
@@ -359,7 +366,7 @@ impl Store {
             disk,
             data_dir: root.clone(),
             clock: now.clone(),
-            runtime: RuntimeInfo { available: false, version: None, error: Some("Checking Grok Build.".into()) },
+            runtime: RuntimeInfo { available: false, bot_message_chains: None, version: None, error: Some("Checking Grok Build.".into()) },
             routine_scheduling_error: None,
             dirty: false,
             write_failed: false,
@@ -562,8 +569,18 @@ impl State {
         let deliveries: usize = prospect
             .bot_deliveries
             .iter()
-            .filter(|delivery| matches!(delivery.status, DeliveryStatus::Queued | DeliveryStatus::Running))
-            .map(|delivery| (if delivery.status == DeliveryStatus::Queued { json_bytes(&delivery.text) } else { 0 }) + MAX_BOT_REPLY_CHARACTERS * 12 + 8192)
+            .map(|delivery| {
+                // Reserve recipient + exchange answer copies AND the later hidden report input and
+                // summary. Waiting recipients retain that reserve; queued reports must not lose it
+                // merely because their delivery already finished. JSON can use six bytes per char.
+                if delivery.status.is_pending() {
+                    (if delivery.status == DeliveryStatus::Queued { json_bytes(&delivery.text) } else { 0 }) + MAX_BOT_REPLY_CHARACTERS * 24 + 128 * 1024 + 8192
+                } else if delivery.report.as_ref().is_some_and(|report| !report.status.is_terminal()) {
+                    MAX_BOT_REPLY_CHARACTERS * 12 + 128 * 1024 + 8192
+                } else {
+                    0
+                }
+            })
             .sum();
         if json_bytes(prospect).saturating_add(runs).saturating_add(deliveries) > MAX_STATE_BYTES {
             return Err(HttpError::too_large(
@@ -1233,6 +1250,7 @@ impl State {
         }
         let message = message.ok_or_else(internal)?;
         if let Some(existing) = find_existing_bot_delivery(&self.disk.bot_deliveries, source_message_id, &input)? {
+            self.assert_bot_chain_open(&existing.chain_id, self.now())?;
             return Ok(existing.clone());
         }
         let recipient = self.bot(&input.to_bot_id)?;
@@ -1242,6 +1260,9 @@ impl State {
         // A recipient conversation continues its delivery; the answer of a report turn continues the
         // reported delivery (so report turns cannot restart a chain at hop 1).
         let parent = chain_parent(&self.disk.bot_deliveries, source, source_message_id);
+        if let Some(parent) = parent {
+            self.assert_bot_chain_open(&parent.chain_id, self.now())?;
+        }
         let hop = parent.map_or(0, |parent| parent.hop) + 1;
         if hop > MAX_BOT_HOPS {
             return Err(HttpError::conflict("Bot message chains are limited to four hops."));
@@ -1290,6 +1311,7 @@ impl State {
             finished_at: None,
             error: None,
             report: None,
+            chain_termination: None,
         };
         let source_index = self.disk.conversations.iter().position(|conversation| conversation.id == conversation_id).ok_or_else(internal)?;
         // Measure with the source message linked to the exchange, then undo on rejection.
@@ -1315,6 +1337,11 @@ impl State {
         self.assert_writable()?;
         let delivery =
             self.disk.bot_deliveries.iter().find(|delivery| delivery.id == delivery_id).ok_or_else(|| HttpError::not_found("Bot delivery does not exist."))?;
+        // A scheduler claim may have lost a race to chain Stop/expiry or another dispatch. Only
+        // a still-queued receipt can fail to start; never rewrite a settled or active recipient.
+        if delivery.status != DeliveryStatus::Queued {
+            return Ok(());
+        }
         let conversation_id = delivery.recipient_conversation_id.clone();
         let error = js_slice(&self.redact(error), 1000).to_owned();
         let timestamp = iso(now);
