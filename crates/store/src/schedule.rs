@@ -1,8 +1,7 @@
-//! Routine schedule math. Port of `nextRoutineTime`, `latestRoutineTime`, and the routine input
-//! validation in `server/routines.ts`. CONTRACT (store agent).
+//! Routine schedule validation and next/latest occurrence calculations.
 //!
-//! Daily schedules run the same search as the Node code (`cron-parser` 5 over a luxon timezone;
-//! see `cron.rs`), so DST behavior matches exactly: in New York a 02:30 schedule fires at 03:30 EDT
+//! Daily schedules preserve the prior `cron-parser` 5 and luxon search semantics (see `cron.rs`):
+//! in New York a 02:30 schedule fires at 03:30 EDT
 //! on the spring-forward day and once (at the first 01:30) on the fall-back day, while zones whose
 //! transition skips local midnight (Santiago, Havana) skip that day's occurrence.
 

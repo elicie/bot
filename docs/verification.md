@@ -17,13 +17,26 @@ node scripts/verify-release.mjs target/release/grok-bot
 
 `npm test` retains frontend unit tests; `npm run test:rust` covers the Rust workspace backend and engine tests. Playwright uses Rust by default with no backend selection flag or Rust-only e2e alias. Its build order is frontend, debug server, then e2e. Fixtures use temporary data/workspaces and a local OpenAI-compatible provider, not paid model calls. Browser checks and managed computing require system Google Chrome and its working sandbox.
 
-`build:release` runs `npm run build` followed by `node scripts/cargo.mjs build --locked --release -p grok-bot-server`. [crates/server/build.rs](<../crates/server/build.rs>) embeds the compiled [dist/](<../dist/>). Release compilation must fail rather than produce a UI-less artifact when the frontend output is absent. Debug builds allow API-only checks with no frontend output, prefer an embedded bundle when available, and otherwise serve `dist/` in the current working directory. An explicit `GROK_BOT_WEB_ROOT` takes precedence and must contain `index.html`.
+`build:release` runs `npm run build` followed by `node scripts/cargo.mjs build --locked --release -p grok-bot-server`. [crates/server/build.rs](<../crates/server/build.rs>) embeds the compiled [dist/](<../dist/>) for release builds. Release compilation must fail rather than produce a UI-less artifact when the frontend output is absent. Debug builds never embed frontend output: they serve [dist/](<../dist/>) in the current working directory, or run API-only when it is absent. Their build script does not watch frontend output. An explicit `GROK_BOT_WEB_ROOT` takes precedence and must contain `index.html`.
 
-## P4 verification (2026-11-02)
+## Rebased review verification
 
-Environment: Linux x86_64, Node.js 24.18.0, Rust 1.98.0, system Google Chrome. The implementation starts at revision `030794a6c87811e11b2d8dfb223a07e5e209f3a4`; [PR #28](https://github.com/elicie/bot/pull/28) records the final head and CI. The following are actual local checks, distinct from the historical results below. The optimized release and standalone smoke passed; the GitHub Actions run is tracked separately in the PR.
+The review worktree is rebased onto `origin/main` at `3c11131`, including the MCP form/probe and self-hosted runner changes. The review corrected the claim that every removed Node backend test had a Rust replacement: scheduler concurrency coverage was incomplete. Backend tests now run in the Rust workspace, but their number alone does not establish coverage parity.
 
-| Check | Command / required evidence | P4 result |
+Review-era results are separate from the actual earlier P4 evidence below:
+
+- **Passed during review:** clean `npm ci`, TypeScript check, and Vite build with the merged MCP frontend; four targeted core web unit tests, one real-HTTP web test, and the merged MCP-probe shutdown test. These targeted runs precede the final workspace rerun.
+- **Passed build-script guards:** the real [build script](<../crates/server/build.rs>) in a dependency-free Cargo fixture leaves repeated no-dist debug builds fresh, including after frontend output is created; release rejects missing frontend output, embeds newly added assets, and rejects symlinks. These fixture checks do not replace the release/server runtime smoke below.
+- **Passed:** `umask 0022; npm run test:rust`, `cargo fmt --all --check`, and workspace/all-target clippy with `-D warnings`, including the new [scheduler integration harness](<../crates/core/tests/scheduler.rs>) and [gated provider](<../crates/core/tests/scheduler/provider.rs>). Its six scenario groups cover global serialization/FIFO, overlapping ticks, both manual/scheduled race orders with held and immediate completions, duplicate HTTP/manual admission, queued/active cancellation, shutdown and durable-queue recovery, and automatic polling/repeated starts. Provider prompts and actual persisted execution/result state are asserted. The scheduler target also passed three isolated runs; no scheduler production behavior changed.
+- **Passed:** the owner-selected eight changed Chrome specs: 22 scenarios, no skips, 49.1 seconds locally. Unchanged frontend unit suites were not rerun in this scoped pass; the earlier 11 frontend and 57 e2e passes remain earlier-revision evidence.
+- **Passed:** `npm run build:release` and the updated copied-binary standalone smoke (including immutable assets and conditional ETag/304 responses). The rebased Linux x86_64 artifact is about 248 MiB with `strip="debuginfo"`: `readelf` confirms `.symtab` retained and `.debug_info` absent. Actual debug-server probes confirm no-dist API200/root404, current cwd assets after restart, and changed disk content without recompilation. Supported CLI flags exit successfully; unknown or multiple flags reject.
+- Independent AI approval for the exact base/head and the current CI result are recorded in [PR #28](https://github.com/elicie/bot/pull/28). A changed base or head requires renewed approval; the local evidence above does not imply merge approval or a merged PR.
+
+## Earlier P4 verification (2026-11-02, before rebase)
+
+Environment: Linux x86_64, Node.js 24.18.0, Rust 1.98.0, system Google Chrome. The implementation revision was `030794a6c87811e11b2d8dfb223a07e5e209f3a4`. These are actual earlier local checks, not claims about the rebased review revision. In particular, their release size, symbol stripping, debug embedding/precedence, and screenshot evidence describe that earlier implementation. GitHub Actions and final-head review are recorded separately in [PR #28](https://github.com/elicie/bot/pull/28).
+
+| Check | Command / required evidence | Earlier P4 result |
 | --- | --- | --- |
 | Frontend types and tests | Clean `npm ci`; `npm run typecheck`; `npm test`; `npm run build` | Passed. Both frontend suites retained: 11 tests, no skips. Retained dependency versions unchanged. |
 | Rust backend and engine | `umask 0022; npm run test:rust`; fmt and clippy with `-D warnings` | Passed. All workspace tests, no skips. Encoded reserved-namespace asset regressions and real HTTP disk/embedded precedence also passed on the reviewed source. |

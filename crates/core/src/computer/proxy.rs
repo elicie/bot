@@ -1,5 +1,4 @@
-//! Authenticated loopback forward proxy of the managed computer. Port of `ComputerProxy` in
-//! `server/computer-network.ts`.
+//! Authenticated loopback forward proxy for the managed computer.
 //!
 //! Chrome is launched with this proxy as its only network path (`--host-resolver-rules` makes every
 //! other name unresolvable). Each request needs the per-session Basic credentials, is limited to

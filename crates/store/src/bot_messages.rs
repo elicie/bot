@@ -1,4 +1,4 @@
-//! Bot-to-bot delivery data rules. Port of `server/bot-messages.ts`. CONTRACT (store agent).
+//! Bot-to-bot delivery admission, persistence, and follow-up data rules.
 //!
 //! Follow-up ("report") turns: when a delivery sent from a plain 1:1 conversation finishes, its
 //! `report` becomes queued and the dispatcher later runs one automatic turn of the sender bot in

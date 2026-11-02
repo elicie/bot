@@ -167,6 +167,7 @@ fn probes_are_responsive_bounded_and_cleaned_on_tcp_disconnect_and_shutdown() {
             data_dir,
             engine_root: root.join("engine"),
             web_root: None,
+            embedded_web: None,
             allowed_hosts: vec![],
             now: None,
             scheduler: Some(SchedulerOptions { auto_start: false, ..SchedulerOptions::default() }),

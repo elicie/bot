@@ -1,6 +1,6 @@
 # Issue #6 visual and real-model evidence
 
-All images are actual Chrome application captures, not mockups. Only disposable synthetic conversations and fixture files are shown. No credentials or personal conversation content are included.
+All images are actual Chrome application captures, not mockups. Only disposable synthetic conversations and fixture files are shown. No credentials or personal conversation content are included. Captures and check results belong to the revisions below; they are historical evidence, not a fresh verification of the rebased P4 review head.
 
 ## Matched Before / After
 

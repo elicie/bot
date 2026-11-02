@@ -1,5 +1,4 @@
-//! Backend composition. Port of `createBackend` in `server/app.ts`; used by the web server binary
-//! and, later, the Tauri desktop app.
+//! Backend composition and lifecycle for the web server and a future desktop host.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

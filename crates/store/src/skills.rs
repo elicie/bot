@@ -1,4 +1,4 @@
-//! Private skill rules. Port of `server/skills.ts`. CONTRACT (store agent).
+//! Private skill validation, import, capacity, and persistence rules.
 
 use std::collections::HashSet;
 use std::sync::LazyLock;

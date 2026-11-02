@@ -36,7 +36,12 @@ fn embedded_frontend_keeps_http_guards_and_disk_override() {
             let (status, body) = common::raw(port, "GET", "/", &host, None).await;
             assert_eq!(status, 200);
             assert!(body.contains(if web_root.is_some() { "Disk override" } else { "Embedded" }));
-            for route in ["/api/not-found", "/internal/not-found"] {
+            for route in ["/internals", "/internal-preview"] {
+                let (status, body) = common::raw(port, "GET", route, &host, None).await;
+                assert_eq!(status, 200, "{route}");
+                assert!(body.contains(if web_root.is_some() { "Disk override" } else { "Embedded" }));
+            }
+            for route in ["/api/not-found", "/internal", "/internal/not-found"] {
                 assert_eq!(common::raw(port, "GET", route, &host, None).await.0, 404);
             }
             assert_eq!(common::raw(port, "GET", "/", &[("Host".into(), format!("evil.test:{port}"))], None).await.0, 403);

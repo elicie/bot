@@ -1,5 +1,4 @@
-//! Hide local-computer approval and tool details from non-loopback clients. Port of
-//! `server/public-state.ts`.
+//! Hide local-computer approval and tool details from non-loopback clients.
 
 use grok_bot_model::{AppState, PendingPermission, ToolActivity};
 use serde_json::{Map, Value};

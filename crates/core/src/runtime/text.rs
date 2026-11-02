@@ -1,6 +1,5 @@
-//! Pure text helpers of the runtime: prompt literalization, continuation history, credential
-//! redaction, streamed-prefix holding, titles, and the session fingerprint. Each mirrors the
-//! function of the same purpose in `server/runtime.ts`.
+//! Pure runtime text helpers: prompt literalization, continuation history, credential redaction,
+//! streamed-prefix holding, titles, and the session fingerprint.
 
 use grok_bot_model::{Bot, PrivateSettings, Role};
 use sha2::{Digest, Sha256};

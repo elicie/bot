@@ -25,15 +25,19 @@ fn collect(root: &Path, dir: &Path, files: &mut Vec<(String, std::path::PathBuf)
 }
 
 fn main() -> io::Result<()> {
+    println!("cargo:rerun-if-changed=build.rs");
     let manifest = std::path::PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let root = manifest.join("../../dist");
-    println!("cargo:rerun-if-changed={}", root.display());
     let mut files = Vec::new();
-    if root.join("index.html").is_file() {
+    // Debug serves the current disk bundle. Watching an absent directory would keep API-only
+    // builds dirty; neither its presence nor its contents affect the debug executable.
+    if env::var("PROFILE").as_deref() == Ok("release") {
+        println!("cargo:rerun-if-changed={}", root.display());
+        if !root.join("index.html").is_file() {
+            return Err(io::Error::other("Release builds require dist/index.html. Run npm ci && npm run build, or npm run build:release."));
+        }
         collect(&root, &root, &mut files)?;
         files.sort_by(|a, b| a.0.cmp(&b.0));
-    } else if env::var("PROFILE").as_deref() == Ok("release") {
-        return Err(io::Error::other("Release builds require dist/index.html. Run npm ci && npm run build, or npm run build:release."));
     }
     let output = std::path::PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("web_assets.rs");
     let mut output = fs::File::create(output)?;

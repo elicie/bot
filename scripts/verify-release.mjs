@@ -74,6 +74,12 @@ try {
   assert.equal(index.status, 200);
   assert.match(index.headers.get('content-type'), /text\/html/);
   assert.equal(index.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(index.headers.get('cache-control'), 'no-cache');
+  const indexTag = index.headers.get('etag');
+  assert.ok(indexTag);
+  const revalidatedIndex = await request('/', { headers: { 'If-None-Match': indexTag } });
+  assert.equal(revalidatedIndex.status, 304);
+  assert.equal((await revalidatedIndex.arrayBuffer()).byteLength, 0);
   const html = await index.text();
   const assets = [...html.matchAll(/(?:src|href)="(\/assets\/[^"?]+)"/g)].map(match => match[1]);
   assert.ok(assets.some(asset => asset.endsWith('.js')));
@@ -82,7 +88,13 @@ try {
     const response = await request(asset);
     assert.equal(response.status, 200, asset);
     assert.match(response.headers.get('content-type'), asset.endsWith('.js') ? /javascript/ : /css/);
+    assert.equal(response.headers.get('cache-control'), 'public, max-age=31536000, immutable');
+    const tag = response.headers.get('etag');
+    assert.ok(tag);
     assert.ok((await response.arrayBuffer()).byteLength > 0);
+    const revalidated = await request(asset, { headers: { 'If-None-Match': tag } });
+    assert.equal(revalidated.status, 304);
+    assert.equal((await revalidated.arrayBuffer()).byteLength, 0);
   }
   const head = await request(assets[0], { method: 'HEAD' });
   assert.equal(head.status, 200);

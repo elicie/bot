@@ -1,5 +1,4 @@
-//! `ApplicationComputer`: the single managed browser bound to one bot at a time. Port of
-//! `ApplicationComputer` in `server/computer-api.ts`.
+//! `ApplicationComputer`: the single managed browser bound to one bot at a time.
 //!
 //! Starts and actions run one at a time and carry the cancellation generation they were admitted
 //! under; Stop increments the generation, so work queued before a Stop never reaches the browser.

@@ -1,5 +1,5 @@
-//! HTTP layer. Port of `server/app.ts`: Host/Origin validation, security headers, same-origin JSON
-//! mutations, the `/api` routes, SSE state events, the internal MCP broker route, and static files.
+//! HTTP layer: Host/Origin validation, security headers, same-origin JSON mutations, `/api`
+//! routes, SSE state events, the internal MCP broker route, and frontend assets.
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -280,7 +280,8 @@ pub fn router(ctx: Ctx) -> Router {
 }
 
 async fn spa_fallback(request: Request, index: PathBuf) -> Response {
-    if request.uri().path().starts_with("/internal") || !matches!(*request.method(), Method::GET | Method::HEAD) {
+    let path = request.uri().path();
+    if path == "/internal" || path.starts_with("/internal/") || !matches!(*request.method(), Method::GET | Method::HEAD) {
         return StatusCode::NOT_FOUND.into_response();
     }
     match tokio::fs::read(&index).await {

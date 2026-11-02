@@ -17,12 +17,12 @@ fn frontend() -> anyhow::Result<(Option<PathBuf>, Option<grok_bot_core::web::Emb
         }
         return Ok((Some(root), None));
     }
-    if !WEB_ASSETS.is_empty() {
-        return Ok((None, Some(WEB_ASSETS)));
+    if cfg!(debug_assertions) {
+        // Development always sees the latest frontend build, never a stale embedded copy.
+        let root = std::path::absolute("dist")?;
+        return Ok((root.join("index.html").is_file().then_some(root), None));
     }
-    // Debug API-only builds remain possible without Node or a frontend build.
-    let root = std::path::absolute("dist")?;
-    Ok((root.join("index.html").is_file().then_some(root), None))
+    Ok((None, (!WEB_ASSETS.is_empty()).then_some(WEB_ASSETS)))
 }
 
 fn ipv4_addresses() -> Vec<Ipv4Addr> {
