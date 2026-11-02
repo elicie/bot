@@ -1,17 +1,20 @@
 name: CI
 
-# Checks only what a change touches (scripts/ci-changes.mjs): the web build for UI changes,
-# rustfmt plus clippy/tests of the changed crates, the changed Node tests, and only the
-# Playwright specs that changed. There is no full-suite run.
-# Build jobs run on the self-hosted ai-dev runner (label grok-bot) except for fork PRs.
+# PRs check affected crates (including reverse dependents) and changed JS/browser tests.
+# Daily and manual runs cover the full suite; see docs/ci.md for scope and diagnostics.
+# Build jobs use the self-hosted grok-bot runner except for fork PRs.
 
 on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: '17 3 * * *' # Daily at 03:17 UTC on the default branch (main).
+  workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # A main push must not cancel the daily full check.
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -37,13 +40,23 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Test CI selection and diagnostics
+        run: node --test scripts/ci-*.test.mjs
       - id: detect
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          FULL: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         run: |
-          git diff --name-only "$BASE"...HEAD > changed.txt 2>/dev/null || git diff --name-only HEAD~1 HEAD > changed.txt
-          cat changed.txt
-          node scripts/ci-changes.mjs < changed.txt | tee -a "$GITHUB_OUTPUT"
+          if [ "$FULL" = true ] || [ -z "$BASE" ] || ! git diff --name-only "$BASE"...HEAD > changed.txt; then
+            # Missing/zero base (e.g. first push) must not silently skip affected files.
+            node scripts/ci-changes.mjs --full | tee -a "$GITHUB_OUTPUT"
+          else
+            cat changed.txt
+            node scripts/ci-changes.mjs < changed.txt | tee -a "$GITHUB_OUTPUT"
+          fi
 
   web:
     name: Web (typecheck, build)
@@ -60,11 +73,11 @@ jobs:
           node-version: 24
           # ~/.npm persists on the self-hosted runner; uploading it to the Actions cache only costs time.
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
-      - run: npm ci
-      - run: npm run build
+      - run: node scripts/ci-run.mjs npm ci
+      - run: node scripts/ci-run.mjs npm run build
 
   lint:
-    name: Rust lint (fmt, clippy on changed crates)
+    name: Rust lint (fmt, clippy on affected crates)
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     # Same-repo PRs and pushes use the self-hosted ai-dev runner (warm build cache); fork PRs
@@ -88,26 +101,36 @@ jobs:
             dir="$GITHUB_WORKSPACE/target"
           fi
           echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
-      - run: cargo fmt --all --check
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node scripts/ci-run.mjs cargo fmt --all --check
       - name: Free disk space
         if: needs.changes.outputs.packages != '' && runner.environment == 'github-hosted'
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
       - if: needs.changes.outputs.packages != '' && runner.environment == 'github-hosted'
+        id: rust-cache
         uses: Swatinem/rust-cache@v2
-      - if: needs.changes.outputs.packages != ''
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
+      - name: Rust cache status
+        if: needs.changes.outputs.packages != ''
+        env:
+          EXACT_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+        run: echo "Rust lint cache exact match = $EXACT_HIT (see restore/save logs for fallback hits and uploads)" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Install ripgrep (bundled into the engine build)
         if: needs.changes.outputs.packages != '' && runner.environment == 'github-hosted'
         run: sudo apt-get update && sudo apt-get install -y ripgrep
       # scripts/cargo.mjs stages a checksum-verified protoc and sets the ripgrep paths.
       - name: Clippy
         if: needs.changes.outputs.packages != ''
-        run: node scripts/cargo.mjs clippy --locked ${{ needs.changes.outputs.packages }} --all-targets -- -D warnings
+        env:
+          PACKAGES: ${{ needs.changes.outputs.packages }}
+        run: node scripts/ci-run.mjs node scripts/cargo.mjs clippy --locked $PACKAGES --all-targets -- -D warnings
+      - name: Final disk usage
+        if: always()
+        run: df -h / && df -i / && du -sh target 2>/dev/null || true
 
   test:
-    name: Tests (changed crates, Node tests, specs)
+    name: Tests (affected crates, Node tests, specs)
     needs: changes
     if: needs.changes.outputs.packages != '' || needs.changes.outputs.node != '' || needs.changes.outputs.specs != ''
     # Same-repo PRs and pushes use the self-hosted ai-dev runner (warm build cache); fork PRs
@@ -137,7 +160,12 @@ jobs:
       - if: runner.environment == 'github-hosted'
         uses: dtolnay/rust-toolchain@stable
       - if: runner.environment == 'github-hosted'
+        id: rust-cache
         uses: Swatinem/rust-cache@v2
+      - name: Rust cache status
+        env:
+          EXACT_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+        run: echo "Rust test cache exact match = $EXACT_HIT (see restore/save logs for fallback hits and uploads)" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -146,30 +174,41 @@ jobs:
       - name: Install ripgrep (bundled into the engine build)
         if: runner.environment == 'github-hosted'
         run: sudo apt-get update && sudo apt-get install -y ripgrep
-      - run: npm ci
-      - name: Rust tests (changed crates)
+      - run: node scripts/ci-run.mjs npm ci
+      - name: Rust tests (affected crates)
         if: env.PACKAGES != ''
-        run: node scripts/cargo.mjs test --locked $PACKAGES
-      # The Node backend tests drive the real engine binary.
-      - name: Node tests (changed)
+        run: node scripts/ci-run.mjs node scripts/cargo.mjs test --locked $PACKAGES
+      # Keep compilation separate so a stall cannot be mistaken for a silent Node test.
+      - name: Build engine for Node tests
+        if: env.NODE_TESTS != ''
+        timeout-minutes: 30
+        run: node scripts/ci-run.mjs npm run build:engine
+      - name: Node tests (selected or full)
         if: env.NODE_TESTS != ''
         timeout-minutes: 30
         run: |
-          npm run build:engine
           if [ "$NODE_TESTS" = all ]; then files="tests/*.test.ts"; else files="$NODE_TESTS"; fi
-          npx tsx --test --test-timeout=180000 --test-reporter=spec $files
-      - name: End-to-end specs (changed, Rust backend, system Chrome)
+          node scripts/ci-run.mjs npx tsx --test --test-timeout=180000 --test-reporter=spec $files
+      - name: Build web and Rust server for end-to-end specs
         if: env.SPECS != ''
+        run: |
+          node scripts/ci-run.mjs npm run build
+          node scripts/ci-run.mjs npm run build:server
+      - name: End-to-end specs (selected or full, Rust backend, system Chrome)
+        if: env.SPECS != ''
+        timeout-minutes: 30
         env:
           GROK_BOT_BACKEND: rust
           GROK_BOT_SERVER_BIN: ${{ env.CARGO_TARGET_DIR }}/debug/grok-bot
         run: |
-          npm run build
-          npm run build:server
-          npx playwright test $SPECS
-      - name: Disk usage
+          if [ "$SPECS" = all ]; then
+            node scripts/ci-run.mjs npx playwright test
+          else
+            node scripts/ci-run.mjs npx playwright test $SPECS
+          fi
+      - name: Final disk usage
         if: always()
-        run: df -h / && du -sh "$CARGO_TARGET_DIR" 2>/dev/null || true
+        run: df -h / . /tmp && df -i / . /tmp && du -sh -- "${CARGO_TARGET_DIR:-target}" 2>/dev/null || true
       - name: Upload Playwright results
         if: failure() && env.SPECS != ''
         uses: actions/upload-artifact@v4
