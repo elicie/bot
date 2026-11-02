@@ -207,10 +207,35 @@ pub struct BotExchange {
 pub enum DeliveryStatus {
     Queued,
     Running,
+    /// The recipient finished a handling turn, but still has outgoing deliveries or reports to consume.
+    WaitingChildren,
     Completed,
     Cancelled,
     Error,
     Interrupted,
+}
+
+impl DeliveryStatus {
+    pub fn is_pending(self) -> bool {
+        matches!(self, Self::Queued | Self::Running | Self::WaitingChildren)
+    }
+
+    pub fn is_terminal(self) -> bool {
+        !self.is_pending()
+    }
+}
+
+/// Canonical whole-chain Stop/timeout receipt, stored only on the root delivery (`id == chain_id`).
+/// It prevents queued descendants, reports, and later tools from resurrecting a terminated chain,
+/// while an active engine run is allowed to finish its normal shutdown before projection settles it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChainTermination {
+    /// Only `cancelled` (Stop) or `error` (chain deadline) is valid.
+    pub status: RunStatus,
+    pub finished_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Progress of the automatic follow-up turn that reports a finished delivery back to its sender.
@@ -275,19 +300,24 @@ pub struct BotDelivery {
     pub status: DeliveryStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// The recipient's latest handling turn: initially the inbound run, then a child-report-linked
+    /// follow-up run. Rebinding requires both the child's report `run_id` and its hidden input marker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_run_id: Option<String>,
+    /// First recipient execution start, preserved when a later report turn handles the delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// The follow-up turn reporting this delivery's result to the sender. Absent for deliveries
-    /// that are not reported (sent from recipient, group, thread, or routine conversations, or
-    /// finished before reports existed).
+    /// The follow-up turn reporting this delivery's result to the sender, including an internal
+    /// recipient conversation. Absent for group, thread, routine, or already-terminal legacy data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report: Option<DeliveryReport>,
+    /// Durable whole-chain Stop/timeout latch. Only the root delivery may carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_termination: Option<ChainTermination>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -545,6 +575,9 @@ pub struct SettingsInput {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeInfo {
     pub available: bool,
+    /// This backend implements logical Bot-chain Stop/deadline handling (legacy Node does not).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_message_chains: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
