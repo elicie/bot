@@ -29,8 +29,8 @@ use agent_client_protocol as acp;
 use grok_bot_engine::host::{ENGINE_SOURCE_REVISION, ENGINE_VERSION};
 use grok_bot_files::{atomic_private_file, private_directory};
 use grok_bot_model::{
-    Bot, DeliveryStatus, HttpError, HttpResult, Message, PendingPermission, PermissionOption, PrivateSettings, Role, RunState, RunStatus, RuntimeInfo, Skill,
-    TodoItem, TodoStatus, ToolActivity, ToolStatus, iso, new_id,
+    Bot, DeliveryReport, DeliveryStatus, HttpError, HttpResult, Message, PendingPermission, PermissionOption, PrivateSettings, ReportStatus, Role, RunState,
+    RunStatus, RuntimeInfo, Skill, TodoItem, TodoStatus, ToolActivity, ToolStatus, iso, new_id,
 };
 use grok_bot_store::attachments::PreparedAttachment;
 use grok_bot_store::memory::bot_context_fingerprint;
@@ -135,6 +135,9 @@ pub(crate) struct Run {
     fresh_prompt: Option<String>,
     loaded_prompt: Option<String>,
     extra_rules: Option<String>,
+    /// Report turns: the deliveries whose results this turn reports. Permission rules never
+    /// auto-approve actions of a report turn.
+    report_deliveries: Vec<String>,
     /// Redaction keys: the provider API key and every vault secret value (longest first).
     keys: Vec<String>,
     /// The bot's enabled custom MCP servers, resolved for this run (none for recipients).
@@ -175,6 +178,16 @@ impl Run {
         self.flags().idle_since = Some(Instant::now());
         self.activity.notify_waiters();
     }
+}
+
+/// What starts a turn.
+enum Turn {
+    /// A user message (or a routine or delivery prompt).
+    Prompt(String),
+    /// The next queued member of a group round.
+    Group,
+    /// The follow-up turn reporting finished deliveries to their sender.
+    Report,
 }
 
 /// Result of driving one turn, consumed by [`Runtime::finish`].
@@ -385,21 +398,27 @@ impl Runtime {
     /// [`Runtime::start`] with user attachments whose blobs the caller already stored. The prompt
     /// may be empty when files are attached.
     pub async fn start_with_attachments(&self, conversation_id: &str, prompt: &str, attachments: Vec<PreparedAttachment>) -> HttpResult<()> {
-        self.start_turn(conversation_id, Some(prompt), attachments).await
+        self.start_turn(conversation_id, Turn::Prompt(prompt.to_owned()), attachments).await
     }
 
     /// Start the next queued member turn of a group conversation's round.
     pub async fn start_group_turn(&self, conversation_id: &str) -> HttpResult<()> {
-        self.start_turn(conversation_id, None, Vec::new()).await
+        self.start_turn(conversation_id, Turn::Group, Vec::new()).await
     }
 
-    async fn start_turn(&self, conversation_id: &str, prompt: Option<&str>, attachments: Vec<PreparedAttachment>) -> HttpResult<()> {
+    /// Start the automatic follow-up ("report") turn of a conversation whose sent bot messages
+    /// finished: one turn of its bot with every queued report of the conversation as data. The
+    /// hidden user input is marked with `reportDeliveryIds`; the reports become `running`.
+    pub async fn start_report(&self, conversation_id: &str) -> HttpResult<()> {
+        self.start_turn(conversation_id, Turn::Report, Vec::new()).await
+    }
+
+    async fn start_turn(&self, conversation_id: &str, turn: Turn, attachments: Vec<PreparedAttachment>) -> HttpResult<()> {
         let closing = self.closing.load(Ordering::SeqCst);
         let origin = self.origin.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
         let id = conversation_id.to_owned();
-        let requested = prompt.map(str::to_owned);
         let metas: Vec<grok_bot_model::Attachment> = attachments.iter().map(|a| a.meta.clone()).collect();
-        let (run_id, message_id, settings, plan, extras) = self
+        let (run_id, message_id, settings, plan, extras, prompt, report_deliveries) = self
             .store
             .mutate(move |state| {
                 if state.active().is_some() {
@@ -421,6 +440,15 @@ impl Runtime {
                 if settings.base_url.is_empty() || settings.model.is_empty() {
                     return Err(HttpError::bad_request("Configure a provider and model in settings first."));
                 }
+                let report = match &turn {
+                    Turn::Report => Some(turns::report(state, &id)?),
+                    _ => None,
+                };
+                let requested = match &turn {
+                    Turn::Prompt(prompt) => Some(prompt.clone()),
+                    Turn::Group => None,
+                    Turn::Report => report.as_ref().map(|report| report.prompt.clone()),
+                };
                 let plan = turns::plan(state, &id, requested.as_deref())?;
                 let delivery = state
                     .disk()
@@ -443,6 +471,7 @@ impl Runtime {
                         source_bot_id: delivery.as_ref().map(|(_, from)| from.clone()),
                         speaker_bot_id: None,
                         attachments: (!metas.is_empty()).then(|| metas.clone()),
+                        report_delivery_ids: report.as_ref().map(|report| report.delivery_ids.clone()),
                     });
                 }
                 conversation.messages.push(Message {
@@ -455,6 +484,7 @@ impl Runtime {
                     source_bot_id: None,
                     attachments: None,
                     speaker_bot_id: plan.speaker.clone(),
+                    report_delivery_ids: None,
                 });
                 if conversation.messages.len() == 2
                     && let Some(text) = &plan.user_text
@@ -471,12 +501,16 @@ impl Runtime {
                 {
                     delivery.execution_run_id = Some(run_id.clone());
                 }
+                let report_deliveries = report.map(|report| report.delivery_ids).unwrap_or_default();
+                for delivery in state.disk_mut().bot_deliveries.iter_mut().filter(|d| report_deliveries.contains(&d.id)) {
+                    delivery.report = Some(DeliveryReport { status: ReportStatus::Running, run_id: Some(run_id.clone()), ..DeliveryReport::queued() });
+                }
                 // Recipient (bot-message) conversations get no custom MCP servers.
                 let recipient = state.disk().bot_deliveries.iter().any(|d| d.recipient_conversation_id == id);
                 let (servers, failures) = if recipient { Default::default() } else { state.resolve_mcp_servers(&plan.bot.id) };
                 let mcp_fingerprint = if recipient { None } else { state.mcp_fingerprint(&plan.bot.id) };
                 let extras = (state.redaction_keys(), (servers, failures), mcp_fingerprint);
-                Ok((run_id, message_id, settings, plan, extras))
+                Ok((run_id, message_id, settings, plan, extras, requested.unwrap_or_default(), report_deliveries))
             })
             .await?;
         let (keys, (servers, failures), mcp_fingerprint) = extras;
@@ -503,6 +537,7 @@ impl Runtime {
             fresh_prompt: plan.fresh_prompt,
             loaded_prompt: plan.loaded_prompt,
             extra_rules: plan.rules,
+            report_deliveries,
             keys,
             mcp,
             flags: Mutex::new(RunFlags { skills, ..RunFlags::default() }),
@@ -513,7 +548,6 @@ impl Runtime {
         });
         self.runs().push(Arc::clone(&run));
         let runtime = self.arc();
-        let prompt = prompt.unwrap_or_default().to_owned();
         tokio::spawn(async move { runtime.execute(run, prompt).await });
         Ok(())
     }
@@ -547,14 +581,19 @@ impl Runtime {
     }
 
     fn rules(&self, run: &Run) -> HttpResult<String> {
-        let (delivery_from, workspace) = self.store.read(|state| -> HttpResult<_> {
+        let (delivery_from, workspace, reported) = self.store.read(|state| -> HttpResult<_> {
             let delivery = state.disk().bot_deliveries.iter().find(|d| d.recipient_conversation_id == run.conversation_id);
             let from = match delivery {
                 Some(delivery) => Some(state.bot(&delivery.from_bot_id)?.name.clone()),
                 None => None,
             };
-            Ok((from, run.settings.workspace.clone()))
+            Ok((from, run.settings.workspace.clone(), state.reports_to_conversation(&run.conversation_id)))
         })?;
+        let replies = if reported {
+            "Do not wait or poll for replies: when the recipient finishes, its reply arrives automatically in a follow-up turn of this conversation (at most two follow-ups per chain)."
+        } else {
+            "Do not wait or poll for replies; replies to messages sent from this conversation are not reported back to it."
+        };
         let recipient = delivery_from.is_some();
         let skills = run.flags().skills.clone();
         let index: Vec<Value> = if delivery_from.is_some() { Vec::new() } else { skills }
@@ -572,7 +611,7 @@ impl Runtime {
             "Discover workspace__list_files, workspace__read_file, and workspace__write_file with search_tool, then call them with use_tool.".to_owned(),
             "Every file modification requires a separate browser approval. Do not claim a write succeeded until the broker confirms it.".to_owned(),
             "Discover workspace__list_bots and workspace__send_message with search_tool and call them with use_tool. list_bots is a safe read available without a file workspace.".to_owned(),
-            "Every new bot message requires a separate one-use browser approval. send_message returns a durable delivery receipt, never a recipient answer. Do not wait or poll for replies. You may send one distinct message per run; chains stop after four hops.".to_owned(),
+            format!("Every new bot message requires a separate one-use browser approval. send_message returns a durable delivery receipt, never a recipient answer. {replies} You may send one distinct message per run; chains stop after four hops."),
             "To create a new local bot when the user asks, call workspace__create_bot with its name and instructions (optional color #rrggbb and avatar shape). The user must approve it in the browser; do not claim it exists until the broker confirms it. You may create one bot per run.".to_owned(),
         ];
         if let Some(from) = delivery_from {

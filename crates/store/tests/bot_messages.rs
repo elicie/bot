@@ -53,6 +53,7 @@ async fn sending(f: &Fixture) -> Exchange {
                 source_bot_id: None,
                 attachments: None,
                 speaker_bot_id: None,
+                report_delivery_ids: None,
             });
             conversation.run = RunState { id: run.clone(), status: RunStatus::Running, started_at: Some(now), ..RunState::idle() };
             Ok(())
@@ -88,6 +89,7 @@ async fn answer(f: &Fixture, delivery: &BotDelivery, text: &str, status: RunStat
                     source_bot_id: Some(from),
                     attachments: None,
                     speaker_bot_id: None,
+                    report_delivery_ids: None,
                 },
                 Message {
                     id: new_id(),
@@ -99,6 +101,7 @@ async fn answer(f: &Fixture, delivery: &BotDelivery, text: &str, status: RunStat
                     source_bot_id: None,
                     attachments: None,
                     speaker_bot_id: None,
+                    report_delivery_ids: None,
                 },
             ];
             conversation.run = RunState { id: new_id(), status: RunStatus::Running, started_at: Some(now.clone()), ..RunState::idle() };
@@ -241,6 +244,7 @@ async fn bot_message_chains_are_limited_to_four_hops() {
                         source_bot_id: Some(from),
                         attachments: None,
                         speaker_bot_id: None,
+                        report_delivery_ids: None,
                     },
                     Message {
                         id: message.clone(),
@@ -252,6 +256,7 @@ async fn bot_message_chains_are_limited_to_four_hops() {
                         source_bot_id: None,
                         attachments: None,
                         speaker_bot_id: None,
+                        report_delivery_ids: None,
                     },
                 ];
                 conversation.run = RunState { id: run.clone(), status: RunStatus::Running, started_at: Some(now), ..RunState::idle() };
@@ -404,6 +409,7 @@ async fn recipient_failures_and_queued_cancellation_are_durable_terminal_results
                 source_bot_id: None,
                 attachments: None,
                 speaker_bot_id: None,
+                report_delivery_ids: None,
             });
             conversation.run = RunState { id: run.clone(), status: RunStatus::Running, started_at: Some(now), ..RunState::idle() };
             Ok(())

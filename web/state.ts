@@ -408,6 +408,7 @@ export function conversationPreview(conversation: Conversation | undefined): str
   if (!conversation) return '새 대화를 시작해 보세요';
   if (activeRun(conversation.run.status)) return runLabels[conversation.run.status];
   if (conversation.run.status === 'error') return conversation.run.error ?? '실행 오류';
-  const message = [...conversation.messages].reverse().find((message) => message.text.trim());
+  // Report inputs are app-written data for the bot, never shown as text.
+  const message = [...conversation.messages].reverse().find((message) => !message.reportDeliveryIds && message.text.trim());
   return message?.text.replace(/\s+/g, ' ') ?? '아직 메시지가 없습니다';
 }

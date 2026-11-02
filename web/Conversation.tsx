@@ -25,7 +25,7 @@ import type {
 } from '../shared/types';
 import { activeRun, runLabels } from './state';
 import { Avatar, ErrorNotice, IconButton } from './ui';
-import { BotMessageLinks } from './BotChat';
+import { BotMessageLinks, BotReportMarker } from './BotChat';
 import { RichMarkdown } from './RichMarkdown';
 import { TodoList } from './TodoList';
 import { AttachButton, AttachmentTray, DropOverlay, MessageAttachments, useFileDrop, type ComposerAttachments } from './Attachments';
@@ -320,13 +320,20 @@ export function Transcript({
               {dateKey(message.createdAt) !== dateKey(messages[index - 1]?.createdAt ?? '') && (
                 <div className="date-label">{dateKey(message.createdAt)}</div>
               )}
-              {message === tail && message.role === 'assistant' && !!conversation?.run.todos?.length && (
-                <TodoList key={`${conversationId}-${conversation.run.id}`} todos={conversation.run.todos} running={!!running} />
+              {message.reportDeliveryIds ? (
+                // The input of an automatic follow-up turn is app-written data: show only a marker.
+                <BotReportMarker message={message} data={data} onOpen={onBotChat} />
+              ) : (
+                <>
+                  {message === tail && message.role === 'assistant' && !!conversation?.run.todos?.length && (
+                    <TodoList key={`${conversationId}-${conversation.run.id}`} todos={conversation.run.todos} running={!!running} />
+                  )}
+                  <MessageView message={message} bot={speakerFor?.(message) ?? bot} conversationId={conversation?.id} named={!!speakerFor} />
+                  {data && onBotChat && <BotMessageLinks message={message} data={data} onOpen={onBotChat} />}
+                  {onRoutines && <RoutineLinks message={message} onOpen={onRoutines} />}
+                  {messageExtras?.(message)}
+                </>
               )}
-              <MessageView message={message} bot={speakerFor?.(message) ?? bot} conversationId={conversation?.id} named={!!speakerFor} />
-              {data && onBotChat && <BotMessageLinks message={message} data={data} onOpen={onBotChat} />}
-              {onRoutines && <RoutineLinks message={message} onOpen={onRoutines} />}
-              {messageExtras?.(message)}
             </div>
           ))}
           {queuedRoutine && (

@@ -61,6 +61,7 @@ async fn version_one_migration_retains_bots_settings_secrets_messages_and_sessio
                 source_bot_id: None,
                 attachments: None,
                 speaker_bot_id: None,
+                report_delivery_ids: None,
             });
             c.run = RunState { id: "saved-run".into(), status: RunStatus::Completed, ..RunState::idle() };
             Ok(())
@@ -579,6 +580,7 @@ async fn routine_count_is_bounded_and_oversize_mutations_leave_existing_state_un
             source_bot_id: None,
             attachments: None,
             speaker_bot_id: None,
+            report_delivery_ids: None,
         }],
         session_id: None,
         session_fingerprint: None,

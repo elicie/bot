@@ -31,6 +31,9 @@ use bot_data::bot_memory_and_knowledge;
 #[path = "runtime_custom_mcp/mod.rs"]
 mod custom_mcp;
 use custom_mcp::custom_mcp_servers;
+#[path = "runtime_bot_reports/mod.rs"]
+mod bot_reports;
+use bot_reports::{bot_report_failures, bot_reports};
 
 // ---------------------------------------------------------------------------------------------
 // Mock OpenAI-compatible provider (port of tests/mock-provider.ts and scriptedFileReply)
@@ -258,6 +261,8 @@ struct Fixture {
     runtime: Arc<Runtime>,
     provider: Provider,
     base_url: String,
+    /// Origin of the test broker server (`Runtime::set_origin`).
+    origin: String,
 }
 
 struct Options {
@@ -293,8 +298,9 @@ impl Fixture {
         );
         runtime.initialize().await;
         let router = Router::new().route("/internal/mcp/{run_id}", post(broker)).with_state(Arc::clone(&runtime));
-        runtime.set_origin(serve(router).await);
-        let fixture = Fixture { root, workspace, store, runtime, provider, base_url };
+        let origin = serve(router).await;
+        runtime.set_origin(origin.clone());
+        let fixture = Fixture { root, workspace, store, runtime, provider, base_url, origin };
         fixture.configure("", true).await;
         fixture
     }
@@ -1309,6 +1315,8 @@ fn runtime_on_the_in_process_engine() {
         scenario!("limits", Options::default(), write_limits_and_model_only);
         scenario!("skills", Options::default(), skills);
         scenario!("bot-messages", Options::default(), bot_messages);
+        scenario!("bot-reports", Options::default(), bot_reports);
+        scenario!("bot-report-failures", Options::default(), bot_report_failures);
         scenario!("bot-creation", Options::default(), bot_creation);
         scenario!("bot-data", Options::default(), bot_memory_and_knowledge);
         scenario!("permission-rules", Options::default(), permission_rules);

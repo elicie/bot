@@ -167,6 +167,7 @@ mod tests {
                 source_bot_id: None,
                 attachments: None,
                 speaker_bot_id: None,
+                report_delivery_ids: None,
             }],
             session_id: None,
             session_fingerprint: None,

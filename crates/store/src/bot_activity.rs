@@ -11,9 +11,11 @@
 //! - all of its conversations (and, after the commit, their attachment blobs and engine sessions),
 //! - its routines and the routine history recorded for its conversations,
 //! - every bot message delivery and pair exchange it sent or received, the deliveries chained from
-//!   those (they cannot stay valid without their parent), and the read-only recipient
-//!   conversations those deliveries created for other bots,
-//! - links from surviving source messages to removed exchanges.
+//!   those (they cannot stay valid without their parent, including messages sent from the report
+//!   turn of a removed delivery), and the read-only recipient conversations those deliveries
+//!   created for other bots; queued reports of removed deliveries are dropped with them,
+//! - links from surviving source messages to removed exchanges, and removed delivery IDs from
+//!   surviving report messages (the message stays marked as a report).
 //!
 //! Deleting the main bot is allowed: the first remaining bot becomes the main bot
 //! (`crate::main_bot`).
@@ -26,6 +28,7 @@ use std::collections::HashSet;
 use grok_bot_model::{DeliveryStatus, HttpError, HttpResult};
 
 use crate::State;
+use crate::bot_messages::chain_parent;
 
 const LAST_BOT: &str = "Keep at least one bot. Add another bot before deleting this one.";
 const QUEUED_ROUTINES: &str = "Wait for or cancel this bot’s queued routine runs before deleting it.";
@@ -78,10 +81,18 @@ impl State {
         loop {
             let before = deliveries.len();
             for delivery in &disk.bot_deliveries {
+                // A message sent from a report turn's answer is chained to the reported delivery.
+                let report_child = || {
+                    let source = disk.conversations.iter().find(|c| c.id == delivery.source_conversation_id);
+                    source
+                        .and_then(|source| chain_parent(&disk.bot_deliveries, source, &delivery.source_message_id))
+                        .is_some_and(|parent| deliveries.contains(parent.id.as_str()))
+                };
                 if delivery.from_bot_id == id
                     || delivery.to_bot_id == id
                     || conversations.contains(delivery.source_conversation_id.as_str())
                     || conversations.contains(delivery.recipient_conversation_id.as_str())
+                    || report_child()
                 {
                     deliveries.insert(delivery.id.as_str());
                     conversations.insert(delivery.recipient_conversation_id.as_str());
@@ -110,6 +121,10 @@ impl State {
                 if ids.is_empty() {
                     message.bot_exchange_ids = None;
                 }
+            }
+            // A surviving report message keeps its (possibly empty) marker so it stays hidden.
+            if let Some(ids) = message.report_delivery_ids.as_mut() {
+                ids.retain(|delivery| !deliveries.contains(delivery));
             }
         }
         candidate.routines.retain(|r| r.bot_id != id);

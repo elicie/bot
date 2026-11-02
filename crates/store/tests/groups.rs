@@ -35,6 +35,7 @@ fn message(role: Role, text: &str, speaker: Option<&str>, now: &str) -> Message 
         bot_exchange_ids: None,
         source_bot_id: None,
         speaker_bot_id: speaker.map(str::to_owned),
+        report_delivery_ids: None,
         attachments: None,
     }
 }

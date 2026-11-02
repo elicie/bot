@@ -8,6 +8,8 @@ use std::os::unix::fs::PermissionsExt;
 use common::{Fixture, assert_load_rejected, write_json};
 use grok_bot_model::*;
 use grok_bot_store::attachments::*;
+use grok_bot_store::bot_messages::{MAX_BOT_REPORTS_PER_CHAIN, queued_reports};
+use serde_json::{Value, json};
 
 fn bot_input(name: &str) -> BotInput {
     BotInput { name: name.into(), color: None, instructions: None, shape: None, pinned: None }
@@ -38,6 +40,7 @@ fn message(role: Role, text: &str, now: &str) -> Message {
         source_bot_id: None,
         attachments: None,
         speaker_bot_id: None,
+        report_delivery_ids: None,
     }
 }
 
@@ -424,4 +427,353 @@ async fn deleting_a_bot_removes_it_from_groups() {
     f.store.mutate(move |s| s.delete_bot(&target)).await.unwrap();
     let saved = f.store.read(|s| s.disk().groups.iter().find(|g| g.id == group.id).cloned().unwrap());
     assert_eq!(saved.member_bot_ids, vec![f.bot_id(), b]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Follow-up ("report") turns of finished deliveries
+
+fn report_of(f: &Fixture, delivery: &str) -> Option<DeliveryReport> {
+    f.store.read(|s| s.disk().bot_deliveries.iter().find(|d| d.id == delivery).unwrap().report.clone())
+}
+
+fn report_status(f: &Fixture, delivery: &str) -> Option<ReportStatus> {
+    report_of(f, delivery).map(|report| report.status)
+}
+
+fn delivery_status(f: &Fixture, delivery: &str) -> DeliveryStatus {
+    f.store.read(|s| s.disk().bot_deliveries.iter().find(|d| d.id == delivery).unwrap().status)
+}
+
+/// The runtime side of a report turn (`Runtime::start_report`): the hidden input marked with the
+/// queued reports, the reply message, the active run, and the reports running. Returns the reply as
+/// a sender and the reported delivery IDs.
+async fn start_report(f: &Fixture, conversation: &str) -> (Sending, Vec<String>) {
+    let now = f.iso_now();
+    let (run, input, answer) = (new_id(), new_id(), new_id());
+    let (id, r, a) = (conversation.to_owned(), run.clone(), answer.clone());
+    let ids = f
+        .store
+        .mutate(move |s| {
+            let ids: Vec<String> = queued_reports(&s.disk().bot_deliveries, &id).iter().map(|d| d.id.clone()).collect();
+            assert!(!ids.is_empty(), "a report is queued");
+            let conversation = s.conversation_mut(&id)?;
+            let marker = Some(ids.clone());
+            conversation.messages.push(Message { id: input, report_delivery_ids: marker, ..message(Role::User, "{\"botReplies\":[]}", &now) });
+            conversation.messages.push(Message { id: a, ..message(Role::Assistant, "Relayed the answer.", &now) });
+            conversation.run = RunState { id: r.clone(), status: RunStatus::Running, started_at: Some(now), ..RunState::idle() };
+            for delivery in s.disk_mut().bot_deliveries.iter_mut().filter(|d| ids.contains(&d.id)) {
+                delivery.report = Some(DeliveryReport { status: ReportStatus::Running, run_id: Some(r.clone()), ..DeliveryReport::queued() });
+            }
+            Ok(ids)
+        })
+        .await
+        .unwrap();
+    (Sending { source: conversation.to_owned(), run, message: answer }, ids)
+}
+
+/// End the active run of `id` with `status` (an error carries a message).
+async fn end(f: &Fixture, id: &str, status: RunStatus) {
+    let now = f.iso_now();
+    f.store
+        .mutate(|s| {
+            let run = &mut s.conversation_mut(id)?.run;
+            run.status = status;
+            run.error = (status == RunStatus::Error).then(|| "Recipient provider failed.".to_owned());
+            run.finished_at = Some(now);
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn finished_deliveries_queue_reports_only_for_plain_conversations_and_back_up_state_first() {
+    let f = Fixture::new().await;
+    let backup = f.data_dir.join(grok_bot_store::PRE_REPORTS_BACKUP);
+    let a = f.bot_id();
+    let b = add_bot(&f, "B").await;
+    let c = add_bot(&f, "C").await;
+    let x = sending(&f, &a).await;
+    let first = send(&f, &x, &b, "A to B").await;
+    f.finish(&x.source).await;
+    assert_eq!(report_of(&f, &first.id), None, "queued and running deliveries are not reported");
+    let y = receive(&f, &first, false).await;
+    assert_eq!(report_of(&f, &first.id), None);
+
+    // B forwards to C from its recipient conversation; that level is not reported.
+    let second = send(&f, &y, &c, "B to C").await;
+    let before_reports = f.disk_text();
+    assert!(!backup.exists());
+    f.finish(&y.source).await;
+    assert_eq!(report_status(&f, &first.id), Some(ReportStatus::Queued), "the completed delivery from A's chat is reported");
+    assert_eq!(std::fs::read_to_string(&backup).unwrap(), before_reports, "the state before the first report is kept");
+    assert_eq!(std::fs::metadata(&backup).unwrap().permissions().mode() & 0o777, 0o600);
+    receive(&f, &second, true).await;
+    assert_eq!(second.hop, 2);
+    assert_eq!(report_of(&f, &second.id), None, "a recipient conversation's delivery is not reported");
+    let public = serde_json::to_value(f.store.snapshot()).unwrap();
+    assert_eq!(public["botDeliveries"][0]["report"], json!({"status": "queued"}));
+
+    // A failed recipient is reported too.
+    let z = sending(&f, &a).await;
+    let failed = send(&f, &z, &c, "A to C").await;
+    f.finish(&z.source).await;
+    receive(&f, &failed, false).await;
+    end(&f, &failed.recipient_conversation_id, RunStatus::Error).await;
+    assert_eq!(delivery_status(&f, &failed.id), DeliveryStatus::Error);
+    assert_eq!(report_status(&f, &failed.id), Some(ReportStatus::Queued));
+
+    // Routine conversations are not reported to.
+    let input =
+        RoutineInput { bot_id: a.clone(), name: "A routine".into(), prompt: "Run".into(), schedule: RoutineSchedule::Interval { minutes: 30 }, enabled: true };
+    let routine = f.store.mutate(|s| s.add_routine(input)).await.unwrap().id;
+    let now = f.now();
+    let claimed = f.store.mutate(|s| s.run_routine(&routine, now)).await.unwrap();
+    let w = sending_from(&f, &claimed.conversation_id).await;
+    let from_routine = send(&f, &w, &b, "Routine to B").await;
+    f.finish(&w.source).await;
+    receive(&f, &from_routine, true).await;
+    assert_eq!(report_of(&f, &from_routine.id), None);
+    assert!(f.store.read(|s| !s.reports_to_conversation(&claimed.conversation_id) && s.reports_to_conversation(&x.source)));
+    assert!(f.store.read(|s| !s.reports_to_conversation(&first.recipient_conversation_id)));
+
+    // Later writes never replace the backup.
+    let other = add_conversation(&f, &a).await;
+    f.start(&other).await;
+    f.finish(&other).await;
+    assert_eq!(std::fs::read_to_string(&backup).unwrap(), before_reports);
+    let reopened = f.reopen().await.expect("queued reports pass reference validation");
+    reopened.read(|s| {
+        assert_eq!(queued_reports(&s.disk().bot_deliveries, &x.source).iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), [first.id.as_str()]);
+        assert_eq!(queued_reports(&s.disk().bot_deliveries, &z.source).iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), [failed.id.as_str()]);
+    });
+}
+
+#[tokio::test]
+async fn report_turns_continue_the_chain_and_a_chain_gets_two_reports() {
+    let f = Fixture::new().await;
+    let a = f.bot_id();
+    let b = add_bot(&f, "B").await;
+    let x = sending(&f, &a).await;
+    let first = send(&f, &x, &b, "Question 1").await;
+    f.finish(&x.source).await;
+    receive(&f, &first, true).await;
+
+    // Report 1: the reply sends again; the delivery continues the reported chain at hop 2.
+    let (report, ids) = start_report(&f, &x.source).await;
+    assert_eq!(ids, std::slice::from_ref(&first.id));
+    assert_eq!(report_of(&f, &first.id).unwrap().run_id.as_deref(), Some(report.run.as_str()));
+    let second = send(&f, &report, &b, "Question 2").await;
+    assert_eq!((second.chain_id.as_str(), second.hop), (first.chain_id.as_str(), 2));
+    f.reopen().await.expect("a running report and its child delivery are valid");
+    f.finish(&x.source).await;
+    let done = report_of(&f, &first.id).unwrap();
+    assert_eq!((done.status, done.finished_at.is_some(), done.error), (ReportStatus::Completed, true, None));
+    receive(&f, &second, true).await;
+    assert_eq!(report_status(&f, &second.id), Some(ReportStatus::Queued));
+
+    // Report 2 sends hop 3: delivered, but the chain used its reports. Stopping it is final.
+    let (report, _) = start_report(&f, &x.source).await;
+    let third = send(&f, &report, &b, "Question 3").await;
+    assert_eq!((third.chain_id.as_str(), third.hop), (first.chain_id.as_str(), 3));
+    end(&f, &x.source, RunStatus::Cancelled).await;
+    assert_eq!(report_status(&f, &second.id), Some(ReportStatus::Cancelled), "a stopped report turn is not retried");
+    let answered = receive(&f, &third, false).await;
+    // B can still forward hop 4 from its recipient conversation; hop 5 is refused below.
+    let fourth = send(&f, &answered, &a, "Hop 4").await;
+    assert_eq!(fourth.hop, 4);
+    f.finish(&answered.source).await;
+    assert_eq!(delivery_status(&f, &third.id), DeliveryStatus::Completed);
+    let skipped = report_of(&f, &third.id).unwrap();
+    assert_eq!((skipped.status, skipped.run_id, skipped.finished_at.is_some()), (ReportStatus::Skipped, None, true));
+    assert!(f.store.read(|s| queued_reports(&s.disk().bot_deliveries, &x.source).is_empty()));
+    assert_eq!(MAX_BOT_REPORTS_PER_CHAIN, 2);
+
+    let last = receive(&f, &fourth, false).await;
+    let input = BotMessageInput { to_bot_id: b.clone(), text: "Hop 5".into(), request_id: None };
+    let error = f.store.mutate(|s| s.queue_bot_message(&last.source, &last.run, &last.message, input)).await.unwrap_err();
+    assert_eq!((error.status, error.message.as_str()), (409, "Bot message chains are limited to four hops."));
+    f.finish(&last.source).await;
+    f.reopen().await.expect("report chains pass reference validation");
+}
+
+/// Edits a valid `state.json` into one that must not load.
+type Forgery<'a> = Box<dyn Fn(&mut Value) + 'a>;
+
+fn delivery_json<'a>(state: &'a mut Value, id: &str) -> &'a mut Value {
+    state["botDeliveries"].as_array_mut().unwrap().iter_mut().find(|d| d["id"] == id).unwrap()
+}
+
+/// The conversation `id` and the index of its first report message.
+fn report_message(state: &mut Value, id: &str) -> (usize, usize) {
+    let index = state["conversations"].as_array().unwrap().iter().position(|c| c["id"] == id).unwrap();
+    let message = state["conversations"][index]["messages"].as_array().unwrap().iter().position(|m| m.get("reportDeliveryIds").is_some()).unwrap();
+    (index, message)
+}
+
+#[tokio::test]
+async fn forged_report_state_is_rejected_on_load() {
+    let f = Fixture::new().await;
+    let a = f.bot_id();
+    let b = add_bot(&f, "B").await;
+    let x = sending(&f, &a).await;
+    let first = send(&f, &x, &b, "Question 1").await;
+    f.finish(&x.source).await;
+    let y = receive(&f, &first, false).await;
+    // An unreported delivery from B's recipient conversation.
+    let forward = send(&f, &y, &a, "Forwarded").await;
+    f.finish(&y.source).await;
+    receive(&f, &forward, true).await;
+    let (report, _) = start_report(&f, &x.source).await;
+    let second = send(&f, &report, &b, "Question 2").await;
+    f.finish(&x.source).await;
+    receive(&f, &second, true).await;
+    let (report, _) = start_report(&f, &x.source).await;
+    let third = send(&f, &report, &b, "Question 3").await;
+    f.finish(&x.source).await;
+    receive(&f, &third, true).await;
+    assert_eq!(report_status(&f, &third.id), Some(ReportStatus::Skipped));
+    let original = f.disk_json();
+
+    let source = x.source.clone();
+    let forgeries: Vec<(&str, Forgery)> = vec![
+        ("unknown report field", Box::new(|s| delivery_json(s, &first.id)["report"]["extra"] = 1.into())),
+        (
+            "running report of an earlier run",
+            Box::new(|s| {
+                let report = &mut delivery_json(s, &first.id)["report"];
+                report["status"] = "running".into();
+                report.as_object_mut().unwrap().remove("finishedAt");
+            }),
+        ),
+        ("queued report that already has a report message", Box::new(|s| delivery_json(s, &first.id)["report"] = json!({"status": "queued"}))),
+        (
+            "report on an unfinished delivery",
+            Box::new(|s| {
+                let delivery = delivery_json(s, &forward.id);
+                delivery["status"] = "running".into();
+                delivery["report"] = json!({"status": "queued"});
+            }),
+        ),
+        ("report on a delivery from a recipient conversation", Box::new(|s| delivery_json(s, &forward.id)["report"] = json!({"status": "queued"}))),
+        ("third report in a chain", Box::new(|s| delivery_json(s, &third.id)["report"] = json!({"status": "queued"}))),
+        (
+            "report marker on an assistant message",
+            Box::new(|s| {
+                let (conversation, index) = report_message(s, &source);
+                let messages = s["conversations"][conversation]["messages"].as_array_mut().unwrap();
+                let marker = messages[index].as_object_mut().unwrap().remove("reportDeliveryIds").unwrap();
+                messages[index + 1]["reportDeliveryIds"] = marker;
+            }),
+        ),
+        (
+            "report marker naming another conversation's delivery",
+            Box::new(|s| {
+                let (conversation, index) = report_message(s, &source);
+                s["conversations"][conversation]["messages"][index]["reportDeliveryIds"] = json!([forward.id]);
+            }),
+        ),
+        (
+            "report child restarting its chain at hop 1",
+            Box::new(|s| {
+                let delivery = delivery_json(s, &second.id);
+                delivery["chainId"] = second.id.clone().into();
+                delivery["hop"] = 1.into();
+            }),
+        ),
+    ];
+    for (name, forge) in &forgeries {
+        let mut state = original.clone();
+        forge(&mut state);
+        assert_ne!(state, original, "{name} changes the state");
+        let bytes = write_json(&f.state_file(), &state);
+        assert_load_rejected(&f, &bytes).await;
+    }
+    write_json(&f.state_file(), &original);
+    f.reopen().await.expect("the untouched state loads");
+}
+
+#[tokio::test]
+async fn deleting_bots_drops_their_pending_reports_and_report_children() {
+    let f = Fixture::new().await;
+    let a = f.bot_id();
+    let b = add_bot(&f, "B").await;
+    let c = add_bot(&f, "C").await;
+
+    // A queued report, dropped later with its delivery.
+    let x = sending(&f, &a).await;
+    let queued = send(&f, &x, &c, "To C").await;
+    f.finish(&x.source).await;
+    receive(&f, &queued, true).await;
+    assert_eq!(report_status(&f, &queued.id), Some(ReportStatus::Queued));
+
+    // A reported A → B delivery whose report turn sent A → C.
+    let y = sending(&f, &a).await;
+    let first = send(&f, &y, &b, "To B").await;
+    f.finish(&y.source).await;
+    receive(&f, &first, true).await;
+    let (report, ids) = start_report(&f, &y.source).await;
+    assert_eq!(ids, std::slice::from_ref(&first.id));
+    let child = send(&f, &report, &c, "Follow-up to C").await;
+    assert_eq!((child.chain_id.as_str(), child.hop), (first.chain_id.as_str(), 2));
+    f.finish(&y.source).await;
+    receive(&f, &child, true).await;
+
+    let removed = f.store.mutate(|s| s.delete_bot(&b)).await.unwrap();
+    assert!(removed.contains(&first.recipient_conversation_id) && removed.contains(&child.recipient_conversation_id), "{removed:?}");
+    let reopened = f.reopen().await.expect("the cascade stays loadable");
+    reopened.read(|s| {
+        let ids: Vec<&str> = s.disk().bot_deliveries.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, [queued.id.as_str()], "the report child goes with the reported delivery");
+        let source = s.conversation(&y.source).unwrap();
+        let marker = source.messages.iter().find(|m| m.report_delivery_ids.is_some()).expect("the report message stays hidden");
+        assert_eq!(marker.report_delivery_ids.as_deref(), Some(&[][..]));
+        assert!(source.messages.iter().all(|m| m.bot_exchange_ids.is_none()));
+    });
+    drop(reopened);
+    f.store.mutate(|s| s.delete_bot(&c)).await.unwrap();
+    assert!(f.store.read(|s| s.disk().bot_deliveries.is_empty()), "the queued report went with C's delivery");
+    f.reopen().await.unwrap();
+}
+
+#[tokio::test]
+async fn restart_keeps_queued_reports_interrupts_running_ones_and_failed_starts_are_final() {
+    let f = Fixture::new().await;
+    let a = f.bot_id();
+    let b = add_bot(&f, "B").await;
+    let x = sending(&f, &a).await;
+    let first = send(&f, &x, &b, "Question").await;
+    f.finish(&x.source).await;
+    receive(&f, &first, true).await;
+    let reopened = f.reopen().await.unwrap();
+    assert_eq!(reopened.read(|s| s.disk().bot_deliveries[0].report.clone()).map(|r| r.status), Some(ReportStatus::Queued), "queued stays queued");
+    drop(reopened);
+
+    let (report, _) = start_report(&f, &x.source).await;
+    let reopened = f.reopen().await.unwrap();
+    let interrupted = reopened.read(|s| s.disk().bot_deliveries[0].report.clone()).unwrap();
+    assert_eq!(interrupted.status, ReportStatus::Interrupted);
+    assert_eq!(interrupted.run_id.as_deref(), Some(report.run.as_str()));
+    assert_eq!(interrupted.error.as_deref(), Some("The server stopped before this run finished."));
+    assert!(reopened.read(|s| queued_reports(&s.disk().bot_deliveries, &x.source).is_empty()), "never retried");
+    drop(reopened);
+    let again = f.reopen().await.unwrap();
+    assert_eq!(again.read(|s| s.disk().bot_deliveries[0].report.clone()).unwrap().status, ReportStatus::Interrupted);
+    drop(again);
+
+    // A follow-up that cannot start ends its reports with the error.
+    let g = Fixture::new().await;
+    let a = g.bot_id();
+    let b = add_bot(&g, "B").await;
+    let y = sending(&g, &a).await;
+    let delivery = send(&g, &y, &b, "Question").await;
+    g.finish(&y.source).await;
+    receive(&g, &delivery, true).await;
+    let now = g.now();
+    let source = y.source.clone();
+    g.store.mutate(move |s| s.fail_bot_reports(&source, "Configure a provider and model in settings first.", now)).await.unwrap();
+    let failed = report_of(&g, &delivery.id).unwrap();
+    assert_eq!((failed.status, failed.run_id, failed.error.as_deref()), (ReportStatus::Error, None, Some("Configure a provider and model in settings first.")));
+    assert!(g.store.read(|s| queued_reports(&s.disk().bot_deliveries, &y.source).is_empty()));
+    g.reopen().await.expect("a report that never started is valid");
 }

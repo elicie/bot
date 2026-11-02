@@ -71,6 +71,7 @@ impl Redactor<'_> {
                 self.text(&mut attachment.name);
             }
             self.optional_id(&mut message.speaker_bot_id);
+            message.report_delivery_ids.iter_mut().flatten().for_each(|id| self.id(id));
         }
         self.optional_id(&mut conversation.session_id);
         self.optional_id(&mut conversation.session_fingerprint);
@@ -165,6 +166,11 @@ impl Redactor<'_> {
         self.optional(&mut delivery.started_at);
         self.optional(&mut delivery.finished_at);
         self.optional(&mut delivery.error);
+        if let Some(report) = delivery.report.as_mut() {
+            self.optional_id(&mut report.run_id);
+            self.optional(&mut report.finished_at);
+            self.optional(&mut report.error);
+        }
     }
 
     fn state(&self, state: &mut AppState) {

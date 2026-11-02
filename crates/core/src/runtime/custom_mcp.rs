@@ -226,16 +226,14 @@ impl Runtime {
         for option in &mut card.options {
             option.label = if option.kind == "allow_once" { "Run once".into() } else { "Deny".into() };
         }
-        let rule = self.store.read(|state| {
-            let recipient = state.disk().bot_deliveries.iter().any(|delivery| delivery.recipient_conversation_id == run.conversation_id);
-            if recipient || state.is_webhook_conversation(&run.conversation_id) {
-                return None;
-            }
-            match state.mcp_tool_policy(&run.bot.id, server) {
+        let rule = if self.rules_suspended(run) {
+            None
+        } else {
+            self.store.read(|state| match state.mcp_tool_policy(&run.bot.id, server) {
                 PermissionPolicy::Allow { rule_id } => Some(rule_id),
                 PermissionPolicy::Ask => None,
-            }
-        });
+            })
+        };
         let options: Vec<PermissionOption> = card.options.clone();
         let allow = options.iter().find(|option| option.kind == "allow_once").map(|option| option.id.clone());
         let selected = match (rule, allow) {
