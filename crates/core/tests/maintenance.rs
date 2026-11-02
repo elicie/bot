@@ -4,14 +4,14 @@ mod common;
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::Ordering;
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::extract::ConnectInfo;
 use axum::http::Request;
 use grok_bot_core::app::{Backend, BackendOptions};
-use grok_bot_core::http::{HttpContext, default_allowed_hosts, router};
+use grok_bot_core::http::{HttpContext, router};
 use grok_bot_core::scheduler::SchedulerOptions;
 use grok_bot_model::{RoutineInput, RoutineSchedule, RunState, RunStatus};
 use serde_json::{Value, json};
@@ -28,6 +28,7 @@ impl Fixture {
             data_dir: root.join("data"),
             engine_root: engine.to_path_buf(),
             web_root: None,
+            embedded_web: None,
             allowed_hosts: Vec::new(),
             now: None,
             scheduler: Some(SchedulerOptions { auto_start: false, ..SchedulerOptions::default() }),
@@ -36,18 +37,8 @@ impl Fixture {
         .await
         .unwrap();
         backend.runtime.set_origin("http://127.0.0.1:3333".into());
-        let context = Arc::new(HttpContext {
-            store: backend.store,
-            runtime: backend.runtime,
-            scheduler: backend.scheduler,
-            queue: backend.queue,
-            allowed_hosts: default_allowed_hosts(&[]),
-            port: AtomicU16::new(3333),
-            closing: AtomicBool::new(false),
-            web_root: None,
-            mcp_test_stopping: tokio::sync::watch::Sender::new(false),
-            stopping: tokio::sync::watch::Sender::new(false),
-        });
+        let context = Arc::new(HttpContext::new(backend.store, backend.runtime, backend.scheduler, backend.queue));
+        context.port.store(3333, Ordering::SeqCst);
         Self { app: router(context.clone()), context }
     }
 

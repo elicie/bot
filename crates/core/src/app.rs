@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use grok_bot_model::Clock;
@@ -55,19 +55,11 @@ impl Backend {
         runtime.initialize().await;
         let scheduler_options = options.scheduler.unwrap_or(SchedulerOptions { now, ..SchedulerOptions::default() });
         let scheduler = RoutineScheduler::new(store.clone(), runtime.clone(), queue.clone(), scheduler_options);
-        let context = Arc::new(HttpContext {
-            store: store.clone(),
-            runtime: runtime.clone(),
-            scheduler: scheduler.clone(),
-            queue: queue.clone(),
-            allowed_hosts: default_allowed_hosts(&options.allowed_hosts),
-            port: AtomicU16::new(0),
-            closing: AtomicBool::new(false),
-            web_root: options.web_root,
-            mcp_tests: crate::mcp_probe::Probes::default(),
-            embedded_web: options.embedded_web,
-            stopping: tokio::sync::watch::Sender::new(false),
-        });
+        let mut context = HttpContext::new(store.clone(), runtime.clone(), scheduler.clone(), queue.clone());
+        context.allowed_hosts = default_allowed_hosts(&options.allowed_hosts);
+        context.web_root = options.web_root;
+        context.embedded_web = options.embedded_web;
+        let context = Arc::new(context);
         Ok(Self { store, runtime, scheduler, queue, context })
     }
 

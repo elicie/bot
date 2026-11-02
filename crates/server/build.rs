@@ -27,7 +27,9 @@ fn collect(root: &Path, dir: &Path, files: &mut Vec<(String, std::path::PathBuf)
 fn main() -> io::Result<()> {
     println!("cargo:rerun-if-changed=build.rs");
     let manifest = std::path::PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    let root = manifest.join("../../dist");
+    // Service updates stage their frontend outside the checkout to keep the live release intact.
+    println!("cargo:rerun-if-env-changed=GROK_BOT_BUILD_WEB_ROOT");
+    let root = env::var_os("GROK_BOT_BUILD_WEB_ROOT").map(std::path::PathBuf::from).unwrap_or_else(|| manifest.join("../../dist"));
     let mut files = Vec::new();
     // Debug serves the current disk bundle. Watching an absent directory would keep API-only
     // builds dirty; neither its presence nor its contents affect the debug executable.

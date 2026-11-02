@@ -166,7 +166,7 @@ jobs:
       - name: Rust tests (changed crates)
         if: env.PACKAGES != ''
         run: node scripts/cargo.mjs test --locked $PACKAGES
-      - name: Frontend unit tests
+      - name: Unit tests (changed files)
         if: env.UNIT_TESTS != ''
         timeout-minutes: 30
         run: |
@@ -205,7 +205,12 @@ jobs:
       - name: Cargo target dir (persistent on self-hosted)
         run: |
           if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
-            dir="$HOME/.cache/grok-bot-ci/target"
+            # Match the existing per-runner cache and cap policy used by lint/test.
+            dir="$HOME/.cache/grok-bot-ci/$RUNNER_NAME/target"
+            real=$(readlink -f "$dir" || true)
+            if [ -d "$real" ] && [ "$(du -s --block-size=1G "$real" | cut -f1)" -gt "$SELF_HOSTED_TARGET_CAP_GB" ]; then
+              echo "Clearing $real (over ${SELF_HOSTED_TARGET_CAP_GB}G)"; rm -rf "$real"; rm -f "$dir"
+            fi
             echo "RUSTUP_TOOLCHAIN=$SELF_HOSTED_RUST" >> "$GITHUB_ENV"
           else
             dir="$GITHUB_WORKSPACE/target"

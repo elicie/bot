@@ -38,7 +38,7 @@ const rust = packages !== '' || files.includes('rustfmt.toml');
 
 // Pull requests check only what changed: no broadening to the whole unit or browser suite.
 // Deleted test/spec paths are deliberately ignored.
-const unit = existingTests(/^tests\/[^/]+\.test\.ts$/).join(' ');
+const unit = existingTests(/^(?:tests\/[^/]+\.test\.ts|scripts\/[^/]+\.test\.mjs)$/).join(' ');
 const specs = existingTests(/^tests\/[^/]+\.spec\.ts$/).join(' ');
 
 // The opt-level-3 release build is slow; run it only when the release path itself changes.

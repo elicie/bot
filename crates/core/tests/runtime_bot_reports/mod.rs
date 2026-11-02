@@ -3,13 +3,12 @@
 //! sequential scenario list). The dispatcher is driven by hand: `tick()` starts one queued item.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU16};
 use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
-use grok_bot_core::http::{HttpContext, default_allowed_hosts, router};
+use grok_bot_core::http::{HttpContext, router};
 use grok_bot_core::queue::CommandQueue;
 use grok_bot_core::scheduler::{RoutineScheduler, SchedulerOptions};
 use grok_bot_model::{
@@ -187,18 +186,7 @@ pub(super) async fn bot_reports(f: &Fixture) {
 /// Exercise the real HTTP cancellation handler against the fixture's store/runtime and the exact
 /// same command queue as dispatch, without another server or scheduler timer influencing ordering.
 async fn cancel_selected_reports(f: &Fixture, dispatcher: &Arc<RoutineScheduler>, queue: &CommandQueue, ids: &[String], source: &str) -> Value {
-    let context = Arc::new(HttpContext {
-        store: Arc::clone(&f.store),
-        runtime: Arc::clone(&f.runtime),
-        scheduler: Arc::clone(dispatcher),
-        queue: queue.clone(),
-        allowed_hosts: default_allowed_hosts(&[]),
-        port: AtomicU16::new(0),
-        closing: AtomicBool::new(false),
-        web_root: None,
-        mcp_test_stopping: tokio::sync::watch::Sender::new(false),
-        stopping: tokio::sync::watch::Sender::new(false),
-    });
+    let context = Arc::new(HttpContext::new(Arc::clone(&f.store), Arc::clone(&f.runtime), Arc::clone(dispatcher), queue.clone()));
     let request = Request::builder()
         .method("POST")
         .uri(format!("/api/conversations/{source}/bot-reports/cancel"))

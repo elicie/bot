@@ -87,7 +87,13 @@ async function fixture(t, { installed = true, seedConfig = true, seedData = true
       return '';
     }
     if (command === process.execPath) {
-      assert.deepEqual(args, ['scripts/cargo.mjs', 'build', '--locked', '--release', '--target-dir', cargoTarget, '-p', 'grok-bot-server']);
+      assert.deepEqual(args.slice(0, 8), ['scripts/cargo.mjs', 'build', '--locked', '--release', '--target-dir', cargoTarget, '-p', 'grok-bot-server']);
+      const stagedWeb = f.commands.findLast(item => item.command === 'npm').args[4];
+      assert.equal(args[8], '--config');
+      assert.equal(args[9], `env.GROK_BOT_BUILD_WEB_ROOT.value=${JSON.stringify(stagedWeb)}`);
+      assert.equal(args[10], '--config');
+      assert.equal(args[11], 'env.GROK_BOT_BUILD_WEB_ROOT.force=true');
+      assert.equal(args.length, 12);
       f.events.push('build:server');
       if (f.failBuild === 'server') throw new Error('fixture server build failed');
       const binary = f.insideTemporary(path.join(cargoTarget, 'release/grok-bot'));

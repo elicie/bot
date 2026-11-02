@@ -55,8 +55,14 @@ test('frontend and frontend build inputs run only the web build', () => {
 });
 
 test('fixtures, build tools and CI changes never broaden a PR to the full suite', () => {
-  for (const file of ['tests/app-fixture.ts', 'tests/mock-provider.ts', 'playwright.config.ts', 'scripts/cargo.mjs', 'scripts/rust-env.mjs', 'scripts/ci-changes.mjs', 'scripts/ci-changes.test.mjs', '.github/workflows/ci.yml', '.cargo/config.toml', 'rust-toolchain.toml']) {
+  for (const file of ['tests/app-fixture.ts', 'tests/mock-provider.ts', 'playwright.config.ts', 'scripts/cargo.mjs', 'scripts/rust-env.mjs', 'scripts/ci-changes.mjs', '.github/workflows/ci.yml', '.cargo/config.toml', 'rust-toolchain.toml']) {
     assert.deepEqual(select(file), nothing, file);
   }
   assert.deepEqual(select('scripts/verify-release.mjs'), { ...nothing, release: 'true' });
+});
+
+test('only changed script unit files are selected, without build or browser expansion', () => {
+  assert.deepEqual(select('scripts/service.test.mjs'), { ...nothing, unit: 'scripts/service.test.mjs' });
+  assert.deepEqual(select('scripts/ci-changes.test.mjs'), { ...nothing, unit: 'scripts/ci-changes.test.mjs' });
+  assert.deepEqual(select('scripts/service.mjs'), nothing);
 });

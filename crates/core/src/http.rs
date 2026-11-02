@@ -48,6 +48,25 @@ pub struct HttpContext {
     pub stopping: tokio::sync::watch::Sender<bool>,
 }
 
+impl HttpContext {
+    /// Compose a host around existing application components without exposing probe internals.
+    pub fn new(store: Arc<Store>, runtime: Arc<Runtime>, scheduler: Arc<RoutineScheduler>, queue: CommandQueue) -> Self {
+        Self {
+            store,
+            runtime,
+            scheduler,
+            queue,
+            allowed_hosts: default_allowed_hosts(&[]),
+            port: AtomicU16::new(0),
+            closing: AtomicBool::new(false),
+            web_root: None,
+            embedded_web: None,
+            mcp_tests: crate::mcp_probe::Probes::default(),
+            stopping: tokio::sync::watch::Sender::new(false),
+        }
+    }
+}
+
 pub(crate) type Ctx = Arc<HttpContext>;
 
 pub fn normalize_host(value: &str) -> String {
