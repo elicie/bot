@@ -77,6 +77,9 @@ impl Redactor<'_> {
         let run = &mut conversation.run;
         self.id(&mut run.id);
         self.optional(&mut run.error);
+        for todo in run.todos.iter_mut().flatten() {
+            self.text(&mut todo.content);
+        }
         if let Some(permission) = run.permission.as_mut() {
             self.id(&mut permission.id);
             self.text(&mut permission.title);

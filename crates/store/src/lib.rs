@@ -1135,6 +1135,7 @@ impl State {
             status: RunStatus::Error,
             error: Some(error),
             permission: None,
+            todos: conversation.run.todos.clone(),
             started_at: Some(conversation.run.started_at.clone().unwrap_or_else(|| timestamp.clone())),
             finished_at: Some(timestamp.clone()),
         };
@@ -1254,6 +1255,7 @@ impl State {
             status: RunStatus::Error,
             error: Some(error),
             permission: None,
+            todos: conversation.run.todos.clone(),
             started_at: None,
             finished_at: Some(timestamp.clone()),
         };

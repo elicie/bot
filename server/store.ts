@@ -30,6 +30,7 @@ const conversationSchema = z.object({
   run: z.object({
     id: z.string(), status: z.enum(['idle', 'starting', 'running', 'awaiting_permission', 'completed', 'cancelled', 'error', 'interrupted']),
     error: z.string().optional(), permission: permissionSchema.optional(), startedAt: z.string().optional(), finishedAt: z.string().optional(),
+    todos: z.array(z.object({ content: z.string(), status: z.enum(['pending', 'in_progress', 'completed', 'cancelled']) }).strict()).optional(),
   }).strict(),
 }).strict();
 const settingsSchema = z.object({ baseUrl: z.string(), model: z.string(), workspace: z.string(), apiKey: z.string() }).strict();

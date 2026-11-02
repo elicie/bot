@@ -177,6 +177,7 @@ mod tests {
                 status: RunStatus::AwaitingPermission,
                 error: None,
                 permission,
+                todos: None,
                 started_at: Some("2026-11-01T00:00:00.000Z".into()),
                 finished_at: None,
             },
