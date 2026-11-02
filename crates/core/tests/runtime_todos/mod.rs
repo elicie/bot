@@ -135,6 +135,9 @@ pub(super) async fn checklist_updates(base: &Path, engine: &Path) {
     // New turns retain chat context but display only their own task IDs, even when the native
     // tool defaults to merge=true against persisted engine resources.
     let unfinished = json!([{"content": "New task still in progress", "status": "in_progress"}]);
+    // HTTP can observe a terminal in-memory run before its final ordered write broadcasts.
+    // Finish that previous turn before subscribing to snapshots attributed to the next turn.
+    app.store.flush().await.unwrap();
     let mut next_updates = app.store.subscribe();
     provider.plan(vec![
         Reply::Tool(

@@ -44,6 +44,7 @@ import {
   isDirty,
   readRoute,
   queuedRoutineRun,
+  pendingBotWork,
   reducer,
   recipientDelivery,
   runningConversation,
@@ -102,6 +103,7 @@ export function App() {
   const busy = state.command !== null;
   const data = state.data;
   const queuedRun = queuedRoutineRun(data, conversation);
+  const botWork = pendingBotWork(data, conversation);
   const selectionKey = draftKey(state.selection);
   const draft = state.drafts[selectionKey] ?? '';
   const [pendingFiles, setPendingFiles] = useState<Record<string, PendingAttachment[]>>({});
@@ -466,7 +468,7 @@ export function App() {
   const cancel = async () => {
     const before = current.current;
     const active = selectedConversation(before);
-    if (!active || (!activeRun(active.run.status) && !queuedRoutineRun(before.data, active))) return;
+    if (!active || (!activeRun(active.run.status) && !queuedRoutineRun(before.data, active) && !pendingBotWork(before.data, active))) return;
     await command('cancel', async () => {
       const snapshot = await request<AppState>(
         `/api/conversations/${encodeURIComponent(active.id)}/cancel`,
@@ -775,6 +777,7 @@ export function App() {
               onFiles={() => toggleComputer(true)}
               onCancel={() => void cancel()}
               running={!!queuedRun || (!!conversation && activeRun(conversation.run.status))}
+              pendingBotWork={botWork}
               disabled={state.connection !== 'online' || !!globalRun || !!queuedRun || !!recipientDelivery(data, conversation?.id)}
               placeholder={recipientDelivery(data, conversation?.id) ? '다른 Bot의 요청으로 열린 대화라 여기서는 보낼 수 없습니다' : undefined}
               readOnly={!!recipientDelivery(data, conversation?.id)}
