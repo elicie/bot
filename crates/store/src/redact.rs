@@ -184,6 +184,10 @@ impl Redactor<'_> {
             self.optional(&mut report.finished_at);
             self.optional(&mut report.error);
         }
+        if let Some(termination) = delivery.chain_termination.as_mut() {
+            self.text(&mut termination.finished_at);
+            self.optional(&mut termination.error);
+        }
     }
 
     fn state(&self, state: &mut AppState) {

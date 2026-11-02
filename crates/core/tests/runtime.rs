@@ -37,6 +37,9 @@ use bot_reports::{bot_report_cancellation, bot_report_failures, bot_reports};
 #[path = "runtime_canvas/mod.rs"]
 mod canvas;
 use canvas::{canvas_edits, canvas_literal_data, canvas_redaction};
+#[path = "runtime_bot_chains/mod.rs"]
+mod bot_chains;
+use bot_chains::{expire_nested_bot_chains, four_hop_bot_reports, nested_bot_reports, nested_report_start_failure, stop_nested_bot_chains};
 
 // ---------------------------------------------------------------------------------------------
 // Mock OpenAI-compatible provider (port of tests/mock-provider.ts and scriptedFileReply)
@@ -1330,6 +1333,11 @@ fn runtime_on_the_in_process_engine() {
         scenario!("bot-reports", Options::default(), bot_reports);
         scenario!("bot-report-failures", Options::default(), bot_report_failures);
         scenario!("bot-report-cancellation", Options::default(), bot_report_cancellation);
+        scenario!("nested-bot-reports", Options::default(), nested_bot_reports);
+        scenario!("stop-nested-bot-chains", Options::default(), stop_nested_bot_chains);
+        scenario!("expire-nested-bot-chains", Options::default(), expire_nested_bot_chains);
+        scenario!("four-hop-bot-reports", Options::default(), four_hop_bot_reports);
+        scenario!("nested-report-start-failure", Options::default(), nested_report_start_failure);
         scenario!("bot-creation", Options::default(), bot_creation);
         scenario!("bot-data", Options::default(), bot_memory_and_knowledge);
         scenario!("permission-rules", Options::default(), permission_rules);

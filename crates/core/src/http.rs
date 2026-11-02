@@ -41,10 +41,36 @@ pub struct HttpContext {
     pub closing: AtomicBool,
     /// Built frontend (`dist/`). `None` serves the API only.
     pub web_root: Option<PathBuf>,
-    /// Cancels disposable MCP probes before the command queue is drained on shutdown.
-    pub mcp_test_stopping: tokio::sync::watch::Sender<bool>,
+    /// Bounded disposable probes, tracked independently of the app command queue for shutdown.
+    pub(crate) mcp_tests: crate::mcp_probe::Probes,
     /// Flips to `true` after final state flush; open SSE streams can then finish.
     pub stopping: tokio::sync::watch::Sender<bool>,
+}
+
+impl HttpContext {
+    /// Compose an HTTP adapter around existing app services while keeping probe lifecycle state
+    /// private. Alternate in-process adapters use the same safe initialization as Backend.
+    pub fn new(
+        store: Arc<Store>,
+        runtime: Arc<Runtime>,
+        scheduler: Arc<RoutineScheduler>,
+        queue: CommandQueue,
+        allowed_hosts: HashSet<String>,
+        web_root: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            store,
+            runtime,
+            scheduler,
+            queue,
+            allowed_hosts,
+            port: AtomicU16::new(0),
+            closing: AtomicBool::new(false),
+            web_root,
+            mcp_tests: crate::mcp_probe::Probes::default(),
+            stopping: tokio::sync::watch::Sender::new(false),
+        }
+    }
 }
 
 pub(crate) type Ctx = Arc<HttpContext>;
@@ -530,24 +556,36 @@ async fn send_message(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(
 }
 
 async fn cancel(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(id): Path<String>, JsonBody(_): JsonBody<Empty>) -> ApiResult {
-    let store = ctx.store.clone();
-    let queued_id = id.clone();
-    let cancelled_queued = ctx.queue.run(async move { store.mutate(|s| s.cancel_queued_work(&queued_id)).await }).await?;
-    if !cancelled_queued {
-        // Runtime cancellation waits for the run to settle; it is not held inside the command queue
-        // (the Node handler awaited `done` outside the queue as well).
-        ctx.runtime.cancel(&id).await?;
-    }
+    // Runtime resolves both the selected turn and its durable Bot chain. Waiting parents can
+    // own an active descendant in another conversation; do not stop at a queued receipt here.
+    ctx.runtime.cancel(&id).await?;
     Ok(state_reply(&ctx, StatusCode::OK, &remote))
 }
 
-/// `POST /api/conversations/:id/bot-reports/cancel` with `{}`: cancel all still-queued
-/// reports and return the public AppState. Serialize with dispatch so none can start between
-/// selection and the durable cancellation. Running reports use the existing Stop endpoint.
-async fn cancel_bot_reports(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(id): Path<String>, JsonBody(_): JsonBody<Empty>) -> ApiResult {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CancelBotReports {
+    delivery_ids: Vec<String>,
+}
+
+/// Cancel only the selected delivery IDs that are still queued, serialized with dispatch. An empty
+/// actual result tells the caller that nothing was cancelled (for example, dispatch started first).
+/// Running reports use the existing Stop endpoint; a later arrival is not part of this selection.
+async fn cancel_bot_reports(
+    State(ctx): State<Ctx>,
+    ConnectInfo(remote): Remote,
+    Path(id): Path<String>,
+    JsonBody(input): JsonBody<CancelBotReports>,
+) -> ApiResult {
     let store = ctx.store.clone();
-    ctx.queue.run(async move { store.mutate(|s| s.cancel_bot_reports(&id)).await }).await?;
-    Ok(state_reply(&ctx, StatusCode::OK, &remote))
+    let (state, cancelled_delivery_ids) = ctx
+        .queue
+        .run(async move {
+            let cancelled = store.mutate(|s| s.cancel_bot_reports(&id, &input.delivery_ids)).await?;
+            Ok::<_, HttpError>((store.snapshot(), cancelled))
+        })
+        .await?;
+    Ok(reply(StatusCode::OK, json!({ "state": state, "cancelledDeliveryIds": cancelled_delivery_ids }), &remote))
 }
 
 #[derive(Deserialize)]

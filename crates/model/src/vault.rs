@@ -136,6 +136,9 @@ pub struct PublicMcpServer {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpConfigInput {
     pub json: String,
+    /// Optional new bot-scoped credentials, committed atomically with the server document.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<SecretInput>,
 }
 
 /// `PATCH /api/bots/:botId/mcp-servers/:name` body.

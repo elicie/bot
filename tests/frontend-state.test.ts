@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { reducer, emptyFiles, draftKey, readRoute, routeSearch, type UIState } from '../web/state.js';
+import { reducer, emptyFiles, draftKey, readRoute, routeSearch, pendingBotWork, type UIState } from '../web/state.js';
 import type { AppState } from '../shared/types.js';
 
 function snapshot(revision: number, status: 'running' | 'completed'): AppState {
@@ -92,4 +92,45 @@ test('external document refresh updates clean editors and preserves unsaved edit
     assert.match(dirty.files.editor.error ?? '', /외부 작업/);
     assert.equal(dirty.files.editor.document.hash, 'old-hash');
   }
+});
+
+test('pendingBotWork keeps Stop available for related deliveries and pending source reports only', () => {
+  const data = snapshot(1, 'completed');
+  data.runtime.botMessageChains = true;
+  const conversation = data.conversations[0];
+  const delivery: NonNullable<AppState['botDeliveries']>[number] = {
+    id: 'delivery', exchangeId: 'exchange', chainId: 'delivery', hop: 1,
+    sourceConversationId: conversation.id, sourceMessageId: conversation.messages[0].id,
+    recipientConversationId: 'recipient-conversation', fromBotId: conversation.botId, toBotId: 'recipient-bot',
+    text: 'A public fixture review request.', createdAt: '2026-10-31T00:00:00Z', status: 'queued',
+  };
+  assert.equal(pendingBotWork(null, conversation), false);
+  assert.equal(pendingBotWork(data, undefined), false);
+  assert.equal(pendingBotWork(data, conversation), false);
+  for (const status of ['queued', 'running', 'waiting_children'] as const) {
+    data.botDeliveries = [{ ...delivery, status }];
+    assert.equal(pendingBotWork(data, conversation), true, `source sees ${status}`);
+    data.botDeliveries = [{ ...delivery, status, sourceConversationId: 'other-source', recipientConversationId: conversation.id }];
+    assert.equal(pendingBotWork(data, conversation), true, `recipient sees ${status}`);
+    data.botDeliveries = [{ ...delivery, status, sourceConversationId: 'other-source' }];
+    assert.equal(pendingBotWork(data, conversation), false, `same bot but unrelated conversation does not see ${status}`);
+  }
+  for (const status of ['completed', 'cancelled', 'error', 'interrupted'] as const) {
+    data.botDeliveries = [{ ...delivery, status }];
+    assert.equal(pendingBotWork(data, conversation), false, `${status} has no pending work`);
+  }
+  for (const status of ['queued', 'running'] as const) {
+    data.botDeliveries = [{ ...delivery, status: 'completed', report: { status } }];
+    assert.equal(pendingBotWork(data, conversation), true, `source can stop a ${status} report after delivery completion`);
+    data.botDeliveries[0].sourceConversationId = 'other-source';
+    data.botDeliveries[0].recipientConversationId = conversation.id;
+    assert.equal(pendingBotWork(data, conversation), false, 'a report belongs to its source, not its recipient');
+  }
+  for (const status of ['completed', 'cancelled', 'error', 'interrupted', 'skipped'] as const) {
+    data.botDeliveries = [{ ...delivery, status: 'completed', report: { status } }];
+    assert.equal(pendingBotWork(data, conversation), false, `${status} report never leaves a false Stop button`);
+  }
+  data.botDeliveries = [{ ...delivery, status: 'running' }];
+  delete data.runtime.botMessageChains;
+  assert.equal(pendingBotWork(data, conversation), false, 'legacy Node backend must not expose unsupported chain Stop');
 });

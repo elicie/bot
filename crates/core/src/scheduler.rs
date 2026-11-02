@@ -182,6 +182,7 @@ impl RoutineScheduler {
 
     async fn process(&self, now: DateTime<Utc>) -> HttpResult<()> {
         self.store.read(|s| s.assert_writable())?;
+        self.runtime.expire_bot_chains(now).await?;
         self.store
             .mutate(|s| {
                 let scheduling_error = match s.claim_due_routines(now) {

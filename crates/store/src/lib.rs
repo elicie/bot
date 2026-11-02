@@ -51,8 +51,8 @@ use serde::Serialize;
 use tokio::sync::{broadcast, oneshot};
 
 use crate::bot_messages::{
-    MAX_BOT_DELIVERIES, MAX_BOT_HOPS, MAX_BOT_MESSAGE_BYTES, MAX_BOT_REPLY_CHARACTERS, chain_parent, find_existing_bot_delivery, reconcile_bot_deliveries,
-    validate_bot_message_input,
+    BOT_CHAIN_CAPACITY_ERROR, MAX_BOT_DELIVERIES, MAX_BOT_DELIVERIES_PER_CHAIN, MAX_BOT_HOPS, MAX_BOT_MESSAGE_BYTES, MAX_BOT_REPLY_CHARACTERS, chain_parent,
+    find_existing_bot_delivery, reconcile_bot_deliveries, validate_bot_message_input,
 };
 use crate::schedule::{latest_routine_time, next_routine_time, validate_routine_input};
 use crate::skills::{new_skill, next_skill, validate_skill_set};
@@ -61,6 +61,12 @@ use crate::validate::{Issues, internal, js_slice, js_trim, parse_ms};
 pub const MAX_STATE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_ROUTINES: usize = 1000;
 pub const MAX_ROUTINE_RUNS: usize = 10000;
+
+// Successful delivery: assistant + exchange. Failed turn: assistant + run error. Each 8 KiB
+// metadata allowance covers a bounded error receipt (1000 UTF-16 units), IDs and times; a finished
+// delivery can also introduce a queued report, whose separate allowance must not grow the total.
+const BOT_REPORT_METADATA_RESERVE: usize = 8192;
+const BOT_TURN_TEXT_RESERVE: usize = 2 * MAX_BOT_REPLY_CHARACTERS * 6 + 2 * BOT_REPORT_METADATA_RESERVE;
 
 pub const DEFAULT_BOT_COLOR: &str = "#8b5cf6";
 const WRITE_FAILED: &str = "State could not be persisted. Restart after checking the data directory.";
@@ -104,6 +110,10 @@ enum Job {
         routine_scheduling_error: Option<String>,
         /// The bytes contain bot report fields, which binaries without reports cannot load.
         reports: bool,
+        /// `waiting_children`/`chainTermination` and recipient reports cannot be read by PR9.
+        bot_chains: bool,
+        /// Older report-aware binaries require a run ID on cancelled reports.
+        unstarted_report_cancellations: bool,
         done: Option<oneshot::Sender<bool>>,
     },
     Flush(oneshot::Sender<()>),
@@ -111,32 +121,80 @@ enum Job {
 
 /// One-time copy of a `state.json` from before bot reports, kept next to it.
 pub const PRE_REPORTS_BACKUP: &str = "state.json.pre-bot-reports.bak";
+/// Separate rollback point for the upgrade from bot reports to nested bot chains.
+pub const PRE_BOT_CHAINS_BACKUP: &str = "state.json.pre-bot-chains.bak";
+/// One-time copy before a cancelled report without a run ID is first persisted. Report-aware older
+/// binaries cannot load that shape; the pre-reports backup may not exist on an upgraded install.
+pub const PRE_UNSTARTED_REPORT_CANCELLATION_BACKUP: &str = "state.json.pre-unstarted-report-cancellation.bak";
+
+fn uses_bot_chains(disk: &DiskState) -> bool {
+    if disk.bot_deliveries.iter().any(|delivery| delivery.status == DeliveryStatus::WaitingChildren || delivery.chain_termination.is_some()) {
+        return true;
+    }
+    // Recipient reports/transcripts are also incompatible with PR9/PR24, even if their owning
+    // delivery became terminal before a waiting state or root latch was ever written.
+    let recipients: HashSet<&str> = disk.bot_deliveries.iter().map(|delivery| delivery.recipient_conversation_id.as_str()).collect();
+    disk.bot_deliveries.iter().any(|delivery| delivery.report.is_some() && recipients.contains(delivery.source_conversation_id.as_str()))
+        || disk.conversations.iter().any(|conversation| recipients.contains(conversation.id.as_str()) && conversation.messages.len() > 2)
+}
 
 fn uses_reports(disk: &DiskState) -> bool {
-    disk.bot_deliveries.iter().any(|delivery| delivery.report.is_some())
+    disk.bot_deliveries
+        .iter()
+        .any(|delivery| delivery.report.is_some() || delivery.status == DeliveryStatus::WaitingChildren || delivery.chain_termination.is_some())
         || disk.conversations.iter().flat_map(|conversation| &conversation.messages).any(|message| message.report_delivery_ids.is_some())
 }
 
-/// Before the first write with report fields: copy the existing `state.json` (when it has none) to
-/// [`PRE_REPORTS_BACKUP`] with private permissions, never replacing an existing backup. The copy
-/// lets the user go back to a binary without bot reports (`deny_unknown_fields` rejects the new
-/// fields). Failures are reported and do not block the write.
-fn backup_before_reports(path: &Path) {
-    let backup = path.with_file_name(PRE_REPORTS_BACKUP);
-    if std::fs::symlink_metadata(&backup).is_ok() {
-        return;
+fn uses_unstarted_report_cancellations(disk: &DiskState) -> bool {
+    disk.bot_deliveries
+        .iter()
+        .any(|delivery| delivery.report.as_ref().is_some_and(|report| report.status == ReportStatus::Cancelled && report.run_id.is_none()))
+}
+
+/// Called on the ordered writer thread before the first new-shape write. Keep the previous
+/// `state.json` only when it does not already use that shape, with private permissions and no
+/// overwrite. A restart never creates a misleading rollback copy of an already-new shape.
+fn backup_before_shape(path: &Path, name: &str, uses_shape: fn(&DiskState) -> bool) -> std::io::Result<()> {
+    let mut source = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
+    let meta = source.metadata()?;
+    if !meta.is_file() || meta.nlink() != 1 || meta.len() > MAX_STATE_BYTES as u64 {
+        return Err(std::io::Error::other("Invalid application state file."));
     }
-    let Ok(existing) = std::fs::read(path) else { return };
-    if serde_json::from_slice::<DiskState>(&existing).is_ok_and(|disk| uses_reports(&disk)) {
-        return;
+    let mut existing = Vec::new();
+    source.read_to_end(&mut existing)?;
+    let mut disk = serde_json::from_slice::<DiskState>(&existing)?;
+    if !disk::schema_valid(&mut disk) {
+        return Err(std::io::Error::other("Application state does not match the expected schema."));
     }
-    let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&backup) {
-        Ok(file) => file,
-        Err(error) => {
-            eprintln!("Could not keep a backup of state.json before bot reports: {error}");
-            return;
+    disk::references_valid(&disk).map_err(std::io::Error::other)?;
+    if uses_shape(&disk) {
+        return Ok(());
+    }
+    let backup = path.with_file_name(name);
+    match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&backup) {
+        Ok(file) => {
+            let meta = file.metadata()?;
+            if !meta.is_file() || meta.nlink() != 1 || meta.permissions().mode() & 0o077 != 0 || meta.len() > MAX_STATE_BYTES as u64 {
+                return Err(std::io::Error::other("The state backup must be a private regular state file."));
+            }
+            // A previous crash may have left a truncated copy. Never overwrite it, but do not
+            // treat it (or an already-incompatible copy) as a usable rollback backup either.
+            // Parsing JSON alone is insufficient: this must also pass the real store loader's
+            // schema and reference checks before it can make an incompatible write safe.
+            let mut saved = serde_json::from_reader(file)?;
+            if !disk::schema_valid(&mut saved) {
+                return Err(std::io::Error::other("The state backup does not match the expected schema."));
+            }
+            disk::references_valid(&saved).map_err(std::io::Error::other)?;
+            if uses_shape(&saved) {
+                return Err(std::io::Error::other("The state backup already uses the incompatible shape."));
+            }
+            return Ok(());
         }
-    };
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&backup)?;
     let written = {
         use std::io::Write as _;
         file.write_all(&existing).and_then(|()| file.sync_all())
@@ -144,8 +202,10 @@ fn backup_before_reports(path: &Path) {
     if let Err(error) = written {
         // Only the file created above is removed; a partial copy is not a backup.
         let _ = std::fs::remove_file(&backup);
-        eprintln!("Could not keep a backup of state.json before bot reports: {error}");
+        return Err(error);
     }
+    // Persist the new backup directory entry before state.json can be atomically replaced.
+    std::fs::File::open(path.parent().ok_or_else(|| std::io::Error::other("State has no parent directory."))?)?.sync_all()
 }
 
 /// `Store.snapshot()`: the public state with the API key removed and redacted.
@@ -212,16 +272,21 @@ pub struct Store {
 }
 
 fn writer_loop(shared: Arc<Shared>, path: PathBuf, jobs: mpsc::Receiver<Job>) {
-    let mut backed_up = false;
+    let mut reports_backed_up = false;
+    let mut bot_chains_backed_up = false;
+    let mut unstarted_cancellations_backed_up = false;
     for job in jobs {
         match job {
             Job::Flush(done) => {
                 let _ = done.send(());
             }
-            Job::Write { bytes, runtime, routine_scheduling_error, reports, done } => {
-                if reports && !backed_up {
-                    backup_before_reports(&path);
-                    backed_up = true;
+            Job::Write { bytes, runtime, routine_scheduling_error, reports, bot_chains, unstarted_report_cancellations, done } => {
+                if reports && !reports_backed_up {
+                    if let Err(error) = backup_before_shape(&path, PRE_REPORTS_BACKUP, uses_reports) {
+                        // Preserve the original pre-reports backup's best-effort behavior.
+                        eprintln!("Could not keep a backup of state.json before bot reports: {error}");
+                    }
+                    reports_backed_up = true;
                 }
                 let done = |ok: bool| {
                     if let Some(done) = done {
@@ -235,7 +300,19 @@ fn writer_loop(shared: Arc<Shared>, path: PathBuf, jobs: mpsc::Receiver<Job>) {
                 let result = if bytes.len() > MAX_STATE_BYTES {
                     Err(std::io::Error::other("Application state exceeds the 64 MiB limit."))
                 } else {
-                    grok_bot_files::atomic_private_file(&path, &bytes)
+                    (|| {
+                        // Each incompatible shape keeps its own immediately previous rollback
+                        // point. Required backup failures leave compatible state.json untouched.
+                        if bot_chains && !bot_chains_backed_up {
+                            backup_before_shape(&path, PRE_BOT_CHAINS_BACKUP, uses_bot_chains)?;
+                            bot_chains_backed_up = true;
+                        }
+                        if unstarted_report_cancellations && !unstarted_cancellations_backed_up {
+                            backup_before_shape(&path, PRE_UNSTARTED_REPORT_CANCELLATION_BACKUP, uses_unstarted_report_cancellations)?;
+                            unstarted_cancellations_backed_up = true;
+                        }
+                        grok_bot_files::atomic_private_file(&path, &bytes)
+                    })()
                 };
                 match result {
                     Ok(()) => {
@@ -253,7 +330,12 @@ fn writer_loop(shared: Arc<Shared>, path: PathBuf, jobs: mpsc::Receiver<Job>) {
                         let snapshot = {
                             let mut state = shared.lock();
                             state.write_failed = true;
-                            state.runtime = RuntimeInfo { available: false, version: state.runtime.version.clone(), error: Some(SAVE_FAILED_RUNTIME.into()) };
+                            state.runtime = RuntimeInfo {
+                                available: false,
+                                bot_message_chains: state.runtime.bot_message_chains,
+                                version: state.runtime.version.clone(),
+                                error: Some(SAVE_FAILED_RUNTIME.into()),
+                            };
                             Arc::new(state.snapshot())
                         };
                         let _ = shared.events.send(snapshot);
@@ -360,7 +442,7 @@ impl Store {
             disk,
             data_dir: root.clone(),
             clock: now.clone(),
-            runtime: RuntimeInfo { available: false, version: None, error: Some("Checking Grok Build.".into()) },
+            runtime: RuntimeInfo { available: false, bot_message_chains: None, version: None, error: Some("Checking Grok Build.".into()) },
             routine_scheduling_error: None,
             dirty: false,
             write_failed: false,
@@ -487,15 +569,15 @@ struct Prospect<'a> {
     bot_exchanges: Vec<&'a BotExchange>,
     bot_deliveries: Vec<&'a BotDelivery>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    permission_rules: Vec<&'a PermissionRule>,
+    permission_rules: &'a Vec<PermissionRule>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    groups: Vec<&'a Group>,
+    groups: &'a Vec<Group>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    secrets: Vec<&'a VaultSecret>,
+    secrets: &'a Vec<VaultSecret>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    mcp_servers: Vec<&'a McpServerRecord>,
+    mcp_servers: &'a Vec<McpServerRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    main_bot_id: Option<&'a String>,
+    main_bot_id: &'a Option<String>,
 }
 
 fn truthy(value: &Option<String>) -> bool {
@@ -543,11 +625,11 @@ impl State {
             routine_runs: self.disk.routine_runs.iter().collect(),
             bot_exchanges: self.disk.bot_exchanges.iter().collect(),
             bot_deliveries: self.disk.bot_deliveries.iter().collect(),
-            permission_rules: self.disk.permission_rules.iter().collect(),
-            groups: self.disk.groups.iter().collect(),
-            secrets: self.disk.secrets.iter().collect(),
-            mcp_servers: self.disk.mcp_servers.iter().collect(),
-            main_bot_id: self.disk.main_bot_id.as_ref(),
+            permission_rules: &self.disk.permission_rules,
+            groups: &self.disk.groups,
+            secrets: &self.disk.secrets,
+            mcp_servers: &self.disk.mcp_servers,
+            main_bot_id: &self.disk.main_bot_id,
         }
     }
 
@@ -578,8 +660,24 @@ impl State {
         let deliveries: usize = prospect
             .bot_deliveries
             .iter()
-            .filter(|delivery| matches!(delivery.status, DeliveryStatus::Queued | DeliveryStatus::Running))
-            .map(|delivery| (if delivery.status == DeliveryStatus::Queued { json_bytes(&delivery.text) } else { 0 }) + MAX_BOT_REPLY_CHARACTERS * 12 + 8192)
+            .map(|delivery| {
+                // A public text is capped at 200k UTF-16 units, each at most six JSON bytes.
+                // A recipient retains its assistant plus either the final exchange copy or a run
+                // error. Keep this reserve while waiting: it also covers an internal report's
+                // final answer copied to the inbound exchange. Later report prompts are checked
+                // from their ACTUAL JSON bytes before starting, not speculatively reserved here.
+                if delivery.status.is_pending() {
+                    (if delivery.status == DeliveryStatus::Queued { json_bytes(&delivery.text) } else { 0 }) + BOT_TURN_TEXT_RESERVE
+                } else if delivery.report.as_ref().is_some_and(|report| report.status == ReportStatus::Running) {
+                    // A failed root report can retain both its assistant and its public run error.
+                    BOT_TURN_TEXT_RESERVE
+                } else if delivery.report.as_ref().is_some_and(|report| report.status == ReportStatus::Queued) {
+                    // A failed start records an error receipt without starting another turn.
+                    BOT_REPORT_METADATA_RESERVE
+                } else {
+                    0
+                }
+            })
             .sum();
         if json_bytes(prospect).saturating_add(runs).saturating_add(deliveries) > MAX_STATE_BYTES {
             return Err(HttpError::too_large(
@@ -587,6 +685,71 @@ impl State {
             ));
         }
         Ok(())
+    }
+
+    /// Check an automatic report before any turn mutation. Its hidden input contains nested JSON:
+    /// a 48 KiB raw answer plus an 8 KiB request can expand to about 400 KiB on disk, and legacy bot
+    /// names/redaction can make metadata larger still. Measure the actual prompt rather than guess
+    /// its size at delivery admission. Retain every other pending-work reserve, including the
+    /// inbound delivery's final exchange copy, and reserve the report's bounded answer/error growth.
+    pub fn check_bot_report_capacity(&self, conversation_id: &str, prompt: &str, delivery_ids: &[String]) -> HttpResult<()> {
+        self.assert_writable()?;
+        let source_index = self
+            .disk
+            .conversations
+            .iter()
+            .position(|conversation| conversation.id == conversation_id)
+            .ok_or_else(|| HttpError::not_found("Conversation does not exist."))?;
+        let ids: HashSet<&str> = delivery_ids.iter().map(String::as_str).collect();
+        if ids.is_empty()
+            || ids.len() != delivery_ids.len()
+            || !ids.iter().all(|id| {
+                self.disk.bot_deliveries.iter().any(|delivery| {
+                    delivery.id == *id
+                        && delivery.source_conversation_id == conversation_id
+                        && delivery.report.as_ref().is_some_and(|report| report.status == ReportStatus::Queued)
+                })
+            })
+        {
+            return Err(HttpError::conflict("No bot reply is waiting for a follow-up in this conversation."));
+        }
+        let now = iso(self.now());
+        let run_id = new_id();
+        let mut conversation = self.disk.conversations[source_index].clone();
+        for (role, text, report_delivery_ids) in [(Role::User, prompt, Some(delivery_ids.to_vec())), (Role::Assistant, "", None)] {
+            conversation.messages.push(Message {
+                id: new_id(),
+                role,
+                text: text.to_owned(),
+                created_at: now.clone(),
+                tools: Vec::new(),
+                bot_exchange_ids: None,
+                source_bot_id: None,
+                attachments: None,
+                speaker_bot_id: None,
+                report_delivery_ids,
+            });
+        }
+        conversation.updated_at = now.clone();
+        conversation.run = RunState { id: run_id.clone(), status: RunStatus::Starting, started_at: Some(now), ..RunState::idle() };
+        let claimed: Vec<_> = self
+            .disk
+            .bot_deliveries
+            .iter()
+            .filter(|delivery| delivery_ids.contains(&delivery.id))
+            .map(|delivery| {
+                let mut delivery = delivery.clone();
+                delivery.report = Some(DeliveryReport { status: ReportStatus::Running, run_id: Some(run_id.clone()), ..DeliveryReport::queued() });
+                delivery
+            })
+            .collect();
+        let mut prospect = self.prospect();
+        prospect.conversations[source_index] = &conversation;
+        for delivery in &claimed {
+            let index = self.disk.bot_deliveries.iter().position(|existing| existing.id == delivery.id).expect("claimed delivery exists");
+            prospect.bot_deliveries[index] = delivery;
+        }
+        Self::check_capacity(&prospect)
     }
 
     /// `changed()` up to the write: projections, revision bump, serialization. The public snapshot
@@ -624,6 +787,8 @@ impl State {
             runtime: self.runtime.clone(),
             routine_scheduling_error: self.routine_scheduling_error.clone(),
             reports: uses_reports(&self.disk),
+            bot_chains: uses_bot_chains(&self.disk),
+            unstarted_report_cancellations: uses_unstarted_report_cancellations(&self.disk),
             done: None,
         }
     }
@@ -1251,6 +1416,7 @@ impl State {
         }
         let message = message.ok_or_else(internal)?;
         if let Some(existing) = find_existing_bot_delivery(&self.disk.bot_deliveries, source_message_id, &input)? {
+            self.assert_bot_chain_open(&existing.chain_id, self.now())?;
             return Ok(existing.clone());
         }
         let recipient = self.bot(&input.to_bot_id)?;
@@ -1260,6 +1426,12 @@ impl State {
         // A recipient conversation continues its delivery; the answer of a report turn continues the
         // reported delivery (so report turns cannot restart a chain at hop 1).
         let parent = chain_parent(&self.disk.bot_deliveries, source, source_message_id);
+        if let Some(parent) = parent {
+            self.assert_bot_chain_open(&parent.chain_id, self.now())?;
+            if self.disk.bot_deliveries.iter().filter(|delivery| delivery.chain_id == parent.chain_id).count() >= MAX_BOT_DELIVERIES_PER_CHAIN {
+                return Err(HttpError::conflict(BOT_CHAIN_CAPACITY_ERROR));
+            }
+        }
         let hop = parent.map_or(0, |parent| parent.hop) + 1;
         if hop > MAX_BOT_HOPS {
             return Err(HttpError::conflict("Bot message chains are limited to four hops."));
@@ -1309,6 +1481,7 @@ impl State {
             finished_at: None,
             error: None,
             report: None,
+            chain_termination: None,
         };
         let source_index = self.disk.conversations.iter().position(|conversation| conversation.id == conversation_id).ok_or_else(internal)?;
         // Measure with the source message linked to the exchange, then undo on rejection.
@@ -1334,6 +1507,11 @@ impl State {
         self.assert_writable()?;
         let delivery =
             self.disk.bot_deliveries.iter().find(|delivery| delivery.id == delivery_id).ok_or_else(|| HttpError::not_found("Bot delivery does not exist."))?;
+        // A scheduler claim may have lost a race to chain Stop/expiry or another dispatch. Only
+        // a still-queued receipt can fail to start; never rewrite a settled or active recipient.
+        if delivery.status != DeliveryStatus::Queued {
+            return Ok(());
+        }
         let conversation_id = delivery.recipient_conversation_id.clone();
         let error = js_slice(&self.redact(error), 1000).to_owned();
         let timestamp = iso(now);

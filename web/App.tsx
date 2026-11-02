@@ -44,6 +44,7 @@ import {
   isDirty,
   readRoute,
   queuedRoutineRun,
+  pendingBotWork,
   reducer,
   runningConversation,
   selectedBot,
@@ -69,6 +70,7 @@ function historyPosition(): number {
 export function App() {
   const [state, dispatch] = useReducer(reducer, undefined, initialState);
   const [detailsTab, setDetailsTab] = useState<DetailsTab>('computer');
+  const [reportNotice, setReportNotice] = useState<{ conversationId: string; text: string } | null>(null);
   const [groupDialog, setGroupDialog] = useState<{ group?: Group } | null>(null);
   const [connectionAttempt, reconnect] = useReducer((attempt: number) => attempt + 1, 0);
   const current = useRef(state);
@@ -96,10 +98,12 @@ export function App() {
   }, []);
   const bot = selectedBot(state);
   const conversation = selectedConversation(state);
+  useEffect(() => setReportNotice(null), [conversation?.id]);
   const globalRun = runningConversation(state.data);
   const busy = state.command !== null;
   const data = state.data;
   const queuedRun = queuedRoutineRun(data, conversation);
+  const botWork = pendingBotWork(data, conversation);
   const selectionKey = draftKey(state.selection);
   const draft = state.drafts[selectionKey] ?? '';
   const [pendingFiles, setPendingFiles] = useState<Record<string, PendingAttachment[]>>({});
@@ -480,7 +484,7 @@ export function App() {
   const cancel = async () => {
     const before = current.current;
     const active = selectedConversation(before);
-    if (!active || (!activeRun(active.run.status) && !queuedRoutineRun(before.data, active))) return;
+    if (!active || (!activeRun(active.run.status) && !queuedRoutineRun(before.data, active) && !pendingBotWork(before.data, active))) return;
     await command('cancel', async () => {
       const snapshot = await request<AppState>(
         `/api/conversations/${encodeURIComponent(active.id)}/cancel`,
@@ -489,13 +493,15 @@ export function App() {
       dispatch({ type: 'snapshot', data: snapshot });
     });
   };
-  const cancelReports = async (conversationId: string) => {
+  const cancelReports = async (conversationId: string, deliveryIds: string[]) => {
     await command('cancel-reports', async () => {
-      const snapshot = await request<AppState>(
+      setReportNotice(null);
+      const result = await request<{ state: AppState; cancelledDeliveryIds: string[] }>(
         `/api/conversations/${encodeURIComponent(conversationId)}/bot-reports/cancel`,
-        { method: 'POST', body: {} },
+        { method: 'POST', body: { deliveryIds } },
       );
-      dispatch({ type: 'snapshot', data: snapshot });
+      dispatch({ type: 'snapshot', data: result.state });
+      if (!result.cancelledDeliveryIds.length) setReportNotice({ conversationId, text: '이미 실행을 시작했거나 대기 중이 아니어서 취소한 보고가 없습니다. 답변 중인 보고는 작업 중단을 사용하세요.' });
     });
   };
   const permission = async (optionId: string) => {
@@ -762,6 +768,12 @@ export function App() {
             </ErrorNotice>
           </div>
         )}
+        {reportNotice && state.surface.kind === 'chat' && reportNotice.conversationId === conversation?.id && (
+          <div className="connection-banner" role="status" aria-label="보고 취소 결과">
+            <span>{reportNotice.text}</span>
+            <button type="button" onClick={() => setReportNotice(null)}>보고 취소 안내 닫기</button>
+          </div>
+        )}
         {globalRun && !shownIds.includes(globalRun.id) && (
           <div className="other-run">
             <span>다른 대화에서 작업이 실행 중입니다.</span>
@@ -805,7 +817,7 @@ export function App() {
               data={data}
               messageExtras={message => conversation && <ThreadLinks data={data} conversation={conversation} message={message} busy={busy} run={command} onSnapshot={snapshot} onOpen={thread => openThread(thread)} />}
               onBotChat={exchangeId => navigate({ selection: current.current.selection, surface: { kind: 'bot-chat', exchangeId } })}
-              onCancelReports={conversationId => void cancelReports(conversationId)}
+              onCancelReports={(conversationId, deliveryIds) => void cancelReports(conversationId, deliveryIds)}
               cancelReportsDisabled={busy || state.connection !== 'online'}
               onRoutines={() => navigate({ selection: current.current.selection, surface: { kind: 'routines' } })}
               queuedRoutine={queuedRun}
@@ -825,6 +837,7 @@ export function App() {
               onFiles={() => toggleComputer(true)}
               onCancel={() => void cancel()}
               running={!!queuedRun || (!!conversation && activeRun(conversation.run.status))}
+              pendingBotWork={botWork}
               disabled={state.connection !== 'online' || !!globalRun || !!queuedRun}
               busy={busy}
               model={data.settings.model}
