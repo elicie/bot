@@ -97,7 +97,10 @@ pub(super) async fn bot_memory_and_knowledge(f: &Fixture) {
     let saved = f.completed(&id).await;
     assert_eq!(last_text(&saved), "Saved and forgot.");
     let current = f.store.read(|s| s.memories(&bot).unwrap().to_vec());
-    assert_eq!(current.iter().map(|m| (m.text.as_str(), m.source)).collect::<Vec<_>>(), [("User prefers Korean replies", MemorySource::User), ("Favorite color is teal", MemorySource::Bot)]);
+    assert_eq!(
+        current.iter().map(|m| (m.text.as_str(), m.source)).collect::<Vec<_>>(),
+        [("User prefers Korean replies", MemorySource::User), ("Favorite color is teal", MemorySource::Bot)]
+    );
     let outcomes = tool_outcomes(&f.provider.inference());
     assert!(outcomes.iter().any(|o| o.contains("\"existing\":true")), "{outcomes:?}");
     assert!(outcomes.iter().any(|o| o.contains("\"forgotten\":true")), "{outcomes:?}");

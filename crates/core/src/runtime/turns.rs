@@ -188,17 +188,23 @@ pub(crate) fn plan(state: &State, conversation_id: &str, user_text: Option<&str>
     let Some(group_id) = conversation.group_id.as_deref() else {
         let text = user_text.ok_or_else(|| HttpError::conflict("No group member is waiting to answer."))?;
         let bot = state.bot(&conversation.bot_id)?.clone();
-        let history: Vec<(Role, String)> = conversation
-            .messages
-            .iter()
-            .map(|m| (m.role, crate::runtime::attachments::history_text(&m.text, m.attachments.as_deref())))
-            .collect();
+        let history: Vec<(Role, String)> =
+            conversation.messages.iter().map(|m| (m.role, crate::runtime::attachments::history_text(&m.text, m.attachments.as_deref()))).collect();
         let fresh_prompt = conversation
             .thread
             .as_ref()
             .and_then(|link| thread_block(state, link, &key))
             .map(|block| format!("{block}\n\n{}", continuation_prompt(&key, &history, text)));
-        return Ok(TurnPlan { bot, speaker: None, user_text: Some(text.to_owned()), history, fresh_prompt, loaded_prompt: None, rules: None, round: RoundChange::None });
+        return Ok(TurnPlan {
+            bot,
+            speaker: None,
+            user_text: Some(text.to_owned()),
+            history,
+            fresh_prompt,
+            loaded_prompt: None,
+            rules: None,
+            round: RoundChange::None,
+        });
     };
     let group = state.group(group_id)?;
     let members = state.group_members(group_id)?;

@@ -49,7 +49,11 @@ pub fn is_global_ip(address: IpAddr) -> bool {
         IpAddr::V6(v6) => {
             let value = u128::from(v6);
             let in_range = |network: u128, bits: u32| value >> (128 - bits) == network >> (128 - bits);
-            in_range(0x2000 << 112, 3) && !in_range(0x2001 << 112, 23) && !in_range(0x2001_0db8 << 96, 32) && !in_range(0x2002 << 112, 16) && !in_range(0x3fff << 112, 20)
+            in_range(0x2000 << 112, 3)
+                && !in_range(0x2001 << 112, 23)
+                && !in_range(0x2001_0db8 << 96, 32)
+                && !in_range(0x2002 << 112, 16)
+                && !in_range(0x3fff << 112, 20)
         }
     }
 }
@@ -136,7 +140,8 @@ impl NetworkPolicy {
         }
         for fixture in &fixture_set {
             let url = Url::parse(fixture).map_err(|_| HttpError::bad_request("Fixture origins must be explicit loopback HTTP ports."))?;
-            let loopback = matches!(url.host(), Some(Host::Ipv4(ip)) if ip.is_loopback() && ip.octets() == [127, 0, 0, 1]) || matches!(url.host(), Some(Host::Ipv6(ip)) if ip.is_loopback());
+            let loopback = matches!(url.host(), Some(Host::Ipv4(ip)) if ip.is_loopback() && ip.octets() == [127, 0, 0, 1])
+                || matches!(url.host(), Some(Host::Ipv6(ip)) if ip.is_loopback());
             if url.scheme() != "http" || !loopback || url.port().is_none() {
                 return Err(HttpError::bad_request("Fixture origins must be explicit loopback HTTP ports."));
             }
@@ -157,7 +162,9 @@ impl NetworkPolicy {
         let answers = match url.host() {
             Some(Host::Ipv4(ip)) => vec![IpAddr::V4(ip)],
             Some(Host::Ipv6(ip)) => vec![IpAddr::V6(ip)],
-            Some(Host::Domain(name)) => (self.lookup)(name.to_owned()).await.map_err(|_| HttpError::forbidden("The destination could not be resolved safely."))?,
+            Some(Host::Domain(name)) => {
+                (self.lookup)(name.to_owned()).await.map_err(|_| HttpError::forbidden("The destination could not be resolved safely."))?
+            }
             None => return Err(HttpError::forbidden("The destination could not be resolved safely.")),
         };
         let fixture = self.fixtures.contains(&origin);

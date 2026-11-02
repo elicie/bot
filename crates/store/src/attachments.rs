@@ -103,11 +103,7 @@ pub fn image_type(bytes: &[u8]) -> Option<&'static str> {
 
 /// `1 MB`-style label used in limit messages.
 pub fn size_label(bytes: usize) -> String {
-    if bytes >= 1024 * 1024 && bytes.is_multiple_of(1024 * 1024) {
-        format!("{} MB", bytes / (1024 * 1024))
-    } else {
-        format!("{} KB", bytes.div_ceil(1024))
-    }
+    if bytes >= 1024 * 1024 && bytes.is_multiple_of(1024 * 1024) { format!("{} MB", bytes / (1024 * 1024)) } else { format!("{} KB", bytes.div_ceil(1024)) }
 }
 
 /// The file name without any directory part, trimmed; control characters are refused.
@@ -124,7 +120,16 @@ fn clean_name(name: &str) -> HttpResult<String> {
 /// type, otherwise `text/plain`.
 fn text_mime(declared: &str) -> String {
     let declared = declared.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
-    let structured = ["application/json", "application/xml", "application/yaml", "application/x-yaml", "application/toml", "application/javascript", "application/x-sh", "application/sql"];
+    let structured = [
+        "application/json",
+        "application/xml",
+        "application/yaml",
+        "application/x-yaml",
+        "application/toml",
+        "application/javascript",
+        "application/x-sh",
+        "application/sql",
+    ];
     let valid_token = !declared.is_empty() && declared.len() <= 100 && declared.bytes().all(|b| b.is_ascii_alphanumeric() || b"/.+-_".contains(&b));
     if valid_token && (declared.starts_with("text/") || structured.contains(&declared.as_str())) { declared } else { "text/plain".into() }
 }
@@ -160,16 +165,16 @@ pub fn prepare_attachments(uploads: Vec<AttachmentUpload>) -> HttpResult<Vec<Pre
                 return Err(HttpError::bad_request(format!("\"{name}\" is not a UTF-8 text file or a PNG, JPEG, GIF, or WebP image.")));
             }
             if bytes.len() > MAX_TEXT_ATTACHMENT_BYTES {
-                return Err(HttpError::too_large(format!("\"{name}\" is too large to attach (maximum {} for text files).", size_label(MAX_TEXT_ATTACHMENT_BYTES))));
+                return Err(HttpError::too_large(format!(
+                    "\"{name}\" is too large to attach (maximum {} for text files).",
+                    size_label(MAX_TEXT_ATTACHMENT_BYTES)
+                )));
             }
             text_total += bytes.len();
             (AttachmentKind::Text, text_mime(&declared))
         };
         total += bytes.len();
-        prepared.push(PreparedAttachment {
-            meta: Attachment { id: new_id(), name, mime_type, kind, size: bytes.len() as u64 },
-            bytes,
-        });
+        prepared.push(PreparedAttachment { meta: Attachment { id: new_id(), name, mime_type, kind, size: bytes.len() as u64 }, bytes });
     }
     if text_total > MAX_TEXT_ATTACHMENTS_TOTAL_BYTES {
         return Err(HttpError::too_large(format!("Text attachments of one message may total at most {}.", size_label(MAX_TEXT_ATTACHMENTS_TOTAL_BYTES))));

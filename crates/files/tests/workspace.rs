@@ -5,9 +5,7 @@ use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
-use grok_bot_files::{
-    MAX_FILE_BYTES, WorkspaceFiles, atomic_private_file, canonical_directory, content_hash, io_error, private_directory,
-};
+use grok_bot_files::{MAX_FILE_BYTES, WorkspaceFiles, atomic_private_file, canonical_directory, content_hash, io_error, private_directory};
 use grok_bot_model::{FileEntryType, HttpError};
 
 const LINK_ERROR: &str = "Symbolic links and non-directory parents are not allowed.";
@@ -161,14 +159,7 @@ fn reads_reject_non_regular_files_invalid_text_and_accept_limits() {
     let files = WorkspaceFiles::new(&f.workspace);
     fs::create_dir(f.workspace.join("nested")).unwrap();
     assert_eq!(files.read("nested").unwrap_err(), HttpError::new(415, "Only regular text files can be edited."));
-    rustix::fs::mknodat(
-        rustix::fs::CWD,
-        f.workspace.join("pipe"),
-        rustix::fs::FileType::Fifo,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        0,
-    )
-    .unwrap();
+    rustix::fs::mknodat(rustix::fs::CWD, f.workspace.join("pipe"), rustix::fs::FileType::Fifo, rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR, 0).unwrap();
     assert_eq!(files.read("pipe").unwrap_err(), HttpError::new(415, "Only regular text files can be edited."));
     assert!(!files.list("").unwrap().entries.iter().any(|entry| entry.name == "pipe"));
 
@@ -197,10 +188,7 @@ fn saves_detect_conflicts_keep_modes_require_parents_and_leave_no_temporary_file
     assert_eq!(files.save("missing/child.txt", "new", "").unwrap_err(), HttpError::not_found("File or directory does not exist."));
     assert!(!f.workspace.join("missing").exists());
     assert_eq!(files.save("notes.txt", "a\0b", &original.hash).unwrap_err(), HttpError::new(415, "Binary files cannot be edited."));
-    assert_eq!(
-        files.save("notes.txt", &"z".repeat(MAX_FILE_BYTES + 1), &original.hash).unwrap_err(),
-        HttpError::too_large("Text files are limited to 1 MiB.")
-    );
+    assert_eq!(files.save("notes.txt", &"z".repeat(MAX_FILE_BYTES + 1), &original.hash).unwrap_err(), HttpError::too_large("Text files are limited to 1 MiB."));
     // Content validation runs before path validation, as in files.ts.
     assert_eq!(files.save("../x", "\u{1}", "").unwrap_err().status, 415);
 
@@ -248,10 +236,7 @@ fn canonical_directory_validates_absolute_real_directories() {
     assert_eq!(canonical_directory(&format!("{workspace}/missing")).unwrap_err().status, 404);
     assert_eq!(canonical_directory(&format!("{workspace}/notes.txt")).unwrap_err(), HttpError::forbidden(LINK_ERROR));
     symlink(&f.workspace, f.root.join("alias")).unwrap();
-    assert_eq!(
-        canonical_directory(&format!("{}/alias/", f.root.display())).unwrap_err(),
-        HttpError::forbidden(LINK_ERROR)
-    );
+    assert_eq!(canonical_directory(&format!("{}/alias/", f.root.display())).unwrap_err(), HttpError::forbidden(LINK_ERROR));
 }
 
 #[test]
@@ -270,10 +255,7 @@ fn private_directories_are_created_0700_and_reject_links_and_root() {
     assert_eq!(mode(&existing), 0o700);
     assert_eq!(private_directory(&f.root.join("existing/sub/../again")).unwrap(), existing.join("again"));
 
-    assert_eq!(
-        private_directory(Path::new("/")).unwrap_err(),
-        HttpError::bad_request("Application data must use its own private directory.")
-    );
+    assert_eq!(private_directory(Path::new("/")).unwrap_err(), HttpError::bad_request("Application data must use its own private directory."));
     symlink(&existing, f.root.join("linked")).unwrap();
     assert_eq!(private_directory(&f.root.join("linked/child")).unwrap_err(), HttpError::forbidden(LINK_ERROR));
     assert!(!existing.join("child").exists());

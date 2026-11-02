@@ -33,7 +33,8 @@ const STARTUP_TIMEOUT_MS: u64 = 10_000;
 const TOOL_TIMEOUT_MS: u64 = 25_000;
 
 /// Follow-up the engine adds as a user turn when the user declines a custom tool call.
-const DECLINED_FOLLOWUP: &str = "I declined that custom MCP tool call in the browser, so it did not run. Continue without it, and do not retry the same call unless I ask.";
+const DECLINED_FOLLOWUP: &str =
+    "I declined that custom MCP tool call in the browser, so it did not run. Continue without it, and do not retry the same call unless I ask.";
 
 /// The custom servers of one run.
 #[derive(Default)]
@@ -88,7 +89,8 @@ impl RunMcp {
         if self.servers.is_empty() {
             return None;
         }
-        let entries = self.servers.iter().map(|server| (server.name.clone(), json!({"startupTimeoutMs": STARTUP_TIMEOUT_MS, "toolTimeoutMs": TOOL_TIMEOUT_MS})));
+        let entries =
+            self.servers.iter().map(|server| (server.name.clone(), json!({"startupTimeoutMs": STARTUP_TIMEOUT_MS, "toolTimeoutMs": TOOL_TIMEOUT_MS})));
         Some(Value::Object(entries.collect()))
     }
 

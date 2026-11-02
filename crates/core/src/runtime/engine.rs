@@ -28,11 +28,7 @@ pub struct ProviderKey {
 
 impl ProviderKey {
     pub fn from_settings(settings: &PrivateSettings) -> Self {
-        Self {
-            base_url: settings.base_url.clone(),
-            model: settings.model.clone(),
-            api_key: settings.api_key.clone(),
-        }
+        Self { base_url: settings.base_url.clone(), model: settings.model.clone(), api_key: settings.api_key.clone() }
     }
 }
 
@@ -46,12 +42,7 @@ pub fn engine_settings(engine_root: &Path, key: &ProviderKey, relay: Option<&Rel
     };
     EngineSettings {
         grok_home: engine_root.join("home").join(".grok"),
-        models: vec![ModelSpec {
-            id: MODEL_ALIAS.into(),
-            model: key.model.clone(),
-            base_url,
-            api_key,
-        }],
+        models: vec![ModelSpec { id: MODEL_ALIAS.into(), model: key.model.clone(), base_url, api_key }],
         default_model: MODEL_ALIAS.into(),
         allow: vec!["MCPTool(workspace__*)".into()],
         inference_idle_timeout_secs: 120,
@@ -103,13 +94,7 @@ pub struct EngineManager {
 impl EngineManager {
     /// The engine for `key`, starting or restarting it as needed. The caller guarantees that no
     /// other run is active (the store admits one active run at a time).
-    pub async fn acquire(
-        &self,
-        runtime: &Arc<Runtime>,
-        engine_root: &Path,
-        key: &ProviderKey,
-        relay: Option<&RelayEndpoint>,
-    ) -> Result<Engine> {
+    pub async fn acquire(&self, runtime: &Arc<Runtime>, engine_root: &Path, key: &ProviderKey, relay: Option<&RelayEndpoint>) -> Result<Engine> {
         let mut slot = self.slot.lock().await;
         if let Some(current) = slot.as_ref()
             && current.key == *key
@@ -119,19 +104,12 @@ impl EngineManager {
         if let Some(previous) = slot.take() {
             stop(previous.engine).await;
         }
-        let (host, events) = EngineHost::start(engine_settings(engine_root, key, relay))
-            .await
-            .map_err(|error| anyhow!("Could not start the application engine. {error:#}"))?;
+        let (host, events) =
+            EngineHost::start(engine_settings(engine_root, key, relay)).await.map_err(|error| anyhow!("Could not start the application engine. {error:#}"))?;
         let (barrier, barriers) = mpsc::unbounded_channel();
         tokio::spawn(route(Arc::downgrade(runtime), events, barriers));
-        let engine = Engine {
-            host: Arc::new(host),
-            barrier,
-        };
-        *slot = Some(Slot {
-            engine: engine.clone(),
-            key: key.clone(),
-        });
+        let engine = Engine { host: Arc::new(host), barrier };
+        *slot = Some(Slot { engine: engine.clone(), key: key.clone() });
         Ok(engine)
     }
 
@@ -152,11 +130,7 @@ async fn stop(engine: Engine) {
 
 /// Route engine events in arrival order. Updates are projected one at a time so stored text keeps
 /// the stream order; permission requests wait for the browser on their own task.
-async fn route(
-    runtime: Weak<Runtime>,
-    mut events: mpsc::UnboundedReceiver<EngineEvent>,
-    mut barriers: mpsc::UnboundedReceiver<oneshot::Sender<()>>,
-) {
+async fn route(runtime: Weak<Runtime>, mut events: mpsc::UnboundedReceiver<EngineEvent>, mut barriers: mpsc::UnboundedReceiver<oneshot::Sender<()>>) {
     loop {
         tokio::select! {
             biased;

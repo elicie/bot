@@ -66,7 +66,12 @@ impl App {
     /// A same-origin request through `address` (`127.0.0.1` or the LAN address).
     async fn request(&self, address: &str, method: &str, route: &str, body: Option<Value>, extra: &[(&str, &str)]) -> (u16, String) {
         let host = format!("{address}:{}", self.port);
-        let mut headers = vec![("Host".to_owned(), host.clone()), ("Origin".to_owned(), format!("http://{host}")), ("X-Grok-Bot".to_owned(), "1".to_owned()), ("Content-Type".to_owned(), "application/json".to_owned())];
+        let mut headers = vec![
+            ("Host".to_owned(), host.clone()),
+            ("Origin".to_owned(), format!("http://{host}")),
+            ("X-Grok-Bot".to_owned(), "1".to_owned()),
+            ("Content-Type".to_owned(), "application/json".to_owned()),
+        ];
         headers.extend(extra.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())));
         let mut stream = TcpStream::connect((address, self.port)).await.unwrap();
         let body = body.map(|b| b.to_string());
@@ -124,10 +129,20 @@ async fn computer_routes_are_loopback_only(app: &App) {
     let forwarded = [("X-Forwarded-For", "127.0.0.1"), ("Forwarded", "for=127.0.0.1")];
     for (method, route, body) in [
         ("GET", format!("/api/computer?owner={bot}"), None),
-        ("POST", "/api/computer".to_owned(), Some(json!({ "ownerId": bot, "requestId": grok_bot_model::new_id(), "userInitiated": true, "origins": ["https://example.com"] }))),
+        (
+            "POST",
+            "/api/computer".to_owned(),
+            Some(json!({ "ownerId": bot, "requestId": grok_bot_model::new_id(), "userInitiated": true, "origins": ["https://example.com"] })),
+        ),
         ("DELETE", "/api/computer".to_owned(), Some(json!({ "ownerId": bot }))),
         ("GET", format!("/api/computer/preview?owner={bot}&epoch={0}&frame={0}", grok_bot_model::new_id()), None),
-        ("POST", "/api/computer/actions".to_owned(), Some(json!({ "ownerId": bot, "requestId": grok_bot_model::new_id(), "epoch": grok_bot_model::new_id(), "frameId": null, "action": { "type": "observe" } }))),
+        (
+            "POST",
+            "/api/computer/actions".to_owned(),
+            Some(
+                json!({ "ownerId": bot, "requestId": grok_bot_model::new_id(), "epoch": grok_bot_model::new_id(), "frameId": null, "action": { "type": "observe" } }),
+            ),
+        ),
         ("POST", "/api/computer/actions".to_owned(), Some(json!({ "malformed": true }))),
     ] {
         let (status, text) = app.request(&lan, method, &route, body, &forwarded).await;
@@ -153,7 +168,8 @@ async fn computer_routes_are_loopback_only(app: &App) {
     let (status, text) = app.request("127.0.0.1", "POST", "/api/computer", Some(private), &[]).await;
     assert_eq!(status, 403, "{text}");
     assert!(text.contains("non-public address"), "{text}");
-    let action = json!({ "ownerId": bot, "requestId": grok_bot_model::new_id(), "epoch": grok_bot_model::new_id(), "frameId": null, "action": { "type": "observe" } });
+    let action =
+        json!({ "ownerId": bot, "requestId": grok_bot_model::new_id(), "epoch": grok_bot_model::new_id(), "frameId": null, "action": { "type": "observe" } });
     assert_eq!(app.request("127.0.0.1", "POST", "/api/computer/actions", Some(action), &[]).await.0, 409);
     let missing_frame = json!({ "ownerId": bot, "requestId": grok_bot_model::new_id(), "epoch": grok_bot_model::new_id(), "action": { "type": "observe" } });
     assert_eq!(app.request("127.0.0.1", "POST", "/api/computer/actions", Some(missing_frame), &[]).await.0, 400);
@@ -204,7 +220,8 @@ async fn lan_state_and_sse_hide_local_computer_details(app: &App) {
     assert!(local_state.contains(CANARY));
 
     // A LAN client cannot decide a local-only approval even with its permission ID.
-    let decision = app.request(&lan, "POST", &format!("/api/conversations/{conversation}/permissions/{permission_id}"), Some(json!({ "optionId": "once" })), &[]).await;
+    let decision =
+        app.request(&lan, "POST", &format!("/api/conversations/{conversation}/permissions/{permission_id}"), Some(json!({ "optionId": "once" })), &[]).await;
     assert_ne!(decision.0, 200);
     assert!(!decision.1.contains(CANARY));
 

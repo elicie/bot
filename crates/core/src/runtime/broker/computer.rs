@@ -39,7 +39,8 @@ fn number(value: f64) -> Value {
 /// `computerArguments` of the Node broker; the action is rebuilt in schema key order.
 fn parse_action(action: &Map<String, Value>) -> BrokerResult<Value> {
     let kind = action.get("type").and_then(Value::as_str).ok_or(BrokerError::Invalid)?;
-    let finite = |key: &str, limit: f64| action.get(key).and_then(Value::as_f64).filter(|v| v.is_finite() && *v >= 0.0 && *v < limit).ok_or(BrokerError::Invalid);
+    let finite =
+        |key: &str, limit: f64| action.get(key).and_then(Value::as_f64).filter(|v| v.is_finite() && *v >= 0.0 && *v < limit).ok_or(BrokerError::Invalid);
     Ok(match kind {
         "navigate" => {
             let url = super::required(strict(action, &["type", "url"])?, "url")?;
@@ -68,7 +69,8 @@ fn parse_action(action: &Map<String, Value>) -> BrokerResult<Value> {
         }
         "scroll" => {
             strict(action, &["type", "deltaY"])?;
-            let delta = action.get("deltaY").and_then(Value::as_f64).filter(|d| d.fract() == 0.0 && (-1200.0..=1200.0).contains(d)).ok_or(BrokerError::Invalid)?;
+            let delta =
+                action.get("deltaY").and_then(Value::as_f64).filter(|d| d.fract() == 0.0 && (-1200.0..=1200.0).contains(d)).ok_or(BrokerError::Invalid)?;
             json!({ "type": "scroll", "deltaY": number(delta) })
         }
         "observe" => {

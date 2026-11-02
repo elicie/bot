@@ -184,7 +184,8 @@ impl Store {
         }
         let bytes = input.content.len() as u64;
         self.read(|state| state.knowledge_admissible(bot_id, &input.name, bytes))?;
-        let file = KnowledgeFile { id: new_id(), name: input.name, bytes, hash: grok_bot_files::content_hash(input.content.as_bytes()), created_at: iso(self.now()) };
+        let file =
+            KnowledgeFile { id: new_id(), name: input.name, bytes, hash: grok_bot_files::content_hash(input.content.as_bytes()), created_at: iso(self.now()) };
         let data_dir = self.data_dir().to_path_buf();
         let (bot, id) = (bot_id.to_owned(), file.id.clone());
         let content = input.content;
@@ -218,11 +219,9 @@ impl Store {
 
     /// Remove knowledge contents no bot references. Called once when the store opens.
     pub(crate) async fn prune_knowledge(&self) {
-        let keep: Vec<(String, Vec<String>)> = self.read(|state| {
-            state.disk().bots.iter().map(|bot| (bot.id.clone(), bot.knowledge.iter().flatten().map(|file| file.id.clone()).collect())).collect()
-        });
+        let keep: Vec<(String, Vec<String>)> = self
+            .read(|state| state.disk().bots.iter().map(|bot| (bot.id.clone(), bot.knowledge.iter().flatten().map(|file| file.id.clone()).collect())).collect());
         let data_dir = self.data_dir().to_path_buf();
         let _ = tokio::task::spawn_blocking(move || prune(&data_dir, &keep)).await;
     }
 }
-

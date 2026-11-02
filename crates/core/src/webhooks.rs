@@ -36,7 +36,10 @@ pub(crate) fn api_routes() -> Router<Ctx> {
 
 /// The external trigger route, merged outside `/api`.
 pub(crate) fn hook_routes() -> Router<Ctx> {
-    Router::new().route("/hooks/routines/{id}", post(trigger).fallback(|| async { (StatusCode::METHOD_NOT_ALLOWED, Json(json!({ "error": "Send webhooks with POST." }))) }))
+    Router::new().route(
+        "/hooks/routines/{id}",
+        post(trigger).fallback(|| async { (StatusCode::METHOD_NOT_ALLOWED, Json(json!({ "error": "Send webhooks with POST." }))) }),
+    )
 }
 
 fn new_key() -> String {
@@ -52,11 +55,7 @@ async fn create_key(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(id
     let store = ctx.store.clone();
     let webhook = ctx.queue.run(async move { store.mutate(|s| s.set_routine_webhook(&id, hash, hint)).await }).await?;
     let state = ctx.store.snapshot();
-    Ok(reply(
-        StatusCode::CREATED,
-        json!({ "key": key, "keyHint": webhook.key_hint, "createdAt": webhook.created_at, "state": state }),
-        &remote,
-    ))
+    Ok(reply(StatusCode::CREATED, json!({ "key": key, "keyHint": webhook.key_hint, "createdAt": webhook.created_at, "state": state }), &remote))
 }
 
 async fn revoke_key(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(id): Path<String>, JsonBody(_): JsonBody<Empty>) -> ApiResult {
@@ -142,10 +141,7 @@ async fn trigger(State(ctx): State<Ctx>, Path(id): Path<String>, headers: Header
     let payload = (!payload.trim().is_empty()).then_some(payload);
     match ctx.scheduler.run_webhook(&id, &key, payload).await {
         Ok(run) => no_store(
-            (
-                StatusCode::ACCEPTED,
-                Json(json!({ "run": { "id": run.id, "routineId": run.routine_id, "trigger": run.trigger, "createdAt": run.created_at } })),
-            )
+            (StatusCode::ACCEPTED, Json(json!({ "run": { "id": run.id, "routineId": run.routine_id, "trigger": run.trigger, "createdAt": run.created_at } })))
                 .into_response(),
         ),
         Err(failure) => {

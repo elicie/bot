@@ -63,11 +63,7 @@ fn key(value: &str) -> Key {
 
 pub(crate) fn compare(a: &str, b: &str) -> Ordering {
     let (left, right) = (key(a), key(b));
-    left.primary
-        .cmp(&right.primary)
-        .then_with(|| left.secondary.cmp(&right.secondary))
-        .then_with(|| left.tertiary.cmp(&right.tertiary))
-        .then_with(|| a.cmp(b))
+    left.primary.cmp(&right.primary).then_with(|| left.secondary.cmp(&right.secondary)).then_with(|| left.tertiary.cmp(&right.tertiary)).then_with(|| a.cmp(b))
 }
 
 #[cfg(test)]
@@ -78,9 +74,8 @@ mod tests {
     fn matches_node_locale_compare_for_common_names() {
         // Expected order produced by Node 24 (`en-US`, full ICU): `names.sort((a, b) => a.localeCompare(b))`.
         let expected = [
-            "_x", "-x", ",", ";", ":", "!", "?", ".x", "'", "\"", "(", ")", "[", "]", "{", "}", "@", "*", "/", "\\", "&", "#",
-            "%", "`", "^", "+", "<", "=", ">", "|", "~", "$", "10", "9", "a", "A", "b", "B", "e", "é", "f", "x y", "x_y",
-            "x-y", "x.y", "xy", "z", "Z", "α", "я", "가", "日",
+            "_x", "-x", ",", ";", ":", "!", "?", ".x", "'", "\"", "(", ")", "[", "]", "{", "}", "@", "*", "/", "\\", "&", "#", "%", "`", "^", "+", "<", "=",
+            ">", "|", "~", "$", "10", "9", "a", "A", "b", "B", "e", "é", "f", "x y", "x_y", "x-y", "x.y", "xy", "z", "Z", "α", "я", "가", "日",
         ];
         let mut names = expected.to_vec();
         names.reverse();
@@ -92,8 +87,22 @@ mod tests {
     fn orders_typical_file_names() {
         // Node 24 order for the same names.
         let expected = [
-            "_config.yml", ".env", "a.txt", "a1", "A1", "a10", "a2", "B.md", "notes.txt", "Notes.txt", "Read_me", "read-me",
-            "README.md", "readme.txt", "réadme.txt", "zeta",
+            "_config.yml",
+            ".env",
+            "a.txt",
+            "a1",
+            "A1",
+            "a10",
+            "a2",
+            "B.md",
+            "notes.txt",
+            "Notes.txt",
+            "Read_me",
+            "read-me",
+            "README.md",
+            "readme.txt",
+            "réadme.txt",
+            "zeta",
         ];
         let mut names = expected.to_vec();
         names.reverse();

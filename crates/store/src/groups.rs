@@ -96,7 +96,10 @@ pub(crate) fn schema_valid(disk: &DiskState) -> bool {
             conversation.group_id.as_deref().is_none_or(|id| is_uuid(id) && id == conversation.bot_id)
                 && conversation.thread.as_ref().is_none_or(|link| is_uuid(&link.parent_conversation_id) && is_uuid(&link.parent_message_id))
                 && conversation.group_round.as_ref().is_none_or(|round| {
-                    is_uuid(&round.id) && is_uuid(&round.user_message_id) && round.pending_bot_ids.iter().all(|id| is_uuid(id)) && is_timestamp(&round.created_at)
+                    is_uuid(&round.id)
+                        && is_uuid(&round.user_message_id)
+                        && round.pending_bot_ids.iter().all(|id| is_uuid(id))
+                        && is_timestamp(&round.created_at)
                 })
                 && conversation.member_sessions.iter().flatten().all(|session| is_uuid(&session.bot_id))
                 && conversation.messages.iter().all(|message| message.speaker_bot_id.as_deref().is_none_or(is_uuid))

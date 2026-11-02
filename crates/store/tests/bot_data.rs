@@ -241,7 +241,12 @@ async fn templates_round_trip_with_fresh_ids_and_redaction() {
     let f = Fixture::new().await;
     configure_key(&f, "TEMPLATE_KEY_CANARY").await;
     let bot = f.bot_id();
-    let patch = BotPatch { instructions: Some("Answer as a reviewer. TEMPLATE_KEY_CANARY".into()), shape: Some(AvatarShape::Star), color: Some("#22c55e".into()), ..BotPatch::default() };
+    let patch = BotPatch {
+        instructions: Some("Answer as a reviewer. TEMPLATE_KEY_CANARY".into()),
+        shape: Some(AvatarShape::Star),
+        color: Some("#22c55e".into()),
+        ..BotPatch::default()
+    };
     f.store.mutate(|s| s.update_bot(&f.bot_id(), patch)).await.unwrap();
     let first = f.store.mutate(|s| s.add_skill(&f.bot_id(), skill("review"), false)).await.unwrap();
     f.store.mutate(|s| s.add_skill(&f.bot_id(), skill("disabled"), false)).await.unwrap();
@@ -287,7 +292,12 @@ async fn template_import_is_strict() {
     });
     let parse = |value: serde_json::Value| serde_json::from_value::<BotTemplate>(value);
     assert!(parse(valid.clone()).is_ok());
-    for (pointer, value) in [("/id", serde_json::json!("x")), ("/bot/id", serde_json::json!("x")), ("/skills/0/id", serde_json::json!("x")), ("/bot/shape", serde_json::json!("triangle"))] {
+    for (pointer, value) in [
+        ("/id", serde_json::json!("x")),
+        ("/bot/id", serde_json::json!("x")),
+        ("/skills/0/id", serde_json::json!("x")),
+        ("/bot/shape", serde_json::json!("triangle")),
+    ] {
         let mut invalid = valid.clone();
         let (parent, key) = pointer.rsplit_once('/').unwrap();
         invalid.pointer_mut(if parent.is_empty() { "" } else { parent }).unwrap()[key] = value;

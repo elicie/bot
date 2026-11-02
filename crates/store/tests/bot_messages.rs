@@ -231,7 +231,17 @@ async fn bot_message_chains_are_limited_to_four_hops() {
             .mutate(|s| {
                 let conversation = s.conversation_mut(&recipient)?;
                 conversation.messages = vec![
-                    Message { id: new_id(), role: Role::User, text, created_at: now.clone(), tools: vec![], bot_exchange_ids: None, source_bot_id: Some(from), attachments: None, speaker_bot_id: None },
+                    Message {
+                        id: new_id(),
+                        role: Role::User,
+                        text,
+                        created_at: now.clone(),
+                        tools: vec![],
+                        bot_exchange_ids: None,
+                        source_bot_id: Some(from),
+                        attachments: None,
+                        speaker_bot_id: None,
+                    },
                     Message {
                         id: message.clone(),
                         role: Role::Assistant,

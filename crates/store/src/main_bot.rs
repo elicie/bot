@@ -19,10 +19,7 @@ use crate::State;
 
 /// The main bot of `disk`: the chosen bot if it exists, otherwise the first bot.
 pub fn resolve(disk: &DiskState) -> Option<&str> {
-    disk.main_bot_id
-        .as_deref()
-        .filter(|id| disk.bots.iter().any(|bot| bot.id == *id))
-        .or_else(|| disk.bots.first().map(|bot| bot.id.as_str()))
+    disk.main_bot_id.as_deref().filter(|id| disk.bots.iter().any(|bot| bot.id == *id)).or_else(|| disk.bots.first().map(|bot| bot.id.as_str()))
 }
 
 impl State {

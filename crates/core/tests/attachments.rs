@@ -88,14 +88,8 @@ async fn settled(app: &TestApp, conversation: &str) -> Value {
 
 /// Content parts of this turn's user message (the one carrying `<user_query>`).
 fn user_parts(request: &Value) -> Vec<Value> {
-    let user = request["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .rev()
-        .find(|m| m["role"] == "user" && m["content"].to_string().contains("user_query"))
-        .cloned()
-        .unwrap();
+    let user =
+        request["messages"].as_array().unwrap().iter().rev().find(|m| m["role"] == "user" && m["content"].to_string().contains("user_query")).cloned().unwrap();
     match &user["content"] {
         Value::Array(parts) => parts.clone(),
         Value::String(text) => vec![json!({"type": "text", "text": text})],
@@ -149,7 +143,10 @@ async fn scenario(root: &Path, engine: &Path) {
     assert_eq!(settled_conversation["run"]["status"], "completed", "{}", settled_conversation["run"]);
     assert_eq!(settled_conversation["messages"][1]["text"], "I read the attachments.");
     let attachments = settled_conversation["messages"][0]["attachments"].as_array().unwrap().clone();
-    assert_eq!(attachments.iter().map(|a| (a["name"].as_str().unwrap(), a["kind"].as_str().unwrap())).collect::<Vec<_>>(), [("hostile.txt", "text"), ("pixel.png", "image")]);
+    assert_eq!(
+        attachments.iter().map(|a| (a["name"].as_str().unwrap(), a["kind"].as_str().unwrap())).collect::<Vec<_>>(),
+        [("hostile.txt", "text"), ("pixel.png", "image")]
+    );
     assert_eq!(settled_conversation["messages"][0]["text"], "Summarize the attached files.");
 
     let requests = provider.main_requests();
@@ -198,7 +195,8 @@ async fn scenario(root: &Path, engine: &Path) {
     assert_eq!(app.api("POST", &format!("/api/bots/{bot}/unread"), Some(json!({"unread": "yes"}))).await.0, 400);
 
     // User text with `@` is literal-encoded as a whole; the attachment still arrives intact.
-    let body = json!({"text": "Compare with @notes.txt", "attachments": [{"name": "a.md", "mimeType": "text/markdown", "data": base64("# A\n@here".as_bytes())}]});
+    let body =
+        json!({"text": "Compare with @notes.txt", "attachments": [{"name": "a.md", "mimeType": "text/markdown", "data": base64("# A\n@here".as_bytes())}]});
     assert_eq!(app.api("POST", &route, Some(body)).await.0, 202);
     assert_eq!(settled(&app, &conversation).await["run"]["status"], "completed");
     let requests = provider.main_requests();
@@ -212,7 +210,8 @@ async fn scenario(root: &Path, engine: &Path) {
 
     // Validation and limits.
     assert_eq!(app.api("POST", &route, Some(json!({"text": "  ", "attachments": []}))).await.0, 400);
-    let (status, error) = app.api("POST", &route, Some(json!({"text": "x", "attachments": [{"name": "x.png", "mimeType": "image/png", "data": base64(b"not an image")}]}))).await;
+    let (status, error) =
+        app.api("POST", &route, Some(json!({"text": "x", "attachments": [{"name": "x.png", "mimeType": "image/png", "data": base64(b"not an image")}]}))).await;
     assert_eq!((status, error["error"].as_str()), (400, Some("\"x.png\" is not a PNG, JPEG, GIF, or WebP image.")));
     // Bodies above the global 2 MiB JSON limit reach attachment validation on this route.
     let large: Vec<Value> = (0..3).map(|i| json!({"name": format!("{i}.txt"), "mimeType": "text/plain", "data": base64(&vec![b'a'; 1024 * 1024])})).collect();

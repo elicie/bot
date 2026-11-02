@@ -30,7 +30,20 @@ pub const VIEWPORT_WIDTH: u32 = 960;
 pub const VIEWPORT_HEIGHT: u32 = 600;
 
 pub const COMPUTER_KEYS: [&str; 15] = [
-    "Enter", "Tab", "Shift+Tab", "Escape", "Backspace", "Delete", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown",
+    "Enter",
+    "Tab",
+    "Shift+Tab",
+    "Escape",
+    "Backspace",
+    "Delete",
+    "ArrowUp",
+    "ArrowDown",
+    "ArrowLeft",
+    "ArrowRight",
+    "Home",
+    "End",
+    "PageUp",
+    "PageDown",
     "Space",
 ];
 
@@ -177,5 +190,7 @@ pub(crate) fn bounded_text(value: &str, limit: usize) -> (String, bool) {
 
 /// `z.string().uuid()`: canonical hyphenated form.
 pub(crate) fn is_uuid(value: &str) -> bool {
-    value.len() == 36 && value.as_bytes().iter().enumerate().all(|(i, b)| if [8, 13, 18, 23].contains(&i) { *b == b'-' } else { b.is_ascii_hexdigit() }) && uuid::Uuid::parse_str(value).is_ok()
+    value.len() == 36
+        && value.as_bytes().iter().enumerate().all(|(i, b)| if [8, 13, 18, 23].contains(&i) { *b == b'-' } else { b.is_ascii_hexdigit() })
+        && uuid::Uuid::parse_str(value).is_ok()
 }

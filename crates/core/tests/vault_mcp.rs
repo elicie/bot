@@ -35,7 +35,11 @@ async fn api(app: &TestApp, source: Ipv4Addr, method: &str, route: &str, body: O
     let text = String::from_utf8_lossy(&response).into_owned();
     let status = text.split(' ').nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
     let (head, body) = text.split_once("\r\n\r\n").map(|(h, b)| (h.to_owned(), b.to_owned())).unwrap_or_default();
-    let body = if head.to_ascii_lowercase().contains("transfer-encoding: chunked") { body.split("\r\n").skip(1).step_by(2).collect::<Vec<_>>().join("") } else { body };
+    let body = if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+        body.split("\r\n").skip(1).step_by(2).collect::<Vec<_>>().join("")
+    } else {
+        body
+    };
     (status, serde_json::from_str(&body).unwrap_or(Value::Null))
 }
 
@@ -56,7 +60,10 @@ fn vault_and_custom_mcp_routes_are_loopback_only() {
         assert_eq!(api(&app, LOCAL, "POST", "/api/secrets", Some(json!({ "name": "API_TOKEN", "value": VALUE, "extra": 1 }))).await.0, 400);
         let (status, state) = api(&app, LOCAL, "POST", "/api/secrets", Some(input)).await;
         assert_eq!(status, 201);
-        assert_eq!(state["secrets"], json!([{ "id": state["secrets"][0]["id"], "name": "API_TOKEN", "botId": bot, "createdAt": state["secrets"][0]["createdAt"], "updatedAt": state["secrets"][0]["updatedAt"] }]));
+        assert_eq!(
+            state["secrets"],
+            json!([{ "id": state["secrets"][0]["id"], "name": "API_TOKEN", "botId": bot, "createdAt": state["secrets"][0]["createdAt"], "updatedAt": state["secrets"][0]["updatedAt"] }])
+        );
         let id = state["secrets"][0]["id"].as_str().unwrap().to_owned();
         for source in [LOCAL, LAN] {
             let (_, state) = api(&app, source, "GET", "/api/state", None).await;

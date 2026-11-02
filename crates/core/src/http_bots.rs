@@ -42,13 +42,23 @@ async fn preview_memories(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, P
     Ok(reply(StatusCode::OK, json!({ "memories": memories }), &remote))
 }
 
-async fn delete_memory(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path((bot_id, id)): Path<(String, String)>, JsonBody(_): JsonBody<Empty>) -> ApiResult {
+async fn delete_memory(
+    State(ctx): State<Ctx>,
+    ConnectInfo(remote): Remote,
+    Path((bot_id, id)): Path<(String, String)>,
+    JsonBody(_): JsonBody<Empty>,
+) -> ApiResult {
     let store = ctx.store.clone();
     ctx.queue.run(async move { store.mutate(move |s| s.delete_memory(&bot_id, &id, false)).await }).await?;
     Ok(state_reply(&ctx, StatusCode::OK, &remote))
 }
 
-async fn add_knowledge(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(bot_id): Path<String>, JsonBody(input): JsonBody<KnowledgeInput>) -> ApiResult {
+async fn add_knowledge(
+    State(ctx): State<Ctx>,
+    ConnectInfo(remote): Remote,
+    Path(bot_id): Path<String>,
+    JsonBody(input): JsonBody<KnowledgeInput>,
+) -> ApiResult {
     let store = ctx.store.clone();
     ctx.queue.run(async move { store.add_knowledge(&bot_id, input).await }).await?;
     Ok(state_reply(&ctx, StatusCode::CREATED, &remote))
@@ -63,7 +73,12 @@ async fn read_knowledge(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Pat
     Ok(reply(StatusCode::OK, json!({ "file": file, "content": content }), &remote))
 }
 
-async fn delete_knowledge(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path((bot_id, id)): Path<(String, String)>, JsonBody(_): JsonBody<Empty>) -> ApiResult {
+async fn delete_knowledge(
+    State(ctx): State<Ctx>,
+    ConnectInfo(remote): Remote,
+    Path((bot_id, id)): Path<(String, String)>,
+    JsonBody(_): JsonBody<Empty>,
+) -> ApiResult {
     let store = ctx.store.clone();
     ctx.queue.run(async move { store.delete_knowledge(&bot_id, &id).await }).await?;
     Ok(state_reply(&ctx, StatusCode::OK, &remote))

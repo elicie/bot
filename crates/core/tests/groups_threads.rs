@@ -53,11 +53,7 @@ fn content_text(content: &Value) -> String {
 /// The member addressed by the latest group prompt (`You are <name>.`), or `direct` outside groups.
 fn speaker(request: &Value) -> String {
     let prompt = turn_prompt(request);
-    prompt
-        .split("You are ")
-        .nth(1)
-        .and_then(|rest| rest.split_once(". Everything quoted").map(|(name, _)| name.to_owned()))
-        .unwrap_or_else(|| "direct".into())
+    prompt.split("You are ").nth(1).and_then(|rest| rest.split_once(". Everything quoted").map(|(name, _)| name.to_owned())).unwrap_or_else(|| "direct".into())
 }
 
 /// The latest prompt the engine sent (inside `<user_query>`).
@@ -216,7 +212,10 @@ async fn group_order_attribution_and_sessions(h: &Harness) {
     let first = h.settled(&conversation, 4).await;
     assert_eq!(first.run.status, RunStatus::Completed, "{:?}", first.run);
     assert_eq!(speakers(&first), [None, Some(alpha.clone()), Some(beta.clone()), Some(gamma.clone())]);
-    assert_eq!(first.messages.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(), ["First question", "Reply from Alpha", "Reply from Beta", "Reply from Gamma"]);
+    assert_eq!(
+        first.messages.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+        ["First question", "Reply from Alpha", "Reply from Beta", "Reply from Gamma"]
+    );
     assert_eq!(first.title, "First question");
     let requests = h.provider.requests();
     assert_eq!(requests.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["Alpha", "Beta", "Gamma"]);
@@ -279,7 +278,8 @@ async fn group_order_attribution_and_sessions(h: &Harness) {
         let attachment = h.conversation(conversation).messages[message].attachments.clone().unwrap().remove(0);
         h.app.data_dir.join("attachments").join(conversation).join(attachment.id)
     };
-    let attach = |text: &str, name: &str| json!({ "text": text, "attachments": [{ "name": name, "mimeType": "text/plain", "data": base64_encode(name.as_bytes()) }] });
+    let attach =
+        |text: &str, name: &str| json!({ "text": text, "attachments": [{ "name": name, "mimeType": "text/plain", "data": base64_encode(name.as_bytes()) }] });
     let (status, body) = h.post(&format!("/api/conversations/{conversation}/attachment-messages"), attach("@Alpha read this", "group.txt")).await;
     assert_eq!(status, 202, "{body}");
     h.settled(&conversation, 15).await;
@@ -334,7 +334,10 @@ async fn threads_quote_their_parent(h: &Harness) {
     let first = h.settled(&thread, 2).await;
     assert_eq!(first.messages[1].text, "Reply from direct");
     let prompt = h.provider.requests()[0].1.clone();
-    assert!(prompt.contains(r#"{"precedingMessages":[{"from":"user","text":"Parent question"}],"threadParent":{"from":"Grok","text":"Reply from direct"}}"#), "{prompt}");
+    assert!(
+        prompt.contains(r#"{"precedingMessages":[{"from":"user","text":"Parent question"}],"threadParent":{"from":"Grok","text":"Reply from direct"}}"#),
+        "{prompt}"
+    );
     assert!(prompt.ends_with("Thread follow-up"), "{prompt}");
     // The loaded thread session gets only the new message; the parent conversation is untouched.
     h.provider.clear();

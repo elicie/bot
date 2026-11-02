@@ -108,8 +108,7 @@ mod tests {
     }
 
     fn http(status: &str, headers: &str, body: &[u8]) -> Reply {
-        let mut bytes =
-            format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n", body.len()).into_bytes();
+        let mut bytes = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n", body.len()).into_bytes();
         bytes.extend_from_slice(body);
         Reply { bytes, stall: false }
     }
@@ -160,9 +159,7 @@ mod tests {
 
     #[tokio::test]
     async fn lists_sorted_unique_models_and_sends_the_bearer_key() {
-        let (url, requests) =
-            provider(json(r#"{"object":"list","data":[{"id":"test-model","owned_by":"x"},{"id":"other"},{"id":"test-model"}]}"#))
-                .await;
+        let (url, requests) = provider(json(r#"{"object":"list","data":[{"id":"test-model","owned_by":"x"},{"id":"other"},{"id":"test-model"}]}"#)).await;
         assert_eq!(check_provider(&url, "fixture-key", "test-model").await, check(true, &["other", "test-model"], None));
         let requests = requests.lock().unwrap().clone();
         assert_eq!(requests.len(), 1);
@@ -183,10 +180,7 @@ mod tests {
         let result = check_provider(&url, "key", "test-model").await;
         assert_eq!(result, check(false, &[], Some("Provider returned HTTP 401. Check its URL and credentials.")));
         let (url, _) = provider(http("500 Internal Server Error", "", b"")).await;
-        assert_eq!(
-            check_provider(&url, "", "").await.error.as_deref(),
-            Some("Provider returned HTTP 500. Check its URL and credentials.")
-        );
+        assert_eq!(check_provider(&url, "", "").await.error.as_deref(), Some("Provider returned HTTP 500. Check its URL and credentials."));
     }
 
     #[tokio::test]

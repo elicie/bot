@@ -25,11 +25,11 @@ pub mod bot_messages;
 mod cron;
 mod disk;
 pub mod generated_images;
+pub mod groups;
 pub mod knowledge;
 pub mod main_bot;
 pub mod memory;
 pub mod permissions;
-pub mod groups;
 mod redact;
 pub mod schedule;
 pub mod skills;
@@ -110,7 +110,20 @@ enum Job {
 fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_error: Option<String>) -> AppState {
     let keys = vault::redaction_keys(&disk);
     let (secrets, mcp_servers) = vault::public_vault(&disk);
-    let DiskState { revision, settings, bots, conversations, mut routines, routine_runs, bot_exchanges, bot_deliveries, permission_rules, groups, main_bot_id, .. } = disk;
+    let DiskState {
+        revision,
+        settings,
+        bots,
+        conversations,
+        mut routines,
+        routine_runs,
+        bot_exchanges,
+        bot_deliveries,
+        permission_rules,
+        groups,
+        main_bot_id,
+        ..
+    } = disk;
     webhooks::strip_webhook_secrets(&mut routines);
     let mut state = AppState {
         revision,

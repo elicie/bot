@@ -85,13 +85,19 @@ async fn mcp_servers_are_loopback_only_disabled_by_default_and_resolve_secrets_a
     assert_eq!(set("{\"x\": {}}", true).await.unwrap_err().status, 400);
     set(DOCUMENT, true).await.unwrap();
     let public = f.store.snapshot().mcp_servers;
-    assert_eq!(public.iter().map(|s| (s.name.as_str(), s.transport, s.enabled)).collect::<Vec<_>>(), [("local", McpTransportKind::Stdio, false), ("web", McpTransportKind::Http, false)]);
+    assert_eq!(
+        public.iter().map(|s| (s.name.as_str(), s.transport, s.enabled)).collect::<Vec<_>>(),
+        [("local", McpTransportKind::Stdio, false), ("web", McpTransportKind::Http, false)]
+    );
     assert_eq!(public[1].secret_refs, ["API_TOKEN"]);
     let snapshot = serde_json::to_string(&f.store.snapshot()).unwrap();
     assert!(!snapshot.contains("server.js") && !snapshot.contains("example.com"), "the snapshot carries no commands or URLs");
     assert_eq!(f.store.read(|s| s.mcp_fingerprint(&bot)), None, "disabled servers leave sessions untouched");
     let canonical = f.store.read(|s| s.mcp_json(&bot)).unwrap();
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&canonical).unwrap()["mcpServers"]["local"], json!({"command": "node", "args": ["server.js"], "env": {"TOKEN": "${secret:LOCAL_TOKEN}"}}));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&canonical).unwrap()["mcpServers"]["local"],
+        json!({"command": "node", "args": ["server.js"], "env": {"TOKEN": "${secret:LOCAL_TOKEN}"}})
+    );
 
     // Enabling needs loopback; disabling does not.
     let enable = |name: &'static str, enabled: bool, local: bool| {
@@ -114,7 +120,13 @@ async fn mcp_servers_are_loopback_only_disabled_by_default_and_resolve_secrets_a
     f.store.mutate(move |s| s.add_secret(secret("API_TOKEN", "scoped-token-value", Some(&scoped)), true)).await.unwrap();
     let (servers, failures) = f.store.read(|s| s.resolve_mcp_servers(&bot));
     assert_eq!(failures.len(), 1);
-    assert_eq!(servers[0].config, McpServerConfig::Http { url: "https://example.com/mcp".into(), headers: vec![McpPair { name: "Authorization".into(), value: "Bearer scoped-token-value".into() }] });
+    assert_eq!(
+        servers[0].config,
+        McpServerConfig::Http {
+            url: "https://example.com/mcp".into(),
+            headers: vec![McpPair { name: "Authorization".into(), value: "Bearer scoped-token-value".into() }]
+        }
+    );
     assert!(!format!("{servers:?}").contains("scoped-token-value"), "debug output hides resolved values");
     assert_eq!(f.store.read(|s| s.mcp_fingerprint(&bot)).unwrap(), fingerprint, "secret values never enter the fingerprint");
 
@@ -133,7 +145,9 @@ async fn mcp_servers_are_loopback_only_disabled_by_default_and_resolve_secrets_a
     assert_eq!(reopened.read(|s| s.mcp_servers_for(&bot).count()), 2);
     drop(reopened);
     let valid = f.disk_json();
-    for (field, value) in [("name", json!("workspace")), ("name", json!("a__b")), ("botId", json!(new_id())), ("config", json!({"transport": "stdio", "command": ""}))] {
+    for (field, value) in
+        [("name", json!("workspace")), ("name", json!("a__b")), ("botId", json!(new_id())), ("config", json!({"transport": "stdio", "command": ""}))]
+    {
         let mut broken = valid.clone();
         broken["mcpServers"][0][field] = value;
         let bytes = write_json(&f.state_file(), &broken);
@@ -167,7 +181,12 @@ async fn bot_deletion_removes_its_secrets_and_servers() {
 async fn mcp_tool_rules_are_server_scoped_and_loopback_only_to_allow() {
     let f = Fixture::new().await;
     let bot = f.bot_id();
-    let input = |server: Option<&str>, category: PermissionCategory| PermissionRuleInput { category, action: PermissionAction::Allow, bot_id: Some(bot.clone()), server: server.map(str::to_owned) };
+    let input = |server: Option<&str>, category: PermissionCategory| PermissionRuleInput {
+        category,
+        action: PermissionAction::Allow,
+        bot_id: Some(bot.clone()),
+        server: server.map(str::to_owned),
+    };
     let wrong = input(Some("web"), PermissionCategory::FileWrite);
     assert_eq!(f.store.mutate(move |s| s.add_permission_rule(wrong, true)).await.unwrap_err().status, 400);
     let lan = input(Some("web"), PermissionCategory::McpTool);
