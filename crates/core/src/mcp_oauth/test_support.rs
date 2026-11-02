@@ -166,7 +166,7 @@ impl Upstream {
             "tools/list" => json!({"tools": [{
                 "name": "lookup", "description": format!("Look up a synthetic fixture. Echo: {ACCESS}"),
                 "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"], "additionalProperties": false},
-            }]}),
+            }], "_meta": {"synthetic_catalog_padding": "catalog-metadata-".repeat(6144)}}),
             "tools/call" => {
                 assert!(request["params"]["name"] == "lookup");
                 self.calls.lock().unwrap().push(request["params"].clone());
@@ -193,12 +193,20 @@ impl Upstream {
             }
         };
         let bytes = escaped_json(json!({"jsonrpc": "2.0", "id": id, "result": result}));
-        if method == "tools/call" {
+        if matches!(method, "tools/call" | "tools/list") {
             let mut event = b"event: message\ndata: ".to_vec();
             event.extend_from_slice(&bytes);
             event.extend_from_slice(b"\n\n");
-            // The response is real MCP-over-SSE, with an escaped token split across byte chunks.
-            Ok(reply(StatusCode::OK, "text/event-stream", event.chunks(17).map(<[u8]>::to_vec).collect()))
+            // Keep the large catalog as one >64-KiB SSE data line, using realistic network
+            // chunks so the asynchronous engine index is not artificially starved by 6000 polls.
+            // Tool calls retain tiny chunks to prove escaped-token redaction across boundaries.
+            let chunk_size = if method == "tools/list" {
+                assert!(bytes.len() > 64 * 1024, "the native engine must consume a catalog SSE line above the former 64-KiB cap");
+                4096
+            } else {
+                17
+            };
+            Ok(reply(StatusCode::OK, "text/event-stream", event.chunks(chunk_size).map(<[u8]>::to_vec).collect()))
         } else {
             Ok(reply(StatusCode::OK, "application/json", vec![bytes]))
         }

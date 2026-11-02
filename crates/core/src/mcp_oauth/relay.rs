@@ -34,8 +34,10 @@ use url::{Host, Url};
 use crate::computer::network::is_global_ip;
 
 const MAX_BODY: usize = 8 * 1024 * 1024;
-const MAX_SSE_LINE: usize = 64 * 1024;
 const MAX_SSE_EVENT: usize = 1024 * 1024;
+// A tools/list JSON-RPC event can contain the entire catalog in one data line (Notion exceeds
+// 64 KiB). Bound that line by the existing event budget, not a smaller arbitrary transport chunk.
+const MAX_SSE_LINE: usize = MAX_SSE_EVENT;
 const MAX_SSE_FIELDS: usize = 1024;
 const MAX_DNS_ANSWERS: usize = 64;
 // The store allows 64 configured pairs; runtime adds one OAuth Authorization pair.
@@ -1259,6 +1261,27 @@ mod tests {
             let value: Value = serde_json::from_str(data).unwrap();
             assert!(value["text"] == "prefix [redacted] suffix");
         }
+    }
+
+    #[tokio::test]
+    async fn catalog_json_larger_than_64k_is_one_valid_bounded_sse_event() {
+        let tools: Vec<_> = (0..20).map(|index| serde_json::json!({
+            "name":format!("catalog_tool_{index}"),
+            "description":format!("Synthetic catalog description {TOKEN}"),
+            "inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"field documentation ".repeat(300)}},"required":["query"]}
+        })).collect();
+        let mut source = b"event: message\ndata: ".to_vec();
+        source.extend(serde_json::to_vec(&serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"tools":tools}})).unwrap());
+        source.extend_from_slice(b"\n\n");
+        assert!(source.len() > 64 * 1024 && source.len() < MAX_SSE_EVENT);
+        let output = collect_sse(source.chunks(4096).map(<[u8]>::to_vec).collect(), redactor()).await;
+        let output = String::from_utf8(output).unwrap();
+        assert!(!output.contains(TOKEN));
+        assert!(!output.contains("event: error"));
+        let data = output.lines().find_map(|line| line.strip_prefix("data: ")).unwrap();
+        let response: Value = serde_json::from_str(data).unwrap();
+        assert_eq!(response["result"]["tools"].as_array().unwrap().len(), 20);
+        assert_eq!(response["result"]["tools"][0]["inputSchema"]["properties"]["query"]["type"], "string");
     }
 
     #[tokio::test]
