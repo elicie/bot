@@ -88,14 +88,15 @@ test('a finished bot delivery is reported back in a follow-up reply with a marke
   } finally { await app.stop(); await provider.close(); }
 });
 
-for (const viewport of [{ width: 1040, height: 760 }, { width: 390, height: 844 }]) {
-  test(`queued follow-up can be cancelled without a run and stays cancelled after restart at ${viewport.width}px`, async ({ page }, testInfo) => {
+for (const viewport of [{ width: 1040, height: 760, startFirst: false }, { width: 390, height: 844, startFirst: false }, { width: 1040, height: 760, startFirst: true }]) {
+  test(`${viewport.startFirst ? 'scheduler-first cancellation reports a no-op' : 'queued cancellation survives restart'} at ${viewport.width}px`, async ({ page }, testInfo) => {
     const dataDir = await mkdtemp(path.join(tmpdir(), 'grok-bot-report-cancel-'));
     let app = await startTestApp({ env: { GROK_BOT_DATA_DIR: dataDir } });
     let recipientId = '';
     let stage = 0;
     const recipient = gate();
     const blocker = gate();
+    const report = gate();
     const provider = await startMockProvider({ reply: request => {
       if (!request.tools?.some(tool => tool.function.name === 'search_tool')) return { text: '검토 요청' };
       const replies: Array<MockCompletion | Promise<MockCompletion>> = [
@@ -104,6 +105,7 @@ for (const viewport of [{ width: 1040, height: 760 }, { width: 390, height: 844 
         { text: 'Reviewer에게 검토를 요청했습니다.' },
         recipient.promise,
         blocker.promise,
+        report.promise,
       ];
       return replies[stage++] ?? { text: 'CANCELLED_REPORT_MUST_NOT_RUN' };
     } });
@@ -134,11 +136,12 @@ for (const viewport of [{ width: 1040, height: 760 }, { width: 390, height: 844 
       const source = before.conversations.find(conversation => conversation.id === delivery.sourceConversationId)!;
       const log = page.getByRole('log', { name: '대화 메시지', exact: true });
       const reportStatus = log.getByLabel('Reviewer 답변 이어서 답하기 상태', { exact: true });
-      const cancel = log.getByRole('button', { name: '대기 중인 이어서 답하기 모두 취소', exact: true });
+      const cancel = log.getByRole('button', { name: 'Reviewer 답변 이어서 답하기 취소', exact: true });
       await expect(log.getByLabel('Reviewer 답변 상태', { exact: true })).toHaveText('답변 도착');
       await expect(reportStatus).toHaveText('대기 중');
       await expect(cancel).toBeEnabled();
-      expect(await cancel.textContent()).toBe('취소');
+      expect(await cancel.textContent()).toBe('이 보고 취소');
+      await expect(reportStatus).toHaveAttribute('role', 'status');
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await page.screenshot({ path: testInfo.outputPath(`report-queued-${viewport.width}.png`) });
 
@@ -155,14 +158,36 @@ for (const viewport of [{ width: 1040, height: 760 }, { width: 390, height: 844 
       // announce cancellation until the server accepts the actual command.
       let releaseRequest!: () => void;
       const inFlight = new Promise<void>(resolve => { releaseRequest = resolve; });
-      await page.route(endpoint, async route => { await inFlight; await route.continue(); }, { times: 1 });
+      await page.route(endpoint, async route => {
+        expect(route.request().postDataJSON()).toEqual({ deliveryIds: [delivery.id] });
+        await inFlight;
+        await route.continue();
+      }, { times: 1 });
       await cancel.focus();
       await page.keyboard.press('Enter');
       try {
         await expect(cancel).toBeDisabled();
         await expect(reportStatus).toHaveText('대기 중');
+        if (viewport.startFirst) {
+          blocker.release({ text: '정기 점검을 마쳤습니다.' });
+          await expect.poll(() => stage, { timeout: 60_000 }).toBe(6);
+          await expect(reportStatus).toHaveText('답변 중');
+        }
       } finally { releaseRequest(); }
+      if (viewport.startFirst) {
+        await expect(log.getByText('이미 실행을 시작했거나 대기 중이 아니어서 취소한 보고가 없습니다. 답변 중인 보고는 작업 중단을 사용하세요.', { exact: true })).toBeVisible();
+        await expect(reportStatus).not.toHaveAttribute('role', 'status');
+        await expect(reportStatus).toHaveAttribute('aria-live', 'off');
+        await expect(cancel).toHaveCount(0);
+        report.release({ text: '이미 시작한 후속 답변은 계속 실행됩니다.' });
+        await expect(reportStatus).toHaveText('완료');
+        expect((await snapshot(page)).botDeliveries![0].report!.status).toBe('completed');
+        expect(errors).toEqual([]);
+        return;
+      }
       await expect(reportStatus).toHaveText('취소됨');
+      await expect(reportStatus).not.toHaveAttribute('role', 'status');
+      await expect(reportStatus).toHaveAttribute('aria-live', 'off');
       await expect(cancel).toHaveCount(0);
       const cancelled = (await snapshot(page)).botDeliveries![0].report!;
       expect(cancelled).toMatchObject({ status: 'cancelled', finishedAt: expect.any(String) });
@@ -198,6 +223,7 @@ for (const viewport of [{ width: 1040, height: 760 }, { width: 390, height: 844 
     } finally {
       recipient.release({ text: '테스트 종료' });
       blocker.release({ text: '테스트 종료' });
+      report.release({ text: '테스트 종료' });
       await app.stop();
       await provider.close();
       if (path.dirname(dataDir) !== tmpdir() || !path.basename(dataDir).startsWith('grok-bot-report-cancel-')) throw Error('Unexpected test data path');

@@ -485,21 +485,36 @@ impl crate::State {
         self.conversation(conversation_id).is_ok_and(|conversation| reports_to(&self.disk.bot_deliveries, conversation, &self.routine_conversation_ids()))
     }
 
-    /// Cancel every currently queued follow-up report of this source conversation, without
-    /// starting a run or changing its messages. Running and terminal reports (and unfinished
-    /// deliveries) are untouched. Allowed while the app is busy; a no-op does not write state.
-    pub fn cancel_bot_reports(&mut self, conversation_id: &str) -> HttpResult<()> {
+    /// Cancel only the requested, still-queued follow-up reports of this source conversation and
+    /// return their delivery IDs. A later arrival is never added to the caller's selection. Running
+    /// and terminal reports (and unfinished deliveries) are untouched. Allowed while the app is
+    /// busy; an empty actual result does not write state. An empty selection is never cancel-all.
+    pub fn cancel_bot_reports(&mut self, conversation_id: &str, requested_ids: &[String]) -> HttpResult<Vec<String>> {
+        let mut issues = Issues::new();
+        if !(1..=MAX_BOT_DELIVERIES).contains(&requested_ids.len()) {
+            issues.push("deliveryIds", format!("Array must contain between 1 and {MAX_BOT_DELIVERIES} element(s)"));
+        }
+        for (index, id) in requested_ids.iter().enumerate() {
+            issues.uuid(&format!("deliveryIds.{index}"), id);
+        }
+        issues.finish()?;
         self.assert_writable()?;
         self.conversation(conversation_id)?;
-        let ids: HashSet<String> = queued_reports(&self.disk.bot_deliveries, conversation_id).iter().map(|delivery| delivery.id.clone()).collect();
+        let requested: HashSet<&str> = requested_ids.iter().map(String::as_str).collect();
+        let ids: Vec<String> = queued_reports(&self.disk.bot_deliveries, conversation_id)
+            .into_iter()
+            .filter(|delivery| requested.contains(delivery.id.as_str()))
+            .map(|delivery| delivery.id.clone())
+            .collect();
         if ids.is_empty() {
-            return Ok(());
+            return Ok(ids);
         }
+        let selected: HashSet<&str> = ids.iter().map(String::as_str).collect();
         let finished_at = iso(self.now());
-        for delivery in self.disk_mut().bot_deliveries.iter_mut().filter(|delivery| ids.contains(&delivery.id)) {
+        for delivery in self.disk_mut().bot_deliveries.iter_mut().filter(|delivery| selected.contains(delivery.id.as_str())) {
             delivery.report = Some(DeliveryReport { status: ReportStatus::Cancelled, finished_at: Some(finished_at.clone()), ..DeliveryReport::queued() });
         }
-        Ok(())
+        Ok(ids)
     }
 
     /// The follow-up turn of `conversation_id` could not start: its queued reports end with

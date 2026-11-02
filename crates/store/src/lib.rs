@@ -103,6 +103,8 @@ enum Job {
         routine_scheduling_error: Option<String>,
         /// The bytes contain bot report fields, which binaries without reports cannot load.
         reports: bool,
+        /// Older report-aware binaries require a run ID on cancelled reports.
+        unstarted_report_cancellations: bool,
         done: Option<oneshot::Sender<bool>>,
     },
     Flush(oneshot::Sender<()>),
@@ -110,32 +112,49 @@ enum Job {
 
 /// One-time copy of a `state.json` from before bot reports, kept next to it.
 pub const PRE_REPORTS_BACKUP: &str = "state.json.pre-bot-reports.bak";
+/// One-time copy before a cancelled report without a run ID is first persisted. Report-aware older
+/// binaries cannot load that shape; the pre-reports backup may not exist on an upgraded install.
+pub const PRE_UNSTARTED_REPORT_CANCELLATION_BACKUP: &str = "state.json.pre-unstarted-report-cancellation.bak";
 
 fn uses_reports(disk: &DiskState) -> bool {
     disk.bot_deliveries.iter().any(|delivery| delivery.report.is_some())
         || disk.conversations.iter().flat_map(|conversation| &conversation.messages).any(|message| message.report_delivery_ids.is_some())
 }
 
-/// Before the first write with report fields: copy the existing `state.json` (when it has none) to
-/// [`PRE_REPORTS_BACKUP`] with private permissions, never replacing an existing backup. The copy
-/// lets the user go back to a binary without bot reports (`deny_unknown_fields` rejects the new
-/// fields). Failures are reported and do not block the write.
-fn backup_before_reports(path: &Path) {
-    let backup = path.with_file_name(PRE_REPORTS_BACKUP);
-    if std::fs::symlink_metadata(&backup).is_ok() {
-        return;
+fn uses_unstarted_report_cancellations(disk: &DiskState) -> bool {
+    disk.bot_deliveries
+        .iter()
+        .any(|delivery| delivery.report.as_ref().is_some_and(|report| report.status == ReportStatus::Cancelled && report.run_id.is_none()))
+}
+
+/// Called on the ordered writer thread before the first new-shape write. Keep the previous
+/// `state.json` only when it does not already use that shape, with private permissions and no
+/// overwrite. A restart never creates a misleading rollback copy of an already-new shape.
+fn backup_before_shape(path: &Path, name: &str, uses_shape: fn(&DiskState) -> bool) -> std::io::Result<()> {
+    let existing = std::fs::read(path)?;
+    let disk = serde_json::from_slice::<DiskState>(&existing)?;
+    if uses_shape(&disk) {
+        return Ok(());
     }
-    let Ok(existing) = std::fs::read(path) else { return };
-    if serde_json::from_slice::<DiskState>(&existing).is_ok_and(|disk| uses_reports(&disk)) {
-        return;
-    }
-    let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&backup) {
-        Ok(file) => file,
-        Err(error) => {
-            eprintln!("Could not keep a backup of state.json before bot reports: {error}");
-            return;
+    let backup = path.with_file_name(name);
+    match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&backup) {
+        Ok(file) => {
+            let meta = file.metadata()?;
+            if !meta.is_file() || meta.permissions().mode() & 0o077 != 0 || meta.len() > MAX_STATE_BYTES as u64 {
+                return Err(std::io::Error::other("The state backup must be a private regular state file."));
+            }
+            // A previous crash may have left a truncated copy. Never overwrite it, but do not
+            // treat it (or an already-incompatible copy) as a usable rollback backup either.
+            let saved = serde_json::from_reader(file)?;
+            if uses_shape(&saved) {
+                return Err(std::io::Error::other("The state backup already uses the incompatible shape."));
+            }
+            return Ok(());
         }
-    };
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&backup)?;
     let written = {
         use std::io::Write as _;
         file.write_all(&existing).and_then(|()| file.sync_all())
@@ -143,8 +162,10 @@ fn backup_before_reports(path: &Path) {
     if let Err(error) = written {
         // Only the file created above is removed; a partial copy is not a backup.
         let _ = std::fs::remove_file(&backup);
-        eprintln!("Could not keep a backup of state.json before bot reports: {error}");
+        return Err(error);
     }
+    // Persist the new backup directory entry before state.json can be atomically replaced.
+    std::fs::File::open(path.parent().ok_or_else(|| std::io::Error::other("State has no parent directory."))?)?.sync_all()
 }
 
 /// `Store.snapshot()`: the public state with the API key removed and redacted.
@@ -211,16 +232,20 @@ pub struct Store {
 }
 
 fn writer_loop(shared: Arc<Shared>, path: PathBuf, jobs: mpsc::Receiver<Job>) {
-    let mut backed_up = false;
+    let mut reports_backed_up = false;
+    let mut unstarted_cancellations_backed_up = false;
     for job in jobs {
         match job {
             Job::Flush(done) => {
                 let _ = done.send(());
             }
-            Job::Write { bytes, runtime, routine_scheduling_error, reports, done } => {
-                if reports && !backed_up {
-                    backup_before_reports(&path);
-                    backed_up = true;
+            Job::Write { bytes, runtime, routine_scheduling_error, reports, unstarted_report_cancellations, done } => {
+                if reports && !reports_backed_up {
+                    if let Err(error) = backup_before_shape(&path, PRE_REPORTS_BACKUP, uses_reports) {
+                        // Preserve the original pre-reports backup's best-effort behavior.
+                        eprintln!("Could not keep a backup of state.json before bot reports: {error}");
+                    }
+                    reports_backed_up = true;
                 }
                 let done = |ok: bool| {
                     if let Some(done) = done {
@@ -234,7 +259,16 @@ fn writer_loop(shared: Arc<Shared>, path: PathBuf, jobs: mpsc::Receiver<Job>) {
                 let result = if bytes.len() > MAX_STATE_BYTES {
                     Err(std::io::Error::other("Application state exceeds the 64 MiB limit."))
                 } else {
-                    grok_bot_files::atomic_private_file(&path, &bytes)
+                    let backup = if unstarted_report_cancellations && !unstarted_cancellations_backed_up {
+                        backup_before_shape(&path, PRE_UNSTARTED_REPORT_CANCELLATION_BACKUP, uses_unstarted_report_cancellations).inspect(|()| {
+                            unstarted_cancellations_backed_up = true;
+                        })
+                    } else {
+                        Ok(())
+                    };
+                    // A failed required backup follows the normal writer-failure path, leaving
+                    // the previous compatible state.json untouched rather than losing rollback.
+                    backup.and_then(|()| grok_bot_files::atomic_private_file(&path, &bytes))
                 };
                 match result {
                     Ok(()) => {
@@ -608,6 +642,7 @@ impl State {
             runtime: self.runtime.clone(),
             routine_scheduling_error: self.routine_scheduling_error.clone(),
             reports: uses_reports(&self.disk),
+            unstarted_report_cancellations: uses_unstarted_report_cancellations(&self.disk),
             done: None,
         }
     }
