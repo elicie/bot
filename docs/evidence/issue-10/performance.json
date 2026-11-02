@@ -1,7 +1,7 @@
 {
   "runtime": "Node v24.18.0 on Linux; isolated child, 12 second deadline, 384 MiB heap",
   "beforeSource": "f023215c0312202a4b86e872adbe9f6f451f377f",
-  "afterSource": "e15b866b26948dc210376656e42e7e81f5b1ce61",
+  "afterSource": "e9f7f958262373c2a68a5b7a6358dab3e3f9fec7",
   "method": "Five short Markdown/TeX warmups, then five distinct sources and stable message IDs (all cache misses), prefix Sample N: plus repeat/slice of fixture body. Timed only previewText, not imports/process startup. These are observations, not CI thresholds.",
   "fixtures": {
     "markdownUnit": "## Analysis\n\n**Important** text with [reference](https://example.com).\n\n- first detail\n- second detail\n\n",
@@ -9,15 +9,15 @@
     "unclosedDisplayUnit": "\\[x "
   },
   "cases": [
-    { "kind": "markdown", "bodyLength": 15000, "beforeMs": [55.955,36.568,49.394,41.736,36.773], "afterMs": [16.963,8.853,5.152,6.035,3.499], "beforeMedianMs": 41.736, "afterMedianMs": 6.035 },
-    { "kind": "markdown", "bodyLength": 77000, "beforeMs": [267.557,218.307,207.993,178.296,196.826], "afterMs": [13.964,13.834,9.308,8.417,4.756], "beforeMedianMs": 207.993, "afterMedianMs": 9.308 },
-    { "kind": "markdown", "bodyLength": 192000, "beforeMs": [1127.075,1033.081,969.433,991.408,975.113], "afterMs": [14.531,7.588,7.056,5.735,3.016], "beforeMedianMs": 991.408, "afterMedianMs": 7.056 },
-    { "kind": "unclosed-inline", "bodyLength": 60000, "beforeMs": [208.458,197.048,176.394,210.246,184.130], "afterMs": [7.716,3.658,3.738,2.158,3.881], "beforeMedianMs": 197.048, "afterMedianMs": 3.738 },
-    { "kind": "unclosed-display", "bodyLength": 60000, "beforeMs": [218.268,191.126,172.544,192.662,179.894], "afterMs": [7.580,3.178,2.870,1.581,3.064], "beforeMedianMs": 191.126, "afterMedianMs": 3.064 }
+    { "kind": "markdown", "bodyLength": 15000, "beforeMs": [55.955,36.568,49.394,41.736,36.773], "afterMs": [15.906,8.654,6.403,3.803,3.284], "beforeMedianMs": 41.736, "afterMedianMs": 6.403 },
+    { "kind": "markdown", "bodyLength": 77000, "beforeMs": [267.557,218.307,207.993,178.296,196.826], "afterMs": [11.000,8.042,6.650,5.688,2.854], "beforeMedianMs": 207.993, "afterMedianMs": 6.650 },
+    { "kind": "markdown", "bodyLength": 192000, "beforeMs": [1127.075,1033.081,969.433,991.408,975.113], "afterMs": [18.293,10.200,9.061,8.115,5.462], "beforeMedianMs": 991.408, "afterMedianMs": 9.061 },
+    { "kind": "unclosed-inline", "bodyLength": 60000, "beforeMs": [208.458,197.048,176.394,210.246,184.130], "afterMs": [6.735,2.672,2.923,1.777,3.375], "beforeMedianMs": 197.048, "afterMedianMs": 2.923 },
+    { "kind": "unclosed-display", "bodyLength": 60000, "beforeMs": [218.268,191.126,172.544,192.662,179.894], "afterMs": [10.914,10.135,10.226,3.517,4.830], "beforeMedianMs": 191.126, "afterMedianMs": 10.135 }
   ],
   "historyBrowser": {
     "scenario": "120 histories including long reply, deep nesting and malformed delimiters; actual app, no selected full message; real SSE refresh between passes; typing verified afterwards",
-    "historyOpenToSecondFrameMs": [364.100,34.100,34.400],
+    "historyOpenToSecondFrameMs": [476.600,57.000,57.600],
     "note": "First cold parse/render is not instantaneous; subsequent full history openings reuse previews. Timings include frame scheduling and React rendering, not just converter CPU. Full stored source verified unchanged."
   },
   "workingTreePrototypeRepeatedList": {
