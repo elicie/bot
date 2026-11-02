@@ -103,10 +103,17 @@ Confirmed historical uploads:
 | [Selective PR #9](https://github.com/elicie/bot/actions/runs/41390384145) | 1,531,905,855 bytes | 816,224,461 bytes |
 | [Main](https://github.com/elicie/bot/actions/runs/41391689111) | 1,531,810,463 bytes at 05:15:25 | 816,058,453 bytes at 05:09:15 |
 
-All inspected historical Rust restores were misses. The old combined `rust` job,
-new `test`/`lint` keys and PR/main cache scopes differ, explaining why those saves
-alone are not evidence of a broken cache or a warm run. Main's saved entries are
-available as base-branch caches for subsequent PRs.
+All inspected Rust restores before this PR were misses. The old combined `rust`
+job, new `test`/`lint` keys and PR/main cache scopes differ, explaining why those
+saves alone are not evidence of a broken cache or a warm run.
+
+Follow-up verification in [PR #26's first full run](https://github.com/elicie/bot/actions/runs/41396014649):
+both `lint` and `test` logged their exact Rust cache keys, successful restoration,
+and `cache-hit=true`, confirming that main's saved caches are reusable by a new
+PR. That run stopped on an existing integration-test disk-scan race (observing an
+atomic state-file replacement before completion), not on a resource failure.
+The test now flushes pending writes before asserting the unchanged secret-file
+allowlist; it does not ignore temporary files or weaken the assertion.
 
 ### Timing target
 
