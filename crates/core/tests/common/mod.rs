@@ -40,6 +40,10 @@ pub struct AppOptions<'a> {
 
 impl TestApp {
     pub async fn try_start(options: AppOptions<'_>) -> anyhow::Result<Self> {
+        Self::try_start_with_runtime(options, None).await
+    }
+
+    pub async fn try_start_with_runtime(options: AppOptions<'_>, runtime: Option<grok_bot_core::runtime::RuntimeOptions>) -> anyhow::Result<Self> {
         let backend = Backend::new(BackendOptions {
             data_dir: options.data_dir.clone(),
             engine_root: options.engine_root.to_path_buf(),
@@ -47,7 +51,7 @@ impl TestApp {
             allowed_hosts: options.allowed_hosts,
             now: None,
             scheduler: None,
-            runtime: None,
+            runtime,
         })
         .await?;
         let store = backend.store.clone();
