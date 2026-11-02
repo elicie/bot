@@ -102,7 +102,20 @@ pub struct ComputerFrame {
     pub viewport: Viewport,
     pub controls: Vec<ComputerControl>,
     pub mime_type: String,
+    /// Visible rendered text of the top-level document, at most [`PAGE_TEXT_LIMIT`] characters.
+    /// Untrusted page content; never contains form field values.
+    #[serde(default)]
+    pub page_text: String,
+    /// Whether `page_text` was cut at the limit.
+    #[serde(default)]
+    pub text_truncated: bool,
 }
+
+/// Characters of visible page text an observation carries.
+pub const PAGE_TEXT_LIMIT: usize = 6000;
+
+/// Elements the page-text walk visits before it stops and reports truncation.
+pub(crate) const PAGE_TEXT_NODE_LIMIT: usize = 20_000;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ComputerObservation {
@@ -147,6 +160,19 @@ pub(crate) fn safe_label(value: &str, limit: usize) -> String {
         out.push(c);
     }
     out
+}
+
+/// Page text bounded to `limit` characters (never splitting one), with control characters other
+/// than line breaks and tabs replaced by spaces. Returns whether anything was cut.
+pub(crate) fn bounded_text(value: &str, limit: usize) -> (String, bool) {
+    let mut out = String::new();
+    for (count, c) in value.chars().enumerate() {
+        if count == limit {
+            return (out.trim_end().to_owned(), true);
+        }
+        out.push(if c != '\n' && c != '\t' && ((c as u32) < 0x20 || c == '\u{7f}') { ' ' } else { c });
+    }
+    (out, false)
 }
 
 /// `z.string().uuid()`: canonical hyphenated form.

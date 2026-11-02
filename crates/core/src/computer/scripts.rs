@@ -1,4 +1,5 @@
-//! Page scripts of the managed computer, verbatim from `server/computer.ts`.
+//! Page scripts of the managed computer, verbatim from `server/computer.ts` except the page-text
+//! walk of [`capture`], which is new in this port.
 //!
 //! The init script runs in the page's main world before any page script and disables network and
 //! popup APIs and sensitive input events. The observation scripts run in a fresh isolated world
@@ -76,9 +77,79 @@ pub(crate) fn target(point: Option<(f64, f64)>, origins: &[String]) -> String {
     expand(template).replace("ARGUMENTS", &json!({ "point": point, "origins": origins }).to_string())
 }
 
-/// `ManagedComputer.capture`: title and up to 100 visible controls.
-pub(crate) fn capture(origins: &[String]) -> String {
-    let template = r#"(({ origins, viewport }) => {
+/// `ManagedComputer.capture`: title, up to 100 visible controls, and the visible rendered text of
+/// the top-level document.
+///
+/// The text walk is innerText-like but deliberately narrower: it never reads form state (`input`,
+/// `textarea`, `select`, `option`, `output`, and contenteditable subtrees are skipped whole, so
+/// typed or prefilled values are never collected), skips `script`/`style`/`noscript`/`template`,
+/// embedded frames and media, and skips what is not rendered: elements with `display: none`,
+/// `opacity: 0`, or `content-visibility: hidden` (or that `checkVisibility` rejects), the body of a
+/// closed `<details>`, text that is `visibility: hidden`, and text nodes without layout boxes
+/// (for example light-DOM children a shadow root does not slot). Open shadow roots are walked in
+/// flat-tree order through their slots. Whitespace collapses as CSS renders it; block boundaries
+/// become line breaks and paragraphs and headings become blank lines. Collection stops after
+/// `textLimit` UTF-16 units or `nodeLimit` nodes and reports `textTruncated`; the caller enforces
+/// the final bound.
+pub(crate) fn capture(origins: &[String], text_limit: usize, node_limit: usize) -> String {
+    let template = r#"(({ origins, viewport, textLimit, nodeLimit }) => {
+      const skipped = new Set(['head', 'script', 'style', 'noscript', 'template', 'iframe', 'frame', 'frameset', 'object', 'embed', 'input', 'textarea', 'select', 'option', 'optgroup', 'datalist', 'output', 'canvas', 'video', 'audio', 'picture', 'img', 'math']);
+      let text = '', breaks = 0, nodes = 0, textTruncated = false;
+      const range = document.createRange();
+      const block = count => { breaks = Math.max(breaks, count); };
+      const push = (value, preserve) => {
+        if (!preserve) value = value.replace(/\s+/g, ' ');
+        if (!value) return;
+        if (!preserve && value === ' ') {
+          if (!breaks && text && !/\s$/.test(text)) text += ' ';
+          return;
+        }
+        if (breaks) {
+          text = text.replace(/[ \t]+$/, '');
+          if (text) text += breaks > 1 ? '\n\n' : '\n';
+          breaks = 0;
+        }
+        if (!preserve && (!text || /\s$/.test(text))) value = value.replace(/^ /, '');
+        text += value;
+        if (text.length > textLimit) { text = text.slice(0, textLimit); textTruncated = true; }
+      };
+      const walk = element => {
+        if (textTruncated) return;
+        if (++nodes > nodeLimit) { textTruncated = true; return; }
+        const name = element.localName;
+        if (skipped.has(name) || element instanceof HTMLElement && element.isContentEditable) return;
+        if (name === 'br') { breaks = Math.min(2, breaks + 1); return; }
+        const style = getComputedStyle(element);
+        const display = style.display;
+        if (display === 'none' || style.opacity === '0' || style.contentVisibility === 'hidden') return;
+        if (display !== 'contents' && typeof element.checkVisibility === 'function' && !element.checkVisibility({ opacityProperty: true })) return;
+        const visible = style.visibility === 'visible';
+        const collapse = style.whiteSpaceCollapse || (/^pre|^break-spaces/.test(style.whiteSpace) ? 'preserve' : 'collapse');
+        const preserve = collapse !== 'collapse';
+        const lines = name === 'p' || /^h[1-6]$/.test(name) ? 2 : display.startsWith('inline') || display === 'contents' || display === 'table-cell' ? 0 : 1;
+        if (display === 'table-cell') push(' ', false);
+        if (lines) block(lines);
+        const assigned = name === 'slot' ? element.assignedNodes() : [];
+        const children = assigned.length ? assigned : element.shadowRoot ? element.shadowRoot.childNodes : element.childNodes;
+        for (const child of children) {
+          if (textTruncated) return;
+          if (name === 'details' && !element.open && !(child instanceof Element && child.localName === 'summary')) continue;
+          if (child.nodeType === Node.TEXT_NODE) {
+            if (!visible) continue;
+            if (++nodes > nodeLimit) { textTruncated = true; return; }
+            if (/\S/.test(child.data)) {
+              range.selectNodeContents(child);
+              if (!range.getClientRects().length) continue;
+            }
+            push(preserve ? child.data.replace(/\r\n?/g, '\n') : child.data, preserve);
+          } else if (child.nodeType === Node.ELEMENT_NODE) walk(child);
+        }
+        if (lines) block(lines);
+        if (display === 'table-cell') push(' ', false);
+      };
+      if (document.body) walk(document.body);
+      text = text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+      if (typeof text.toWellFormed === 'function') text = text.toWellFormed();
       const controls = [];
       for (const element of document.querySelectorAll('a,button,input,textarea,select,[role="button"],[role="link"],[contenteditable="true"],iframe')) {
         const bounds = element.getBoundingClientRect();
@@ -108,9 +179,9 @@ pub(crate) fn capture(origins: &[String]) -> String {
         });
         if (controls.length === 100) break;
       }
-      return { title: document.title, controls };
+      return { title: document.title, controls, text, textTruncated };
     })(ARGUMENTS)"#;
-    expand(template).replace("ARGUMENTS", &json!({ "origins": origins, "viewport": VIEWPORT }).to_string())
+    expand(template).replace("ARGUMENTS", &json!({ "origins": origins, "viewport": VIEWPORT, "textLimit": text_limit, "nodeLimit": node_limit }).to_string())
 }
 
 /// `page.locator('body').innerText()`; `null` until the body exists.
