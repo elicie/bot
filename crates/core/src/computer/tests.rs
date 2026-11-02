@@ -498,10 +498,19 @@ async fn real_sandboxed_chrome_provides_png_frames_controls_typed_actions_stale_
         command(&f.computer, json!({ "type": "click", "x": count.bounds.x + count.bounds.width / 2.0, "y": count.bounds.y + count.bounds.height / 2.0 }));
     let mut raced = click.clone();
     raced["requestId"] = json!(new_id());
+    // Whichever of the three concurrent attempts the computer admits first runs (the scheduling
+    // order is not fixed, so slow hosts may admit the differently-keyed one); the other two must be
+    // refused, and the page must have been clicked exactly once.
     let (first, duplicate, raced) = tokio::join!(f.computer.perform(click.clone()), f.computer.perform(click.clone()), f.computer.perform(raced));
-    assert!(duplicate.is_err_and(|e| e.status == 409));
-    assert!(raced.is_err_and(|e| e.status == 409));
-    assert!(first.unwrap().frame.controls.iter().any(|c| c.label == "Count 1"));
+    let mut winners = Vec::new();
+    for result in [first, duplicate, raced] {
+        match result {
+            Ok(done) => winners.push(done),
+            Err(error) => assert_eq!(error.status, 409, "{}", error.message),
+        }
+    }
+    assert_eq!(winners.len(), 1, "exactly one concurrent click runs");
+    assert!(winners[0].frame.controls.iter().any(|c| c.label == "Count 1"));
     let mut again = click.clone();
     again["requestId"] = json!(new_id());
     assert!(f.computer.perform(again).await.is_err_and(|e| e.status == 409));
