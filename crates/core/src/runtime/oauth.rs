@@ -21,7 +21,7 @@ pub(super) struct Prepared {
 /// Unlike the normal session fingerprint this also binds stable record IDs and edits. A deletion
 /// and recreation with the same visible name cannot reuse a prepared credential lease.
 pub(super) fn signature(state: &State, bot_id: &str) -> String {
-    let records: Vec<_> = state.mcp_servers_for(bot_id).collect();
+    let records: Vec<_> = state.mcp_servers_for(bot_id).map(|record| (&record.id, &record.bot_id, &record.name, record.enabled, &record.config)).collect();
     hex::encode(Sha256::digest(serde_json::to_vec(&records).unwrap_or_default()))
 }
 
@@ -61,6 +61,9 @@ impl Runtime {
         };
         // No store lock is held while discovering/refreshing remote credentials. The caller's
         // command queue still orders final admission with other application commands.
+        // Keep provenance before the service can add credentials. A concurrent logout/retirement
+        // must never make a service-injected bearer fall through as an unmanaged static config.
+        let original_configs: std::collections::HashMap<_, _> = servers.iter().map(|server| (server.name.clone(), server.config.clone())).collect();
         let (prepared, oauth_failures) = service.prepare(&bot_id, servers).await;
         failures.extend(oauth_failures);
         keys.extend(self.store.read(State::redaction_keys));
@@ -71,7 +74,13 @@ impl Runtime {
         for mut server in prepared {
             let record = self.store.read(|state| state.mcp_servers_for(&bot_id).find(|record| record.name == server.name).cloned());
             let Some(record) = record else { continue };
-            if service.manages(&record).await {
+            let managed = service.manages(&record).await;
+            if !managed && original_configs.get(&server.name) != Some(&server.config) {
+                failures
+                    .push(McpStartupFailure { name: server.name, message: "OAuth 서버 구성이 변경되었어요. 다시 로그인해 주세요.".into() });
+                continue;
+            }
+            if managed {
                 let McpServerConfig::Http { url, headers } = &server.config else { continue };
                 let original = match &record.config {
                     McpServerConfig::Http { url, .. } => url,
@@ -101,7 +110,14 @@ impl Runtime {
                         Box::pin(async move { service.report_unauthorized_token(&bot, &name, &access).await })
                     })
                 };
-                match relay::start(url.as_str(), headers.clone(), keys.clone(), on_unauthorized).await {
+                #[cfg(test)]
+                let started = match self.oauth_test_upstream.get() {
+                    Some(upstream) => upstream.start(url.as_str(), headers.clone(), keys.clone(), on_unauthorized).await,
+                    None => relay::start(url.as_str(), headers.clone(), keys.clone(), on_unauthorized).await,
+                };
+                #[cfg(not(test))]
+                let started = relay::start(url.as_str(), headers.clone(), keys.clone(), on_unauthorized).await;
+                match started {
                     Ok(lease) => {
                         // Only the ephemeral lease bearer reaches ACP/engine state. The remote
                         // token stays in the in-process relay and encrypted OAuth vault.
@@ -128,3 +144,7 @@ impl Runtime {
         Ok(Some(Prepared { bot_id, signature, servers, failures, keys, leases }))
     }
 }
+
+#[cfg(test)]
+#[path = "oauth_tests.rs"]
+mod tests;

@@ -294,6 +294,199 @@ async fn stale_callback_config_and_deleted_record_never_receive_or_inject_tokens
 }
 
 #[tokio::test]
+async fn authenticated_oauth_to_manual_or_stdio_retires_binding_and_preserves_new_config() {
+    for json in [
+        r#"{"mcpServers":{"remote":{"url":"https://mcp.example/mcp","headers":{"Authorization":"Bearer synthetic-manual"}}}}"#,
+        r#"{"mcpServers":{"remote":{"command":"synthetic-command","args":["--synthetic"]}}}"#,
+    ] {
+        let mut f = Fixture::new().await;
+        f.enable().await;
+        f.connect("synthetic-old-oauth-access", Some("synthetic-old-oauth-refresh"), 3600).await;
+        let original_id = f.record.id.clone();
+        f.store.mutate(|state| state.set_mcp_servers(&f.record.bot_id, json, true)).await.unwrap();
+        f.record = f.store.read(|state| state.mcp_servers_for(&f.record.bot_id).next().unwrap().clone());
+        assert_eq!(f.record.id, original_id, "same-name edits preserve record identity");
+        assert!(!f.record.enabled, "editing does not implicitly enable a new capability");
+        f.enable().await;
+        let expected = f.resolved();
+        let (prepared, failures) = f.service.prepare(&f.record.bot_id, expected.clone()).await;
+        assert_eq!(prepared, expected);
+        assert!(failures.is_empty());
+        assert!(!f.service.manages(&f.record).await);
+        let keys = f.store.read(|state| state.redaction_keys());
+        assert!(keys.contains(&"synthetic-old-oauth-access".into()) && keys.contains(&"synthetic-old-oauth-refresh".into()));
+        let persisted = f.service.inner.lock().await.vault.load::<Data>().unwrap().unwrap();
+        assert!(persisted.entries.is_empty());
+        assert!(persisted.redaction_keys().contains(&"synthetic-old-oauth-access".into()));
+        assert_eq!(f.fake.calls.load(Ordering::SeqCst), 1, "no refresh or remote revocation is sent on a config transition");
+        f.service.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn ineligible_transition_cancels_pending_callback_and_rejects_stale_resolved_config() {
+    let mut f = Fixture::new().await;
+    f.enable().await;
+    f.connect("synthetic-retired-before-edit", None, 3600).await;
+    let stale_resolved = f.resolved();
+    let login = f.login().await;
+    let callback = callback_url(&login);
+    let (binding, generation) = {
+        let inner = f.service.inner.lock().await;
+        let pending = inner.pending.get(&key(&f.record)).unwrap();
+        (pending.binding.clone(), pending.generation)
+    };
+    f.store.mutate(|state| state.set_mcp_servers(&f.record.bot_id, r#"{"mcpServers":{"remote":{"command":"synthetic-command"}}}"#, true)).await.unwrap();
+    f.record = f.store.read(|state| state.mcp_servers_for(&f.record.bot_id).next().unwrap().clone());
+    f.enable().await;
+    let (prepared, failures) = f.service.prepare(&f.record.bot_id, stale_resolved).await;
+    assert!(prepared.is_empty() && failures.len() == 1, "never pass the old OAuth endpoint after local unbinding");
+    finish(&f.service).await;
+    assert!(TcpStream::connect(("127.0.0.1", callback.port().unwrap())).await.is_err());
+    assert_eq!(
+        f.service
+            .accept_tokens(
+                &binding,
+                generation,
+                Tokens { access: "synthetic-stale-access".into(), refresh: None, expires_at: f.now.load(Ordering::SeqCst) + 3600 }
+            )
+            .await
+            .err(),
+        Some(Error::Cancelled)
+    );
+    let expected = f.resolved();
+    let (prepared, failures) = f.service.prepare(&f.record.bot_id, expected.clone()).await;
+    assert_eq!(prepared, expected);
+    assert!(failures.is_empty());
+    assert!(!f.service.manages(&f.record).await);
+    assert_eq!(f.fake.calls.load(Ordering::SeqCst), 1, "cancelled callback never exchanges its code");
+    f.service.shutdown().await;
+}
+
+#[tokio::test]
+async fn deleted_pending_login_reconcile_rejects_callback_even_after_same_name_recreation() {
+    let f = Fixture::new().await;
+    let login = f.login().await;
+    let callback = callback_url(&login);
+    let (binding, generation) = {
+        let inner = f.service.inner.lock().await;
+        let pending = inner.pending.get(&key(&f.record)).unwrap();
+        (pending.binding.clone(), pending.generation)
+    };
+    f.store.mutate(|state| state.set_mcp_servers(&f.record.bot_id, r#"{"mcpServers":{}}"#, true)).await.unwrap();
+    f.service.reconcile().await.unwrap();
+    finish(&f.service).await;
+    assert!(TcpStream::connect(("127.0.0.1", callback.port().unwrap())).await.is_err());
+    f.store.mutate(|state| state.set_mcp_servers(&f.record.bot_id, r#"{"mcpServers":{"remote":{"url":"https://mcp.example/mcp"}}}"#, true)).await.unwrap();
+    let recreated = f.store.read(|state| state.mcp_servers_for(&f.record.bot_id).next().unwrap().clone());
+    assert_ne!(recreated.id, f.record.id);
+    let next_login = f.service.login(recreated.clone(), LoginInput { client_id: Some("synthetic-manual-client".into()), resource: None }).await.unwrap();
+    assert_eq!(callback_url(&next_login).path(), "/mcp-oauth/callback");
+    assert_eq!(
+        f.service
+            .accept_tokens(
+                &binding,
+                generation,
+                Tokens { access: "synthetic-deleted-stale-access".into(), refresh: None, expires_at: f.now.load(Ordering::SeqCst) + 3600 }
+            )
+            .await
+            .err(),
+        Some(Error::Cancelled)
+    );
+    assert_eq!(f.service.status(&recreated).await.status, "awaiting_login");
+    assert_eq!(f.fake.calls.load(Ordering::SeqCst), 0);
+    f.service.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_encrypted_reconciliation_never_unbinds_or_passes_a_replacement() {
+    let mut f = Fixture::new().await;
+    f.enable().await;
+    f.connect("synthetic-failed-retirement-access", None, 3600).await;
+    f.store.mutate(|state| state.set_mcp_servers(&f.record.bot_id, r#"{"mcpServers":{"remote":{"command":"synthetic-command"}}}"#, true)).await.unwrap();
+    f.record = f.store.read(|state| state.mcp_servers_for(&f.record.bot_id).next().unwrap().clone());
+    f.enable().await;
+    let path = f._root.path().join("mcp-oauth").join("credentials.enc");
+    let mut ciphertext = std::fs::read(&path).unwrap();
+    *ciphertext.last_mut().unwrap() ^= 1;
+    std::fs::write(&path, &ciphertext).unwrap();
+    let (prepared, failures) = f.service.prepare(&f.record.bot_id, f.resolved()).await;
+    assert!(prepared.is_empty() && failures.len() == 1);
+    assert!(f.service.manages(&f.record).await, "failed saves must not discard the local binding");
+    assert_eq!(std::fs::read(&path).unwrap(), ciphertext);
+    assert!(f.store.read(|state| state.redaction_keys()).contains(&"synthetic-failed-retirement-access".into()));
+    f.service.shutdown().await;
+}
+
+#[tokio::test]
+async fn login_reconciles_orphans_before_capacity_check_without_touching_current_credentials() {
+    let mut f = Fixture::new().await;
+    f.enable().await;
+    f.connect("synthetic-preserved-current-access", Some("synthetic-preserved-current-refresh"), 3600).await;
+    f.store
+        .mutate(|state| {
+            state.set_mcp_servers(
+                &f.record.bot_id,
+                r#"{"mcpServers":{"remote":{"url":"https://mcp.example/mcp"},"target":{"url":"https://mcp.example/target"}}}"#,
+                true,
+            )
+        })
+        .await
+        .unwrap();
+    let target = f.store.read(|state| state.mcp_servers_for(&f.record.bot_id).find(|record| record.name == "target").unwrap().clone());
+    for round in 0..2 {
+        {
+            let mut inner = f.service.inner.lock().await;
+            let template = inner.data.entry(&key(&f.record)).unwrap().clone();
+            let mut next = inner.data.clone();
+            for index in 0..MAX_BINDINGS - 1 {
+                let mut orphan = template.clone();
+                orphan.binding.server = format!("synthetic-deleted-{round}-{index}");
+                orphan.binding.name = format!("deleted-{index}");
+                orphan.tokens = if index == 0 {
+                    Some(Tokens { access: format!("synthetic-orphan-access-{round}"), refresh: None, expires_at: f.now.load(Ordering::SeqCst) + 3600 })
+                } else {
+                    None
+                };
+                next.entries.push(orphan);
+            }
+            assert_eq!(next.entries.len(), MAX_BINDINGS);
+            f.service.commit(&mut inner, next).unwrap();
+        }
+        let login = f.service.login(target.clone(), LoginInput { client_id: Some("synthetic-manual-client".into()), resource: None }).await.unwrap();
+        assert_eq!(callback_url(&login).path(), "/mcp-oauth/callback");
+        assert_eq!(f.service.inner.lock().await.data.entries.len(), 2);
+        assert_eq!(f.service.status(&f.record).await.status, "connected");
+        let keys = f.store.read(|state| state.redaction_keys());
+        assert!(keys.contains(&format!("synthetic-orphan-access-{round}")));
+        assert!(keys.contains(&"synthetic-preserved-current-access".into()));
+        f.service.logout(&target).await.unwrap();
+        finish(&f.service).await;
+    }
+    let (prepared, failures) = f.service.prepare(&f.record.bot_id, f.resolved()).await;
+    assert!(failures.is_empty());
+    let McpServerConfig::Http { headers, .. } = &prepared[0].config else { panic!() };
+    assert_eq!(headers[0].value, "Bearer synthetic-preserved-current-access");
+    f.service.shutdown().await;
+}
+
+#[tokio::test]
+async fn opening_vault_reconciles_deleted_raw_records_without_discarding_redaction_history() {
+    let f = Fixture::new().await;
+    f.connect("synthetic-deleted-on-reopen-access", Some("synthetic-deleted-on-reopen-refresh"), 3600).await;
+    f.store.mutate(|state| state.set_mcp_servers(&f.record.bot_id, r#"{"mcpServers":{}}"#, true)).await.unwrap();
+    f.service.shutdown().await;
+    let store = f.store.clone();
+    let fake = f.fake.clone();
+    drop(f.service);
+    let reopened = OAuthService::open_with(store.clone(), fake).await.unwrap();
+    assert!(reopened.inner.lock().await.data.entries.is_empty());
+    let keys = store.read(|state| state.redaction_keys());
+    assert!(keys.contains(&"synthetic-deleted-on-reopen-access".into()) && keys.contains(&"synthetic-deleted-on-reopen-refresh".into()));
+    reopened.shutdown().await;
+}
+
+#[tokio::test]
 async fn refresh_rotation_is_pre_turn_frozen_and_relogin_errors_remove_active_tokens() {
     let mut f = Fixture::new().await;
     f.enable().await;

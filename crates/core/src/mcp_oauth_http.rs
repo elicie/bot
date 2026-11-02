@@ -27,6 +27,13 @@ fn record(ctx: &Ctx, bot_id: &str, name: &str) -> Result<McpServerRecord, HttpEr
     })
 }
 
+fn admit(ctx: &Ctx) -> Result<(), HttpError> {
+    if ctx.closing.load(std::sync::atomic::Ordering::Acquire) || ctx.runtime.is_paused() {
+        return Err(HttpError::unavailable("서버 종료 또는 업데이트 중에는 OAuth 계정을 변경할 수 없어요."));
+    }
+    ctx.store.read(|state| state.assert_idle())
+}
+
 fn service(ctx: &Ctx) -> Result<std::sync::Arc<OAuthService>, HttpError> {
     ctx.runtime.oauth().ok_or_else(|| HttpError::unavailable(UNAVAILABLE))
 }
@@ -38,7 +45,7 @@ async fn status(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path((bot_i
         None => json!({"status": "unavailable", "canLogin": false, "message": UNAVAILABLE}),
     };
     // This is capability metadata, never inferred from a supplied Host/forwarded address.
-    if !is_local(&remote) {
+    if !is_local(&remote) || ctx.runtime.is_paused() || ctx.closing.load(std::sync::atomic::Ordering::Acquire) {
         body["canLogin"] = json!(false);
     }
     Ok(reply(StatusCode::OK, body, &remote))
@@ -58,7 +65,7 @@ async fn login(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path((bot_id
     let response = ctx
         .queue
         .run(async move {
-            queued.store.read(|state| state.assert_idle())?;
+            admit(&queued)?;
             let record = record(&queued, &bot_id, &name)?;
             service.login(record, input).await
         })
@@ -76,7 +83,7 @@ async fn logout(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path((bot_i
     let response = ctx
         .queue
         .run(async move {
-            queued.store.read(|state| state.assert_idle())?;
+            admit(&queued)?;
             let record = record(&queued, &bot_id, &name)?;
             service.logout(&record).await
         })

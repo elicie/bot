@@ -6,7 +6,9 @@
 //! empty response and the turn fails. The engine therefore talks to this relay instead of the
 //! provider: requests are forwarded unchanged (with the real credential), and every `images` entry
 //! in a response is stored (`grok_bot_store::generated_images`) and replaced by a Markdown image
-//! reference appended to `content`. Everything else streams through byte for byte.
+//! reference appended to `content`. Otherwise responses pass through byte for byte unless the
+//! store has registered external OAuth credentials: those are redacted before the native engine
+//! can persist a response or reuse it as conversation history.
 //!
 //! The relay listens on `127.0.0.1` on its own random port, separate from the web server, and
 //! accepts only the per-process bearer token it gives the engine. The provider API key is read
@@ -27,6 +29,9 @@ use grok_bot_store::Store;
 use grok_bot_store::generated_images::{ROUTE_PREFIX, save_generated_image};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+
+#[path = "provider_relay_redaction.rs"]
+mod redaction;
 
 /// Largest request the engine may send (conversation history with inline image attachments).
 const MAX_REQUEST_BYTES: usize = 256 * 1024 * 1024;
@@ -109,7 +114,14 @@ async fn forward(
     if digest(presented) != relay.token_digest {
         return relay_error(StatusCode::UNAUTHORIZED, "Invalid relay token.");
     }
-    let settings = relay.store.read(|state| state.settings().clone());
+    // Freeze the external credentials with the settings for this request. No keys are put in
+    // engine configuration, response diagnostics, or persistent relay state. Manual/API-key-only
+    // callers keep the original relay path and its image transformations unchanged.
+    let (settings, keys) = relay.store.read(|state| (state.settings().clone(), state.external_redaction_keys().to_vec()));
+    let redactor = match redaction::Redactor::new(keys) {
+        Ok(redactor) => redactor,
+        Err(()) => return relay_error(StatusCode::BAD_GATEWAY, redaction::FAILED),
+    };
     if settings.base_url.is_empty() {
         return relay_error(StatusCode::BAD_GATEWAY, "No provider is configured.");
     }
@@ -129,17 +141,44 @@ async fn forward(
     }
     let upstream = match request.send().await {
         Ok(response) => response,
-        Err(error) => return relay_error(StatusCode::BAD_GATEWAY, &format!("Could not reach the provider: {}", without_url(&error))),
+        Err(error) => {
+            return if redactor.is_some() {
+                relay_error(StatusCode::BAD_GATEWAY, redaction::FAILED)
+            } else {
+                relay_error(StatusCode::BAD_GATEWAY, &format!("Could not reach the provider: {}", without_url(&error)))
+            };
+        }
     };
     let status = upstream.status();
-    let mut response_headers = HeaderMap::new();
-    for (name, value) in upstream.headers() {
-        if !skipped_response_header(name) {
-            response_headers.append(name, value.clone());
-        }
-    }
     let content_type = upstream.headers().get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default().to_ascii_lowercase();
-    let body = if content_type.starts_with("text/event-stream") {
+    let response_headers = if let Some(redactor) = &redactor {
+        match redactor.response_headers(upstream.headers()) {
+            Ok(headers) => headers,
+            Err(()) => return relay_error(StatusCode::BAD_GATEWAY, redaction::FAILED),
+        }
+    } else {
+        let mut response_headers = HeaderMap::new();
+        for (name, value) in upstream.headers() {
+            if !skipped_response_header(name) {
+                response_headers.append(name, value.clone());
+            }
+        }
+        response_headers
+    };
+    let body = if let Some(redactor) = redactor {
+        if content_type.starts_with("text/event-stream") {
+            Body::from_stream(redaction::rewrite_stream(upstream, relay.data_dir.clone(), redactor))
+        } else {
+            let bytes = match read_capped(upstream).await {
+                Ok(bytes) => bytes,
+                Err(_) => return relay_error(StatusCode::BAD_GATEWAY, redaction::FAILED),
+            };
+            match redaction::rewrite_body(bytes, relay.data_dir.clone(), redactor, content_type.contains("json"), status.is_success()).await {
+                Ok(bytes) => Body::from(bytes),
+                Err(()) => return relay_error(StatusCode::BAD_GATEWAY, redaction::FAILED),
+            }
+        }
+    } else if content_type.starts_with("text/event-stream") {
         Body::from_stream(rewrite_stream(upstream, relay.data_dir.clone()))
     } else if status.is_success() && content_type.contains("json") {
         match read_capped(upstream).await {
@@ -311,6 +350,10 @@ fn decode_base64(encoded: &str) -> Result<Vec<u8>, String> {
     let compact: String = encoded.chars().filter(|c| !c.is_ascii_whitespace()).collect();
     base64::engine::general_purpose::STANDARD.decode(compact).map_err(|_| "invalid base64 image".to_owned())
 }
+
+#[cfg(test)]
+#[path = "provider_relay_oauth_tests.rs"]
+mod oauth_tests;
 
 #[cfg(test)]
 mod tests {

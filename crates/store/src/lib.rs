@@ -838,6 +838,12 @@ impl State {
     pub fn settings(&self) -> &PrivateSettings {
         &self.disk.settings
     }
+    /// Server-owned credentials stored outside DiskState, used at the provider boundary before
+    /// the native engine can persist a response. This slice is never part of a public DTO.
+    pub fn external_redaction_keys(&self) -> &[String] {
+        &self.external_redaction_keys
+    }
+
     /// `[redacted]` replacement for the stored API key and every vault secret value.
     pub fn redact(&self, value: &str) -> String {
         let mut value = value.to_owned();

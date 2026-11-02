@@ -272,8 +272,14 @@ pub(super) fn secret_valid(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAX_SECRET && value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
 }
 
+pub(super) fn credential_valid(value: &str) -> bool {
+    // Like the existing manual vault, reject trivial values which would redact ordinary text and
+    // protocol strings globally. Authorization codes use secret_valid independently.
+    value.len() >= 8 && secret_valid(value)
+}
+
 pub(super) fn bearer_valid(value: &str) -> bool {
-    secret_valid(value) && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-._~+/=".contains(&byte))
+    credential_valid(value) && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-._~+/=".contains(&byte))
 }
 
 pub(super) async fn register(network: &dyn Network, metadata: &Metadata, redirect: &str) -> Result<String, Error> {
@@ -438,7 +444,7 @@ fn parse_tokens(reply: Reply, now: i64, previous_refresh: Option<&str>) -> Resul
     if raw.error.is_some()
         || !raw.token_type.eq_ignore_ascii_case("Bearer")
         || !bearer_valid(&raw.access_token)
-        || raw.refresh_token.as_deref().is_some_and(|token| !secret_valid(token))
+        || raw.refresh_token.as_deref().is_some_and(|token| !credential_valid(token))
         || raw.scope.as_ref().is_some_and(|scope| scope.len() > 4096 || scope.chars().any(char::is_control))
         || raw.expires_in.is_some_and(|seconds| seconds == 0 || seconds > 31 * 24 * 60 * 60)
     {
@@ -676,7 +682,9 @@ mod tests {
         assert_eq!(unchanged.refresh.as_deref(), Some("old-canary"));
         for body in [
             json!({"access_token":"leak\r\ncanary","token_type":"Bearer"}),
-            json!({"access_token":"canary","token_type":"MAC"}),
+            json!({"access_token":"access-canary","token_type":"MAC"}),
+            json!({"access_token":"t","token_type":"Bearer","expires_in":3600}),
+            json!({"access_token":"access-canary","refresh_token":"r","token_type":"Bearer","expires_in":3600}),
             json!({"access_token":"canary","token_type":"Bearer","expires_in":0}),
             json!({"access_token":"x".repeat(MAX_SECRET+1),"token_type":"Bearer"}),
         ] {

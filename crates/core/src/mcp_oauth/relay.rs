@@ -38,10 +38,17 @@ const MAX_SSE_LINE: usize = 64 * 1024;
 const MAX_SSE_EVENT: usize = 1024 * 1024;
 const MAX_SSE_FIELDS: usize = 1024;
 const MAX_DNS_ANSWERS: usize = 64;
-const MAX_CONFIG_HEADERS: usize = 64;
-const MAX_CONFIG_BYTES: usize = 32 * 1024;
-const MAX_KEYS: usize = 256;
-const MAX_KEY_BYTES: usize = 1024 * 1024;
+// The store allows 64 configured pairs; runtime adds one OAuth Authorization pair.
+const MAX_CONFIG_HEADERS: usize = 64 + 1;
+// A legal MCP header document is up to 64 KiB before the frozen OAuth bearer is added.
+// This configuration budget does not relax axum's on-the-wire request header limits.
+const MAX_CONFIG_BYTES: usize = 128 * 1024;
+// Cover the complete upstream redaction set, not only the retired-token history: 256 retired
+// tokens, 128 active access/refresh pairs, 200 legacy secrets (8192 UTF-16 units each), provider
+// credentials, configured/full-Bearer values, and local leases. UTF-8 legacy secrets alone may
+// occupy nearly 4.7 MiB; the OAuth strings can add another 4 MiB. Never truncate active keys.
+const MAX_KEYS: usize = 1024;
+const MAX_KEY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_IN_FLIGHT: usize = 32;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -207,7 +214,7 @@ fn forbidden_config_header(name: &str) -> bool {
 
 fn configuration(headers: Vec<McpPair>, mut keys: Vec<String>) -> HttpResult<(HeaderMap, HeaderValue, Redactor)> {
     let invalid = || HttpError::bad_request("MCP relay headers or redaction keys are invalid.");
-    if headers.len() > MAX_CONFIG_HEADERS || keys.len() > MAX_KEYS || keys.iter().map(String::len).sum::<usize>() > MAX_KEY_BYTES {
+    if headers.len() > MAX_CONFIG_HEADERS || !normalize_redaction_keys(&mut keys) {
         return Err(invalid());
     }
     let mut configured = HeaderMap::new();
@@ -244,13 +251,19 @@ fn configuration(headers: Vec<McpPair>, mut keys: Vec<String>) -> HttpResult<(He
         }
     }
     let authorization = authorization.ok_or_else(invalid)?;
-    keys.retain(|key| !key.is_empty());
-    keys.sort_unstable_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
-    keys.dedup();
-    if keys.len() > MAX_KEYS || keys.iter().map(String::len).sum::<usize>() > MAX_KEY_BYTES {
+    if !normalize_redaction_keys(&mut keys) {
         return Err(invalid());
     }
     Ok((configured, authorization, Redactor { keys }))
+}
+
+fn normalize_redaction_keys(keys: &mut Vec<String>) -> bool {
+    // The service and headers can name the same secret repeatedly. Charge unique nonempty
+    // values only, both before accepting the service set and after adding frozen header values.
+    keys.retain(|key| !key.is_empty());
+    keys.sort_unstable_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+    keys.dedup();
+    keys.len() <= MAX_KEYS && keys.iter().try_fold(0usize, |total, key| total.checked_add(key.len())).is_some_and(|total| total <= MAX_KEY_BYTES)
 }
 
 fn digest(bytes: &[u8]) -> [u8; 32] {
@@ -855,6 +868,10 @@ impl AsyncWrite for LeaseIo {
 }
 
 #[cfg(test)]
+#[path = "test_support.rs"]
+pub(crate) mod test_support;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -965,6 +982,80 @@ mod tests {
         let mut values = headers();
         values.push(McpPair { name: "X-Fixture".into(), value: "bad\r\nheader".into() });
         assert!(configuration(values, vec![]).is_err());
+    }
+
+    #[test]
+    fn saturated_oauth_history_active_legacy_and_lease_keys_fit_without_truncation() {
+        let mut keys = Vec::new();
+        for kind in ["retired", "active"] {
+            for index in 0..256 {
+                let prefix = format!("relay-fixture-{kind}-{index:03}-");
+                keys.push(format!("{prefix}{}", "A".repeat(8192 - prefix.len())));
+            }
+        }
+        for index in 0..200 {
+            let prefix = format!("relay-fixture-legacy-{index:03}-");
+            let key = format!("{prefix}{}", "界".repeat(8192 - prefix.len()));
+            assert!(key.encode_utf16().count() == 8192);
+            keys.push(key);
+        }
+        let provider = format!("relay-fixture-provider-{}", "P".repeat(8192 - "relay-fixture-provider-".len()));
+        keys.push(provider.clone());
+        for index in 0..10 {
+            keys.push(format!("relay-fixture-local-{index:02}-{}", "b".repeat(64)));
+        }
+        let local_lease = keys.last().unwrap().clone();
+        let frozen = keys[256].clone();
+        let bearer = format!("Bearer {frozen}");
+        let mut headers = vec![McpPair { name: "Authorization".into(), value: bearer.clone() }];
+        // A legal 64-pair header document fits under 64 KiB including JSON framing; the frozen
+        // 8-KiB OAuth credential is then added separately by the runtime.
+        let mut configured_document = serde_json::Map::new();
+        for index in 0..64 {
+            let prefix = format!("relay-fixture-header-{index:02}-");
+            let value = if index < 8 { format!("{prefix}{}", "C".repeat(7600 - prefix.len())) } else { prefix };
+            let name = format!("X-Fixture-{index:02}");
+            configured_document.insert(name.clone(), Value::String(value.clone()));
+            headers.push(McpPair { name, value: value.clone() });
+            keys.push(value);
+        }
+        assert!(serde_json::to_vec(&configured_document).unwrap().len() < 64 * 1024);
+        assert!(headers.len() == MAX_CONFIG_HEADERS);
+        assert!(headers.iter().map(|pair| pair.name.len() + pair.value.len()).sum::<usize>() > 64 * 1024);
+        assert!(keys.iter().map(String::len).sum::<usize>() < MAX_KEY_BYTES);
+        let mut duplicate_sources = keys.clone();
+        duplicate_sources.extend(keys.iter().cloned());
+        duplicate_sources.push(String::new());
+        assert!(duplicate_sources.len() > MAX_KEYS);
+        assert!(duplicate_sources.iter().map(String::len).sum::<usize>() > MAX_KEY_BYTES);
+        let (_, _, redactor) = configuration(headers, duplicate_sources).unwrap();
+        assert!(redactor.keys.len() == keys.len() + 1);
+        assert!(keys.iter().all(|key| redactor.keys.iter().any(|stored| stored == key)));
+        assert!(redactor.keys.iter().any(|stored| stored == &bearer));
+        let samples = [&keys[0], &keys[256], &keys[512], &provider, &local_lease, keys.last().unwrap(), &bearer];
+        let bytes = serde_json::to_vec(&samples).unwrap();
+        let bytes = redactor.json(&bytes, MAX_BODY).unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(value.as_array().unwrap().iter().all(|item| item == "[redacted]"));
+    }
+
+    #[test]
+    fn unique_key_and_header_budgets_reject_excess_before_and_after_header_additions() {
+        // The default frozen bearer contributes its bare token, full header, and X-Configured.
+        let keys = (0..MAX_KEYS - 3).map(|index| format!("relay-fixture-boundary-{index:04}")).collect::<Vec<_>>();
+        let (_, _, redactor) = configuration(headers(), keys.clone()).unwrap();
+        assert!(redactor.keys.len() == MAX_KEYS);
+        let mut excessive_after_headers = keys;
+        excessive_after_headers.push("relay-fixture-extra-unique".into());
+        assert!(configuration(headers(), excessive_after_headers).is_err());
+        let excessive_before_headers = (0..=MAX_KEYS).map(|index| format!("relay-fixture-boundary-{index:04}")).collect();
+        assert!(configuration(headers(), excessive_before_headers).is_err());
+        // A source set that fills the byte budget may not silently discard required header keys.
+        assert!(configuration(headers(), vec!["K".repeat(MAX_KEY_BYTES)]).is_err());
+        assert!(configuration(headers(), vec!["K".repeat(MAX_KEY_BYTES + 1)]).is_err());
+        let mut excessive_headers = headers();
+        excessive_headers.push(McpPair { name: "X-Too-Large".into(), value: "H".repeat(MAX_CONFIG_BYTES + 1) });
+        assert!(configuration(excessive_headers, vec![]).is_err());
     }
 
     #[tokio::test]

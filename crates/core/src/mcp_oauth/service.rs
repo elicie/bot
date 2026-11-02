@@ -139,7 +139,7 @@ impl Data {
         self.version == 1
             && self.entries.len() <= MAX_BINDINGS
             && self.retired.len() <= MAX_RETIRED
-            && self.retired.iter().all(|value| flow::secret_valid(value))
+            && self.retired.iter().all(|value| flow::credential_valid(value))
             && self.entries.iter().all(|entry| {
                 let binding = &entry.binding;
                 !binding.bot.is_empty()
@@ -158,7 +158,7 @@ impl Data {
                         entry.metadata.is_some()
                             && entry.client_id.is_some()
                             && flow::bearer_valid(&tokens.access)
-                            && tokens.refresh.as_deref().is_none_or(flow::secret_valid)
+                            && tokens.refresh.as_deref().is_none_or(flow::credential_valid)
                             && tokens.expires_at > 0
                     })
             })
@@ -246,6 +246,11 @@ impl OAuthService {
         Self::open_with(store, Arc::new(flow::Production)).await
     }
 
+    #[cfg(test)]
+    pub(super) async fn open_for_test(store: Arc<Store>, network: Arc<dyn Network>) -> anyhow::Result<Arc<Self>> {
+        Self::open_with(store, network).await
+    }
+
     async fn open_with(store: Arc<Store>, network: Arc<dyn Network>) -> anyhow::Result<Arc<Self>> {
         let root = store.data_dir().to_path_buf();
         let (vault, data) = tokio::task::spawn_blocking(move || -> Result<_, VaultError> {
@@ -268,7 +273,7 @@ impl OAuthService {
         .map_err(|_| anyhow::anyhow!(STORAGE))?;
         store.set_external_redaction_keys(data.redaction_keys());
         let (stop, _) = watch::channel(false);
-        Ok(Arc::new(Self {
+        let service = Arc::new(Self {
             store,
             network,
             closed: AtomicBool::new(false),
@@ -284,13 +289,65 @@ impl OAuthService {
                 tasks: BTreeMap::new(),
                 failed: false,
             }),
-        }))
+        });
+        service.reconcile().await.map_err(|_| anyhow::anyhow!(STORAGE))?;
+        Ok(service)
+    }
+
+    /// Retire local OAuth state only when its authoritative raw record was deleted or replaced
+    /// with an OAuth-ineligible config. Saving config and enabling capabilities remain caller-owned
+    /// local-only operations. Eligible HTTPS edits retain their binding and require new consent.
+    pub async fn reconcile(&self) -> HttpResult<()> {
+        let mut inner = self.inner.lock().await;
+        self.writable(&inner)?;
+        let removed: Vec<Key> = self.store.read(|state| {
+            inner
+                .data
+                .entries
+                .iter()
+                .filter(|entry| {
+                    state.mcp_servers_for(&entry.binding.bot).find(|record| record.id == entry.binding.server).is_none_or(|record| eligible(record).is_err())
+                })
+                .map(|entry| entry.binding.key())
+                .collect()
+        });
+        if removed.is_empty() {
+            return Ok(());
+        }
+        // At most MAX_BINDINGS records are examined and one encrypted transaction is written.
+        // Cancel transient attempts before retirement so no stale callback can restore a binding.
+        for key in &removed {
+            if let Some(pending) = inner.pending.remove(key) {
+                pending.cancel.send_replace(true);
+            }
+            let _ = inner.generation(key)?;
+        }
+        let mut next = inner.data.clone();
+        for key in &removed {
+            if let Some(tokens) = inner.data.entry(key).and_then(|entry| entry.tokens.as_ref()) {
+                next.retire_tokens(tokens);
+            }
+        }
+        next.entries.retain(|entry| !removed.contains(&entry.binding.key()));
+        self.commit(&mut inner, next)?;
+        for key in &removed {
+            inner.generations.remove(key);
+            inner.notices.remove(key);
+        }
+        Ok(())
     }
 
     /// Positive ownership classification only; `prepare` is still the authorization gate. A
-    /// reconfigured or disconnected record remains OAuth-bound until explicit local logout.
+    /// changed eligible HTTPS record remains OAuth-bound until login/logout. Reconciliation locally
+    /// retires saved manual/static/stdio transitions without enabling or modifying those configs.
     pub async fn manages(&self, record: &McpServerRecord) -> bool {
         self.inner.lock().await.data.entry(&key(record)).is_some()
+    }
+
+    /// A maintenance caller must not quiesce state while a consent callback or refresh can still
+    /// write credentials. Nonblocking probes avoid inversion with the store's admission lock.
+    pub fn is_busy(&self) -> bool {
+        self.inner.try_lock().map_or(true, |inner| !inner.pending.is_empty()) || self.refresh_gate.try_lock().is_err()
     }
 
     pub async fn status(&self, record: &McpServerRecord) -> OAuthStatus {
@@ -333,6 +390,7 @@ impl OAuthService {
 
     pub async fn login(self: &Arc<Self>, record: McpServerRecord, input: LoginInput) -> HttpResult<LoginResponse> {
         self.available()?;
+        self.reconcile().await?;
         let binding = Binding::new(&record, input.resource.as_deref())?;
         if input.client_id.as_deref().is_some_and(|client| !flow::client_id_valid(client)) {
             return Err(HttpError::bad_request("Enter a valid public OAuth client ID."));
@@ -519,6 +577,11 @@ impl OAuthService {
         let mut prepared = Vec::new();
         let mut failures = Vec::new();
         let deadline = tokio::time::Instant::now() + PREPARE_TIMEOUT;
+        let previously_managed: std::collections::HashSet<String> =
+            self.inner.lock().await.data.entries.iter().filter(|entry| entry.binding.bot == bot_id).map(|entry| entry.binding.name.clone()).collect();
+        // A failed reconciliation poisons the vault; bound servers below still fail closed while
+        // existing unbound/manual/stdio callers retain their unchanged behavior.
+        let _ = self.reconcile().await;
         for mut server in resolved {
             let record = self.store.read(|state| state.mcp_servers_for(bot_id).find(|record| record.name == server.name).cloned());
             let bound = {
@@ -529,7 +592,20 @@ impl OAuthService {
                 }
             };
             if !bound {
-                prepared.push(server);
+                if previously_managed.contains(&server.name) && record.as_ref().is_none_or(|record| !self.resolved_current(record, &server)) {
+                    failures.push(McpStartupFailure { name: server.name, message: STARTUP_MESSAGE.into() });
+                } else {
+                    prepared.push(server);
+                }
+                continue;
+            }
+            if let Some(record) = record.as_ref()
+                && eligible(record).is_err()
+            {
+                match self.retire_ineligible_transition(record, &server).await {
+                    Ok(()) => prepared.push(server),
+                    Err(_) => failures.push(McpStartupFailure { name: server.name, message: STARTUP_MESSAGE.into() }),
+                }
                 continue;
             }
             let result = match record {
@@ -549,6 +625,21 @@ impl OAuthService {
             }
         }
         (prepared, failures)
+    }
+
+    /// A local saved config replacement starts disabled, and enabling it is separately local-only.
+    /// Once that exact replacement is enabled/resolved, do not strand a manual/stdio server behind
+    /// an OAuth binding whose UI no longer exists. Retire secrets before allowing the new config;
+    /// eligible HTTPS edits deliberately keep the binding and require a new login instead.
+    async fn retire_ineligible_transition(&self, record: &McpServerRecord, resolved: &ResolvedMcpServer) -> Result<(), Error> {
+        if eligible(record).is_ok() || !self.resolved_current(record, resolved) {
+            return Err(Error::Relogin);
+        }
+        self.reconcile().await.map_err(|_| Error::Failed)?;
+        if self.manages(record).await || !self.resolved_current(record, resolved) {
+            return Err(Error::Relogin);
+        }
+        Ok(())
     }
 
     async fn prepare_one(&self, record: &McpServerRecord, resolved: &ResolvedMcpServer) -> Result<Zeroizing<String>, Error> {
@@ -743,7 +834,7 @@ impl OAuthService {
         self.store.read(|state| state.mcp_servers_for(&binding.bot).any(|record| binding.matches(record)))
     }
     fn resolved_current(&self, record: &McpServerRecord, resolved: &ResolvedMcpServer) -> bool {
-        if !record.enabled || eligible(record).is_err() {
+        if !record.enabled || resolved.name != record.name {
             return false;
         }
         self.store.read(|state| {

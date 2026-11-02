@@ -228,6 +228,9 @@ pub struct Runtime {
     relay: std::sync::OnceLock<crate::provider_relay::RelayEndpoint>,
     /// Optional authenticated remote MCP lifecycle; old embedders retain their static transports.
     oauth: std::sync::OnceLock<Arc<crate::mcp_oauth::service::OAuthService>>,
+    /// Per-runtime synthetic upstream; absent from production builds and other test runtimes.
+    #[cfg(test)]
+    oauth_test_upstream: std::sync::OnceLock<Arc<crate::mcp_oauth::relay::test_support::Upstream>>,
 }
 
 /// 409 when a turn is requested while another reply is running (one active run at a time).
@@ -352,6 +355,8 @@ impl Runtime {
             computer: std::sync::OnceLock::new(),
             relay: std::sync::OnceLock::new(),
             oauth: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            oauth_test_upstream: std::sync::OnceLock::new(),
         })
     }
 
@@ -424,6 +429,9 @@ impl Runtime {
                 return Err(HttpError::unavailable("The server is shutting down."));
             }
             state.assert_idle()?;
+            if self.oauth().is_some_and(|oauth| oauth.is_busy()) {
+                return Err(HttpError::conflict("Complete or cancel the pending OAuth login before maintenance."));
+            }
             if !self.runs().is_empty() {
                 return Err(HttpError::conflict(RUN_BUSY));
             }
@@ -1395,6 +1403,9 @@ impl Runtime {
 
     pub async fn shutdown(&self) {
         self.closing.store(true, Ordering::SeqCst);
+        if let Some(oauth) = self.oauth() {
+            oauth.shutdown().await;
+        }
         let runs: Vec<Arc<Run>> = self.runs().clone();
         for run in &runs {
             self.request_stop(run);
