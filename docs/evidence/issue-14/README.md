@@ -4,8 +4,8 @@ Every image here is an actual Chrome capture of the application, not a mockup. C
 
 ## Matched Before / After
 
-- **Before source:** `3c111316bc4ba4b1d540c4b9e4e218be868b1df1`, current merged main including PR #24, built in a clean detached worktree (Rust server and frontend).
-- **After source:** `c965bdd5cb3a4eeec09d81bec37482dadffca667` (the following commit refreshes evidence only).
+- **Before source:** `c07a1cfec41e84ab86e566e7c72e3684dae1c31c`, latest merged main including Bot chains, selected report cancellation, Canvas and own-conversation routing, built in a source-clean detached worktree (Rust server and frontend).
+- **After source:** `7c4a69e1ab665ad1789eba5acc819285e9563286` (the following commit refreshes evidence only).
 - Same scenario: send `제공한 예시 기온 자료를 서울·부산·제주로 나눠 확인하고, 세 도시의 결과를 모아 비교해 줘.` A scripted provider discovers `workspace spawn_worker` and attempts three distinct tasks. Hold the next parent inference so both captures show the parent still running immediately after those attempts.
 - The old engine/app really rejects the nonexistent tool. The changed app asks for each new task's one-use approval, queues three hidden workers and renders their progress. No worker is allowed to start while the parent is held.
 - Same browser locale `ko-KR`, timezone `Asia/Seoul`, dark theme, explicit blob avatar and viewport: 1040 × 760 desktop / 390 × 844 mobile. The after view scrolls to the added progress panel as chat content grows.
@@ -37,11 +37,11 @@ No extra worker-specific instructions were added to the fixture Bot. [Ordinary-q
 
 - Frontend strict TypeScript and production build: passed.
 - Rust formatting and strict clippy for model/store/core: passed.
-- Model/store: 125 tests passed, including 21 worker/retention/authorization/invariant scenarios.
-- Core: 96 tests passed (85 unit and 11 integration binaries), including signal-first cancellation on failed writes, conditional catalogs, guarded actual-engine cache cleanup, #24 queued-report cancellation and the existing real-engine scenarios. The workspace-pinning/legacy-no-file scenario was then added and the runtime integration binary passed again.
-- Rebased frontend state selectors: 5 passed. The original implementation's full Node regression passed 106 tests with `--test-concurrency=1`; its initial parallel run hit the existing byte-capacity test's wait, and the isolated/serial reruns passed without modifying that test.
-- New worker Chrome suite: 5 passed (1040/390/320 px, Stop, denial).
-- Rebased existing report/group/thread Chrome regression: 7 passed, including both desktop/mobile #24 queued-report cancellation scenarios.
+- Merged model/store: 173 tests passed, including worker/retention/authorization/invariant, chain/storage and Canvas scenarios.
+- Merged core: 105 tests passed (92 unit and 13 integration binaries), including mixed chain+worker Stop, signal-first cancellation on failed writes, selected-report cancellation without stopping workers, scoped fast-settlement ownership, guarded cache cleanup, workspace pinning, and all inherited worker/chain/Canvas/todo/MCP engine scenarios.
+- Focused frontend state/composer/preview regression: 86 passed (8 state tests explicitly preserving own-conversation defaults/previews with worker batches, 4 composer, 74 preview). All original main state tests and the worker test remain.
+- Actual Rust-server/engine Chrome regression: 24 passed — 5 worker scenarios, 9 Bot-report/chain/selected-cancel scenarios, 6 Canvas, 1 history, and 3 UI parity. The report case explicitly verifies that clicking Reviewer after reload opens its own writable chat rather than the newer recipient-request conversation (#44).
+- The merged `7c4a69e` remote CI run also passed all five required checks. Final evidence-only head is checked separately in the PR record.
 - Human review corrections add optional/scoped worker guidance, terminal history retention, signal-first cancellation on storage failure, approval-time workspace binding, pre-write ownership validation, queued-only input unlocking and one visible invocation row per worker. Tests cover these boundaries; source/interface independent review is recorded in the PR after the final revision is fixed. The earlier Stop/report-completion and long-task compactness regressions remain covered.
 - The scripted comparisons and actual-model smoke each reported zero page errors. Mechanical interface detector reported no findings.
 

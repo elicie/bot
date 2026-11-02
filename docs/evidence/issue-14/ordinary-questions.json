@@ -3,13 +3,13 @@
   "scenarios": [
     {
       "prompt": "안녕! 짧게 인사해 줘.",
-      "answer": "안녕! 만나서 반가워 😊",
+      "answer": "안녕! 반가워요 😊",
       "workerBatches": 0,
       "approvalRequests": 0
     },
     {
       "prompt": "17 × 23은 얼마야?",
-      "answer": "17 × 23 = 391이야.",
+      "answer": "17 × 23 = **391**이에요.",
       "workerBatches": 0,
       "approvalRequests": 0
     },

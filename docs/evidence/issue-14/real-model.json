@@ -12,25 +12,25 @@
       "parent": "running"
     },
     {
-      "elapsedSeconds": 13,
+      "elapsedSeconds": 12,
       "parent": "awaiting_permission"
     },
     {
-      "elapsedSeconds": 14,
+      "elapsedSeconds": 12,
       "parent": "running",
       "workers": [
         "queued"
       ]
     },
     {
-      "elapsedSeconds": 20,
+      "elapsedSeconds": 19,
       "parent": "awaiting_permission",
       "workers": [
         "queued"
       ]
     },
     {
-      "elapsedSeconds": 20,
+      "elapsedSeconds": 19,
       "parent": "running",
       "workers": [
         "queued",
@@ -55,7 +55,7 @@
       ]
     },
     {
-      "elapsedSeconds": 32,
+      "elapsedSeconds": 33,
       "parent": "completed",
       "workers": [
         "running",
@@ -85,7 +85,7 @@
       ]
     },
     {
-      "elapsedSeconds": 45,
+      "elapsedSeconds": 49,
       "parent": "running",
       "workers": [
         "completed",
@@ -95,7 +95,7 @@
       "report": "running"
     },
     {
-      "elapsedSeconds": 52,
+      "elapsedSeconds": 56,
       "parent": "completed",
       "workers": [
         "completed",
@@ -109,23 +109,23 @@
   "visibleUserMessages": 1,
   "workers": [
     {
-      "task": "비교 연습용 자료의 서울만 맡아 한국어 한 줄로 요약하세요. 제공 자료: 서울 기온 18°C, 강수 확률 20%. 실제 날씨가 아닌 연습 자료입니다. 외부 정보나 도구 조회 없이 이 자료만 사용하고, 도시명·기온·강수 확률을 모두 포함하세요.",
+      "task": "비교 연습용 자료의 서울만 맡아 한국어 한 줄로 요약하세요. 제공 자료: 서울 기온 18°C, 강수 확률 20%. 외부 정보 조회와 도구 사용 없이 이 자료만 사용하세요. 출력 형식: 서울: 기온 18°C, 강수 확률 20%.",
       "status": "completed",
-      "answer": "연습 자료 기준 서울의 기온은 18°C, 강수 확률은 20%입니다."
+      "answer": "서울: 기온 18°C, 강수 확률 20%."
     },
     {
-      "task": "비교 연습용 자료의 부산만 맡아 한국어 한 줄로 요약하세요. 제공 자료: 부산 기온 22°C, 강수 확률 40%. 실제 날씨가 아닌 연습 자료입니다. 외부 정보나 도구 조회 없이 이 자료만 사용하고, 도시명·기온·강수 확률을 모두 포함하세요.",
+      "task": "비교 연습용 자료의 부산만 맡아 한국어 한 줄로 요약하세요. 제공 자료: 부산 기온 22°C, 강수 확률 40%. 외부 정보 조회와 도구 사용 없이 이 자료만 사용하세요. 출력 형식: 부산: 기온 22°C, 강수 확률 40%.",
       "status": "completed",
-      "answer": "연습 자료: 부산 기온 22°C, 강수 확률 40%."
+      "answer": "부산: 기온 22°C, 강수 확률 40%."
     },
     {
-      "task": "비교 연습용 자료의 제주만 맡아 한국어 한 줄로 요약하세요. 제공 자료: 제주 기온 24°C, 강수 확률 60%. 실제 날씨가 아닌 연습 자료입니다. 외부 정보나 도구 조회 없이 이 자료만 사용하고, 도시명·기온·강수 확률을 모두 포함하세요.",
+      "task": "비교 연습용 자료의 제주만 맡아 한국어 한 줄로 요약하세요. 제공 자료: 제주 기온 24°C, 강수 확률 60%. 외부 정보 조회와 도구 사용 없이 이 자료만 사용하세요. 출력 형식: 제주: 기온 24°C, 강수 확률 60%.",
       "status": "completed",
-      "answer": "연습 자료: 제주 기온 24°C, 강수 확률 60%."
+      "answer": "제주: 기온 24°C, 강수 확률 60%."
     }
   ],
   "reportStatus": "completed",
-  "reportAnswer": "하위 worker 3개가 각 도시의 한 줄 요약을 모두 완료했습니다. 제공하신 **비교 연습용 자료**를 종합한 결과입니다.\n\n| 도시 | 기온 | 강수 확률 |\n|---|---:|---:|\n| 서울 | 18°C | 20% |\n| 부산 | 22°C | 40% |\n| 제주 | 24°C | 60% |\n\n- **가장 따뜻한 도시:** 제주 — 24°C\n- **비 가능성이 가장 낮은 도시:** 서울 — 강수 확률 20%",
+  "reportAnswer": "하위 worker 3개가 모두 한 줄 요약을 완료했습니다. 제공하신 비교 연습용 자료를 종합한 결과입니다.\n\n| 도시 | 기온 | 강수 확률 |\n|---|---:|---:|\n| 서울 | 18°C | 20% |\n| 부산 | 22°C | 40% |\n| 제주 | 24°C | 60% |\n\n- **가장 따뜻한 도시:** 제주 — 24°C\n- **비 가능성이 가장 낮은 도시:** 서울 — 강수 확률 20%",
   "browserErrors": [],
   "canonicalStateUnchanged": true
 }
