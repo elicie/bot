@@ -58,7 +58,7 @@ async function fixture(options: { autoStart?: boolean; pollIntervalMs?: number }
   const wait = async (predicate: () => boolean) => {
     const deadline = Date.now() + 5000;
     while (!predicate()) {
-      assert.ok(Date.now() < deadline, stateSummary(backend.store.snapshot()));
+      if (Date.now() >= deadline) assert.fail(stateSummary(backend.store.snapshot()));
       await new Promise(resolve => setTimeout(resolve, 10));
     }
   };
@@ -68,6 +68,17 @@ async function fixture(options: { autoStart?: boolean; pollIntervalMs?: number }
     close: async () => { await backend.close(); await rm(root, { recursive: true, force: true }); },
   };
 }
+
+test('successful routine waits do not build snapshot diagnostics', async (context) => {
+  const f = await fixture();
+  const snapshot = context.mock.method(f.backend.store, 'snapshot');
+  try {
+    let polls = 0;
+    await f.wait(() => ++polls > 1);
+    assert.equal(polls, 2);
+    assert.equal(snapshot.mock.callCount(), 0);
+  } finally { snapshot.mock.restore(); await f.close(); }
+});
 
 test('routine HTTP routes implement typed CRUD, toggle, manual result, validation, and history retention', async () => {
   const f = await fixture();
