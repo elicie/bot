@@ -1,0 +1,24 @@
+[Unit]
+Description=Grok Bot release server
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+Environment=HOST=127.0.0.1
+Environment=PORT=7777
+Environment=GROK_BOT_WEB_ROOT=%h/.local/lib/grok-bot/current/dist
+EnvironmentFile=%h/.config/grok-bot/server.env
+ExecStart=%h/.local/lib/grok-bot/current/grok-bot
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=90
+KillSignal=SIGTERM
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=grok-bot
+
+[Install]
+WantedBy=default.target
