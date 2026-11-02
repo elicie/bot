@@ -45,6 +45,7 @@ import {
   readRoute,
   queuedRoutineRun,
   reducer,
+  recipientDelivery,
   runningConversation,
   selectedBot,
   selectedConversation,
@@ -764,7 +765,9 @@ export function App() {
               onFiles={() => toggleComputer(true)}
               onCancel={() => void cancel()}
               running={!!queuedRun || (!!conversation && activeRun(conversation.run.status))}
-              disabled={state.connection !== 'online' || !!globalRun || !!queuedRun}
+              disabled={state.connection !== 'online' || !!globalRun || !!queuedRun || !!recipientDelivery(data, conversation?.id)}
+              placeholder={recipientDelivery(data, conversation?.id) ? '다른 Bot의 요청으로 열린 대화라 여기서는 보낼 수 없습니다' : undefined}
+              readOnly={!!recipientDelivery(data, conversation?.id)}
               busy={busy}
               model={data.settings.model}
               attachments={{
@@ -874,6 +877,7 @@ export function App() {
         <History
           bot={bot}
           conversations={botConversations}
+          requestFrom={(item) => { const delivery = recipientDelivery(data, item.id); return delivery && (data?.bots.find((entry) => entry.id === delivery.fromBotId)?.name ?? '삭제된 Bot'); }}
           selectedId={state.selection.conversationId}
           busy={busy || !!globalRun}
           onClose={closeOverlay}

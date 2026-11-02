@@ -1,5 +1,6 @@
 import { ArrowLeftRight, Clock3, CornerDownRight, X } from 'lucide-react';
 import type { AppState, BotDelivery, BotExchange, Message } from '../shared/types';
+import { recipientDelivery } from './state';
 import { Avatar } from './ui';
 
 const exchangeStatus: Record<BotDelivery['status'], string> = {
@@ -69,6 +70,19 @@ export function BotReportMarker({ message, data, onOpen }: { message: Message; d
   </div>;
 }
 
+/** Top of a recipient's dedicated conversation: which bot asked, and a way back to the pair transcript. */
+export function BotRequestBanner({ conversationId, data, onOpen }: { conversationId: string; data: AppState; onOpen?: (id: string) => void }) {
+  const delivery = recipientDelivery(data, conversationId);
+  if (!delivery) return null;
+  const from = data.bots.find(bot => bot.id === delivery.fromBotId);
+  return <div className="bot-request-banner" role="note" aria-label="다른 Bot의 요청">
+    <ArrowLeftRight size={13} aria-hidden="true" />
+    {from && <Avatar color={from.color} seed={from.id} shape={from.shape} size={18} />}
+    <span><strong>{from?.name ?? '삭제된 Bot'}</strong>의 요청으로 열린 대화입니다. 여기서는 메시지를 보낼 수 없습니다.</span>
+    {onOpen && <button type="button" className="text-button" onClick={() => onOpen(delivery.exchangeId)}>Bot 대화 보기</button>}
+  </div>;
+}
+
 export function BotChat({ data, exchangeId, onClose, onExecution }: { data: AppState; exchangeId: string; onClose: () => void; onExecution: (botId: string, conversationId: string) => void }) {
   const exchange = data.botExchanges?.find(item => item.id === exchangeId);
   const delivery = data.botDeliveries?.find(item => item.exchangeId === exchangeId);
@@ -81,6 +95,7 @@ export function BotChat({ data, exchangeId, onClose, onExecution }: { data: AppS
         {exchange.messages.map(message => { const bot = data.bots.find(item => item.id === message.botId); return <article className="pair-message" key={message.id} aria-label={`${bot?.name ?? 'Bot'} 메시지`}><Avatar color={bot?.color} seed={message.botId} shape={bot?.shape} size={28} /><div><strong>{bot?.name ?? 'Bot'}</strong><p>{message.text}</p><small>{new Date(message.createdAt).toLocaleTimeString('ko-KR', { hour: 'numeric', minute: '2-digit' })}</small></div></article>; })}
         {delivery && ['queued', 'running'].includes(delivery.status) && <div className="pair-delivery" role="status"><Clock3 size={14} /><span>{delivery.status === 'queued' ? 'Bot의 응답을 기다리고 있습니다.' : 'Bot이 작업 중입니다.'}</span><button className="text-button" onClick={() => onExecution(delivery.toBotId, delivery.recipientConversationId)}>실행 대화 열기</button></div>}
         {delivery && ['error', 'cancelled', 'interrupted'].includes(delivery.status) && <p className="terminal-note">{delivery.error || (delivery.status === 'cancelled' ? 'Bot 작업이 취소됐습니다.' : 'Bot 작업이 중단됐습니다.')}<button className="text-button" onClick={() => onExecution(delivery.toBotId, delivery.recipientConversationId)}>실행 대화 확인</button></p>}
+        {delivery?.status === 'completed' && data.conversations.some(item => item.id === delivery.recipientConversationId) && <p className="pair-execution"><button className="text-button" onClick={() => onExecution(delivery.toBotId, delivery.recipientConversationId)}>{data.bots.find(bot => bot.id === delivery.toBotId)?.name ?? 'Bot'}의 실행 대화 보기</button></p>}
         {delivery?.report && <p className="pair-report" role="status"><CornerDownRight size={13} aria-hidden="true" />{delivery.report.status === 'error' ? delivery.report.error || reportLabels.error : reportLabels[delivery.report.status]}</p>}
       </>}
     </div></div>

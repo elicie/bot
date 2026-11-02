@@ -1,6 +1,7 @@
 import type {
   AppState,
   Bot,
+  BotDelivery,
   Conversation,
   FileDocument,
   FileListing,
@@ -72,6 +73,9 @@ export const queuedRoutineRun = (data: AppState | null, conversation: Conversati
   conversation?.run.status === 'idle'
     ? data?.routineRuns.find((run) => run.conversationId === conversation.id && !run.result)
     : undefined;
+/** The bot message a conversation was opened to answer: set for a recipient's dedicated conversation. */
+export const recipientDelivery = (data: AppState | null | undefined, conversationId: string | null | undefined): BotDelivery | undefined =>
+  conversationId ? data?.botDeliveries?.find((delivery) => delivery.recipientConversationId === conversationId) : undefined;
 export const conversationsFor = (data: AppState | null, botId: string | null) =>
   (data?.conversations ?? [])
     .filter((conversation) => conversation.botId === botId && !conversation.thread)
