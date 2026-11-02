@@ -10,6 +10,7 @@ import { botDeliverySchema, botExchangeSchema, MAX_BOT_MESSAGE_BYTES } from '../
 import { Store } from '../server/store.js';
 import type { AppState, Message } from '../shared/types.js';
 import { startMockProvider, type MockCompletion, type MockProviderRequest } from './mock-provider.js';
+import { stateSummary } from './state-summary.js';
 
 const use = (name: string, input: Record<string, unknown>): MockCompletion => ({
   tool: { name: 'use_tool', arguments: { tool_name: `workspace__${name}`, tool_input: input } },
@@ -40,7 +41,7 @@ async function fixture() {
   const wait = async (predicate: () => boolean) => {
     const deadline = Date.now() + 20000;
     while (!predicate()) {
-      assert.ok(Date.now() < deadline, `Timed out. ${JSON.stringify(backend.store.snapshot())}`);
+      assert.ok(Date.now() < deadline, `Timed out. ${stateSummary(backend.store.snapshot())}`);
       await new Promise(resolve => setTimeout(resolve, 20));
     }
   };
