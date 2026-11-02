@@ -4,4 +4,4 @@ import { root, run, rustEnv } from './rust-env.mjs';
 
 const env = await rustEnv();
 process.chdir(root);
-await run('cargo', ['+stable', ...process.argv.slice(2)], env);
+await run('cargo', [`+${process.env.RUSTUP_TOOLCHAIN || 'stable'}`, ...process.argv.slice(2)], env);
