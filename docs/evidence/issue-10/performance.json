@@ -17,7 +17,8 @@
   ],
   "historyBrowser": {
     "scenario": "120 histories including long reply, deep nesting and malformed delimiters; actual app, no selected full message; real SSE refresh between passes; typing verified afterwards",
-    "historyOpenToSecondFrameMs": [476.600,57.000,57.600],
+    "source": "c1ea81f04ed6bf72eb3722084e02942f36daa939",
+    "historyOpenToSecondFrameMs": [417.000,50.100,47.000],
     "note": "First cold parse/render is not instantaneous; subsequent full history openings reuse previews. Timings include frame scheduling and React rendering, not just converter CPU. Full stored source verified unchanged."
   },
   "workingTreePrototypeRepeatedList": {
