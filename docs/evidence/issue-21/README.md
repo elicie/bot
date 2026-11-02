@@ -3,7 +3,7 @@
 Actual application captures, not mockups. Both sides use a real Rust `grok-bot` server, a fresh temporary data directory with the default Grok bot, an available engine, Chrome, the dark theme, the **Settings → Updates** panel, and a **1040 × 760** viewport. No credentials, saved personal data, or real provider requests are present.
 
 - **Before:** baseline `95ffc46` (`main` at ticket checkout). Baseline Rust server and frontend were built directly from that revision before any UI edits. The panel still advertised `build:engine` and a Node-driven restart.
-- **After:** the implementation commit titled **`feat: complete Rust-only standalone release packaging`** on branch `rust-release-cleanup-3adb303fe5c0` (resolve its hash in this PR's commit list). The panel advertises the bundled release build and executable, not the removed engine command. Later documentation-only or test-only commits do not alter this captured UI.
+- **After:** implementation revision `030794a6c87811e11b2d8dfb223a07e5e209f3a4` (`feat: complete Rust-only standalone release packaging`) on branch `rust-release-cleanup-3adb303fe5c0`. The panel advertises the bundled release build and executable, not the removed engine command. Later documentation-only or test-only commits do not alter this captured UI.
 
 | Scenario | Before | After |
 | --- | --- | --- |

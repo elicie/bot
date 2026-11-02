@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { copyFile, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -90,7 +90,14 @@ try {
   assert.equal(await (await request('/chat?bot=example')).text(), html);
   assert.equal((await request('/assets/missing.js')).status, 404);
   assert.equal((await request('/internal/missing')).status, 404);
-  assert.equal((await request('/', { headers: { Host: `untrusted.example:${port}` } })).status, 403);
+  // Node's fetch may replace Host; use HTTP directly to exercise the actual wire header.
+  const foreignHostStatus = await new Promise((resolve, reject) => {
+    const probe = httpRequest(origin, { headers: { Host: `untrusted.example:${port}` } }, response => { response.resume(); resolve(response.statusCode); });
+    probe.on('error', reject);
+    probe.setTimeout(5000, () => probe.destroy(new Error('Host probe timed out')));
+    probe.end();
+  });
+  assert.equal(foreignHostStatus, 403);
   assert.equal((await request('/api/missing')).status, 404);
 
   await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
