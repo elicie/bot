@@ -1,0 +1,25 @@
+{
+  "mode": "after",
+  "imageCount": 80,
+  "imageBytes": 70,
+  "totalFixtureBytes": 5600,
+  "implementationRevision": "5a5cb9c4830e92f1a21a7787fb01298c53d1f68d",
+  "sourceSha256": "9f363942c3ccd2c2753331e6b4aba65b106302b664f50c244e3b7ea9701e82ba",
+  "checks": [
+    "initial actual native buffers are limited to near-viewport images, not all mounted history",
+    "scrolling admits a previously unloaded authenticated image",
+    "intentional Open displays decoded media in existing modal",
+    "leaving the conversation retains abort/revoke cleanup for admitted media",
+    "synthetic stopped source state preserved"
+  ],
+  "initial": {
+    "buffered": 11,
+    "visible": 9,
+    "mounted": 80
+  },
+  "afterScroll": {
+    "buffered": 20,
+    "visible": 9,
+    "mounted": 80
+  }
+}

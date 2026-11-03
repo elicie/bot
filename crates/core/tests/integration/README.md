@@ -7,7 +7,7 @@ another copy of the engine.
 ```sh
 # All core library and integration tests:
 node scripts/cargo.mjs test --locked -p grok-bot-core
-# List the 48 integration cases (30 runtime scenarios plus per-Bot concurrency coverage):
+# List the integration cases (runtime, desktop, previews and per-Bot concurrency):
 node scripts/cargo.mjs test --locked -p grok-bot-core --test integration -- --list
 # Run one scenario, including its output:
 node scripts/cargo.mjs test --locked -p grok-bot-core --test integration \
@@ -30,4 +30,5 @@ parent's environment. The vault test also installs its log subscriber only in it
 
 The former runtime driver contained 28 fixture scenarios plus checklist and startup checks. Those
 same bodies and assertions now have 30 separate libtest entry points; the other 16 original test
-entry points remain. No application behavior or assertion coverage is intentionally changed.
+entry points remain. Desktop authorization and link-preview HTTP regressions use the same shared
+harness as two additional cases. No application behavior or assertion coverage is intentionally changed.

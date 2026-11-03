@@ -1,0 +1,9 @@
+{
+  "checks": [
+    "normal native window close exits listener/core before restart",
+    "restart preserves saved Bot identity and rotates session token; previous token rejected",
+    "managed system Chrome starts and CDP screenshot displays through authenticated native transport",
+    "managed Chrome stops from native UI"
+  ],
+  "chrome": "verified system Chrome through existing CDP core, no Tauri UI automation used for managed computer"
+}

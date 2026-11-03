@@ -10,6 +10,8 @@
     "dev": "npm run build && npm run start:server",
     "start": "npm run start:server",
     "build": "tsc --noEmit && vite build",
+    "build:desktop": "node scripts/desktop.mjs build",
+    "dev:desktop": "node scripts/desktop.mjs dev",
     "build:release": "npm run build && node scripts/cargo.mjs build --locked --release -p grok-bot-server",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
@@ -35,6 +37,7 @@
   },
   "devDependencies": {
     "@playwright/test": "1.64.1",
+    "@tauri-apps/cli": "2.12.4",
     "@types/mdast": "^4.0.4",
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",

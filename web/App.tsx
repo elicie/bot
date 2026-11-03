@@ -24,6 +24,7 @@ import type {
   SettingsInput,
 } from '../shared/types';
 import { cancelQueuedTurn, errorText, getState, request } from './api';
+import { subscribeStateEvents } from './desktop-transport';
 import { BotDialog, History } from './Bots';
 import { Composer, OtherRuns, Transcript } from './Conversation';
 import { QueuedTurns } from './QueuedTurns';
@@ -141,46 +142,47 @@ export function App() {
             error: errorText(error),
           });
       });
-    const events = new EventSource('/api/events');
-    events.addEventListener('state', (event) => {
-      if (disposed) return;
-      try {
-        const snapshot: AppState = JSON.parse((event as MessageEvent<string>).data);
-        if (
-          !snapshot ||
-          !Array.isArray(snapshot.bots) ||
-          !Array.isArray(snapshot.conversations) ||
-          !Array.isArray(snapshot.routines) ||
-          !Array.isArray(snapshot.routineRuns) ||
-          !snapshot.settings ||
-          !snapshot.runtime
-        )
-          throw new Error('서버 상태 형식이 올바르지 않습니다.');
-        receivedEvent = true;
-        dispatch({ type: 'snapshot', data: snapshot });
-      } catch (error) {
-        dispatch({
-          type: 'connection',
-          status: 'error',
-          error: `실시간 상태를 읽지 못했습니다. ${errorText(error)}`,
-        });
-      }
+    const closeEvents = subscribeStateEvents({
+      onState: (data) => {
+        if (disposed) return;
+        try {
+          const snapshot: AppState = JSON.parse(data);
+          if (
+            !snapshot ||
+            !Array.isArray(snapshot.bots) ||
+            !Array.isArray(snapshot.conversations) ||
+            !Array.isArray(snapshot.routines) ||
+            !Array.isArray(snapshot.routineRuns) ||
+            !snapshot.settings ||
+            !snapshot.runtime
+          )
+            throw new Error('서버 상태 형식이 올바르지 않습니다.');
+          receivedEvent = true;
+          dispatch({ type: 'snapshot', data: snapshot });
+        } catch (error) {
+          dispatch({
+            type: 'connection',
+            status: 'error',
+            error: `실시간 상태를 읽지 못했습니다. ${errorText(error)}`,
+          });
+        }
+      },
+      onOpen: () => {
+        if (!disposed && current.current.data) dispatch({ type: 'connection', status: 'online' });
+      },
+      onError: () => {
+        if (!disposed)
+          dispatch({
+            type: 'connection',
+            status: current.current.data ? 'reconnecting' : 'error',
+            error: '로컬 서버 연결이 끊겼습니다. 자동으로 다시 연결합니다.',
+          });
+      },
     });
-    events.onopen = () => {
-      if (current.current.data) dispatch({ type: 'connection', status: 'online' });
-    };
-    events.onerror = () => {
-      if (!disposed)
-        dispatch({
-          type: 'connection',
-          status: current.current.data ? 'reconnecting' : 'error',
-          error: '로컬 서버 연결이 끊겼습니다. 자동으로 다시 연결합니다.',
-        });
-    };
     return () => {
       disposed = true;
       controller.abort();
-      events.close();
+      closeEvents();
     };
   }, [connectionAttempt]);
 

@@ -3,6 +3,7 @@
 import { createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ArrowUpRight, Link2 } from 'lucide-react';
 import { request } from './api';
+import { useMediaUrl } from './use-media-url';
 import { canonicalLinkPreviewUrl, extractLinkPreviewUrls } from './link-preview-urls';
 import './link-previews.css';
 
@@ -137,6 +138,7 @@ function LinkPreviewCard({ url, cache, visible }: { url: string; cache: LinkPrev
     return cache.subscribe(url, setState);
   }, [url, cache, visible]);
   const preview = state.status === 'ready' ? state.preview : null;
+  const image = useMediaUrl(visible && !imageFailed ? preview?.imageUrl ?? null : null);
   const destination = preview?.url ?? url;
   const host = new URL(destination).host;
   const title = preview?.title || host;
@@ -146,8 +148,8 @@ function LinkPreviewCard({ url, cache, visible }: { url: string; cache: LinkPrev
   return <li>
     <a className={`link-preview-card is-${state.status}`} href={destination} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer" aria-label={`${title} (새 탭에서 열기)`} aria-describedby={descriptionId}>
       <span className="link-preview-thumbnail" aria-hidden="true">
-        {preview?.imageUrl && !imageFailed
-          ? <img src={preview.imageUrl} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" onError={() => setImageFailed(true)} />
+        {image.url && !imageFailed
+          ? <img src={image.url} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" onError={() => setImageFailed(true)} />
           : <Link2 size={21} />}
       </span>
       <span className="link-preview-copy">

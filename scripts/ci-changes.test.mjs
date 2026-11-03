@@ -397,7 +397,7 @@ test('importing the selector does not read stdin, invoke child processes or prin
   assert.equal(result.stderr, '');
 });
 
-test('actual locked no-deps metadata selects store, core and server but not engine', t => {
+test('actual locked no-deps metadata selects store and both hosts but not engine', t => {
   let metadata;
   try { metadata = readCargoMetadata(); }
   catch (error) {
@@ -407,5 +407,5 @@ test('actual locked no-deps metadata selects store, core and server but not engi
   }
   assert.equal(metadata.resolve, null);
   assert.equal(selectChanges(['crates/store/src/lib.rs'], { loadMetadata: () => metadata }).packages,
-    '-p grok-bot-core -p grok-bot-server -p grok-bot-store');
+    '-p grok-bot-core -p grok-bot-desktop -p grok-bot-server -p grok-bot-store');
 });

@@ -5,6 +5,7 @@ mod attachments;
 mod canvas_http;
 mod common;
 mod computer_http;
+mod desktop_auth;
 mod groups_threads;
 mod http_api;
 mod http_bots;

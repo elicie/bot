@@ -3,6 +3,7 @@ import { ArrowDown, ArrowRight, ArrowUp, Expand, Globe2, LoaderCircle, Monitor, 
 import type { ComputerAction, ComputerObservation, ComputerStatus } from '../shared/computer';
 import { ApiError, errorText, request } from './api';
 import { Avatar, ErrorNotice, IconButton } from './ui';
+import { useMediaUrl } from './use-media-url';
 import './computer.css';
 
 export function Computer({ ownerId, canControl }: { ownerId: string; canControl: boolean }) {
@@ -102,6 +103,13 @@ export function Computer({ ownerId, canControl }: { ownerId: string; canControl:
   const running = status?.state === 'running';
   const previewIdentity = status?.frameId ? `${status.epoch}:${status.frameId}` : null;
   const image = `${base}/preview?owner=${encodeURIComponent(ownerId)}&epoch=${encodeURIComponent(status?.epoch ?? '')}&frame=${encodeURIComponent(status?.frameId ?? '')}`;
+  const media = useMediaUrl(status?.frameId ? image : null);
+  useEffect(() => {
+    if (media.error) {
+      setLoadedPreview(null);
+      setError('화면을 불러오지 못했습니다. 새로고침해 주세요.');
+    }
+  }, [media.error]);
   const stopped = status?.state === 'stopped';
 
   return <section className={`managed-computer ${expanded ? 'computer-expanded' : ''}`} aria-label="관리형 브라우저">
@@ -114,14 +122,14 @@ export function Computer({ ownerId, canControl }: { ownerId: string; canControl:
       <p>서버에서 새 Chrome을 엽니다. 허용한 공개 사이트에 접근하며 로그인·다운로드·파일 업로드는 차단합니다. 서버의 localhost 연결에서 제어할 수 있습니다.</p>
     </div> : <>
       <form className="computer-address" onSubmit={event => { event.preventDefault(); void perform({ type: 'navigate', url: address }); }}><input aria-label="컴퓨터 웹 주소" value={address} onChange={event => setAddress(event.target.value)} disabled={busy || !canControl} /><button className="icon-button" title="주소로 이동" aria-label="주소로 이동" disabled={busy || !canControl}><ArrowRight size={15} /></button></form>
-      <button type="button" className="computer-live-preview" aria-label="브라우저 화면 클릭" disabled={busy || !canControl || !status.frameId || loadedPreview !== previewIdentity} onClick={event => {
+      <button type="button" className="computer-live-preview" aria-label="브라우저 화면 클릭" disabled={busy || !canControl || !status.frameId || !media.url || loadedPreview !== previewIdentity} onClick={event => {
         const bounds = preview.current?.getBoundingClientRect();
         if (!bounds || !status || event.detail === 0) return;
         const scale = Math.min(bounds.width / status.viewport.width, bounds.height / status.viewport.height);
         const x = (event.clientX - bounds.left - (bounds.width - status.viewport.width * scale) / 2) / scale;
         const y = (event.clientY - bounds.top - (bounds.height - status.viewport.height * scale) / 2) / scale;
         if (x >= 0 && y >= 0 && x < status.viewport.width && y < status.viewport.height) void perform({ type: 'click', x: Math.floor(x), y: Math.floor(y) });
-      }}>{status.frameId ? <img key={image} ref={preview} src={image} alt="서버 관리형 브라우저의 현재 화면" onLoad={() => setLoadedPreview(previewIdentity)} onError={() => { setLoadedPreview(null); setError('화면을 불러오지 못했습니다. 새로고침해 주세요.'); }} /> : <span className="computer-preview-empty">화면 새로고침으로 현재 페이지를 확인하세요.</span>}</button>
+      }}>{status.frameId ? media.url ? <img key={media.url} ref={preview} src={media.url} alt="서버 관리형 브라우저의 현재 화면" onLoad={() => setLoadedPreview(previewIdentity)} onError={() => { setLoadedPreview(null); setError('화면을 불러오지 못했습니다. 새로고침해 주세요.'); }} /> : <span className="computer-preview-empty" role={media.error ? 'alert' : 'status'}>{media.error ? '화면을 불러오지 못했습니다. 새로고침해 주세요.' : '화면 불러오는 중…'}</span> : <span className="computer-preview-empty">화면 새로고침으로 현재 페이지를 확인하세요.</span>}</button>
       <p className="computer-current-url" title={status.url ?? ''}>{status.url || '빈 페이지'}</p>
       <div className="computer-toolbar"><IconButton label="화면 새로고침" disabled={busy || !canControl} onClick={() => void perform({ type: 'observe' })}><RefreshCw size={14} /></IconButton><IconButton label="위로 스크롤" disabled={busy || !canControl} onClick={() => void perform({ type: 'scroll', deltaY: -400 })}><ArrowUp size={14} /></IconButton><IconButton label="아래로 스크롤" disabled={busy || !canControl} onClick={() => void perform({ type: 'scroll', deltaY: 400 })}><ArrowDown size={14} /></IconButton><button className="text-button" disabled={busy || !canControl} onClick={() => void perform({ type: 'key', key: 'Tab' })}>Tab</button><button className="text-button" disabled={busy || !canControl} onClick={() => void perform({ type: 'key', key: 'Enter' })}>Enter</button><IconButton label="브라우저 중지" onClick={stop}><Square size={13} /></IconButton></div>
       <form className="computer-type" onSubmit={event => { event.preventDefault(); const value = text; if (value) void perform({ type: 'type', text: value }).then(ok => { if (ok) setText(current => current === value ? '' : current); }); }}><input aria-label="컴퓨터 입력 텍스트" maxLength={2000} value={text} onChange={event => setText(event.target.value)} placeholder="선택한 입력란에 쓸 내용" disabled={busy || !canControl} /><button className="small-button" disabled={busy || !text || !canControl}>입력</button></form>

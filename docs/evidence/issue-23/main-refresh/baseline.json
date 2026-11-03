@@ -1,0 +1,13 @@
+{
+  "revision": "3ff99e8ddad7f3278c519c8d600c39d3f3496b81",
+  "sourceStateSha256": "8973db29196e75c67f2d02e6818175f4ad5e6c1ad09fe1117c8be82f517208f6",
+  "fixtureOrigin": "http://127.0.0.1:40213",
+  "viewport": {
+    "width": 1040,
+    "height": 760
+  },
+  "theme": "dark",
+  "capture": "actual Rust web server + system Chrome",
+  "thumbnailSrcContract": "direct /api/generated-images/<uuid>",
+  "sourcePreserved": true
+}

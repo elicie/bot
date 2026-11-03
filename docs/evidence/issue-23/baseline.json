@@ -1,0 +1,11 @@
+{
+  "sourceStateSha256": "fb60f76cc4aa5de636433a8c6f1582ac23aa8f59ebfd0ab82a83fddbcccdac3a",
+  "revision": "e7de2f2d4f10539e0e25ee39752dd47e205c06ba",
+  "application": "exact P4 baseline Rust binary and frontend",
+  "viewport": {
+    "width": 1040,
+    "height": 760
+  },
+  "theme": "dark",
+  "scenario": "same copied web state, default Grok bot with completed fixture conversation; chat and settings/updates"
+}
