@@ -194,7 +194,9 @@ pub(super) async fn custom_mcp_servers(f: &Fixture) {
     // that write drains, otherwise its private state.json.<uuid>.tmp can appear mid-replacement.
     f.store.flush().await.unwrap();
     let backup = data_dir.join(grok_bot_store::PRE_WORK_QUEUE_BACKUP);
-    assert_eq!(files_containing(&data_dir, SECRET.as_bytes()), [data_dir.join("state.json"), backup.clone()]);
+    let mut stored = files_containing(&data_dir, SECRET.as_bytes());
+    stored.sort();
+    assert_eq!(stored, [data_dir.join("state.json"), backup.clone()]);
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(std::fs::metadata(backup).unwrap().permissions().mode() & 0o777, 0o600);
     let engine_home = std::env::var("GROK_HOME").map(std::path::PathBuf::from).unwrap();
