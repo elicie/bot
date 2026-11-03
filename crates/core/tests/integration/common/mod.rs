@@ -28,10 +28,13 @@ pub fn run(name: &str, body: impl AsyncFnOnce(PathBuf)) {
         return;
     }
 
-    let root = tempfile::Builder::new().prefix(&format!("grok-bot-{name}-")).tempdir().unwrap();
-    let home = root.path().join("engine/home");
+    let directory = tempfile::Builder::new().prefix(&format!("grok-bot-{name}-")).tempdir().unwrap();
+    // TMPDIR itself may be a symlink. Store intentionally rejects symlinked path parents;
+    // preserve the original runtime driver's canonical root before building any fixture paths.
+    let root = directory.path().canonicalize().unwrap();
+    let home = root.join("engine/home");
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-    command.args(["--exact", test, "--nocapture", "--test-threads=1"]).env(CHILD, test).env(ROOT, root.path());
+    command.args(["--exact", test, "--nocapture", "--test-threads=1"]).env(CHILD, test).env(ROOT, &root);
     // Mirror engine::host::prepare_process_environment without mutating the parent's environment.
     // Each child must see its own paths before upstream initializes any of its OnceLocks.
     for (key, value) in [
@@ -68,7 +71,7 @@ pub fn run(name: &str, body: impl AsyncFnOnce(PathBuf)) {
     print!("{}", String::from_utf8_lossy(&output.stdout));
     eprint!("{}", String::from_utf8_lossy(&output.stderr));
     assert!(output.status.success(), "isolated test {test} failed: {}", output.status);
-    assert_eq!(std::fs::read_to_string(root.path().join("started")).expect("child must execute the selected test"), test);
+    assert_eq!(std::fs::read_to_string(root.join("started")).expect("child must execute the selected test"), test);
 }
 
 pub struct TestApp {
