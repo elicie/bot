@@ -371,7 +371,7 @@ async fn unrelated_routine_edits_stay_usable_while_own_edits_deletion_and_bot_mu
     assert_eq!(f.store.mutate(|s| s.delete_routine(&first.id)).await.unwrap_err().status, 409);
     let patch = BotPatch { name: Some("Blocked".into()), ..BotPatch::default() };
     let error = f.store.mutate(|s| s.update_bot(&first.bot_id, patch)).await.unwrap_err();
-    assert_eq!((error.status, error.message.as_str()), (409, "Stop the active run before changing settings, bots, or files."));
+    assert_eq!((error.status, error.message.as_str()), (409, "Stop this bot's active run before changing it."));
     f.finish(&run.conversation_id).await;
     f.store.mutate(|s| s.delete_routine(&first.id)).await.unwrap();
     assert_eq!(f.runs().len(), 1);

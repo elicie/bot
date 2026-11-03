@@ -2,7 +2,7 @@
 //! Like scheduler/provider.rs, this serves the engine's real OpenAI-compatible HTTP protocol and
 //! uses a one-shot gate plus notifications rather than time-based provider ordering.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -18,6 +18,7 @@ use tokio::sync::{Notify, oneshot};
 pub enum Reply {
     Text(String),
     Send { to: String, text: String },
+    Tool { name: &'static str, input: Value },
     Hold(String),
 }
 
@@ -29,16 +30,23 @@ impl Reply {
     pub fn send(to: &str, text: &str) -> Self {
         Self::Send { to: to.into(), text: text.into() }
     }
+
+    pub fn tool(name: &'static str, input: Value) -> Self {
+        Self::Tool { name, input }
+    }
 }
 
 #[derive(Clone)]
 pub struct Request {
     pub persisted: DiskState,
+    pub payload: Value,
 }
 
 #[derive(Default)]
 struct Data {
     replies: VecDeque<Reply>,
+    /// Plans keyed by a distinct current-turn prompt marker, independent of bot request ordering.
+    keyed: BTreeMap<String, VecDeque<Reply>>,
     requests: Vec<Request>,
     release: Option<oneshot::Sender<()>>,
 }
@@ -68,12 +76,27 @@ impl ScriptedProvider {
 
     pub fn plan(&self, replies: Vec<Reply>) {
         let mut data = self.data.lock().unwrap();
-        assert!(data.replies.is_empty() && data.requests.is_empty());
+        assert!(data.replies.is_empty() && data.keyed.is_empty() && data.requests.is_empty());
         data.replies = replies.into();
+    }
+
+    pub fn plan_for(&self, marker: &str, replies: Vec<Reply>) {
+        let mut data = self.data.lock().unwrap();
+        assert!(data.replies.is_empty() && data.requests.is_empty());
+        assert!(data.keyed.insert(marker.into(), replies.into()).is_none(), "one plan per distinct turn marker");
     }
 
     pub fn requests(&self) -> Vec<Request> {
         self.data.lock().unwrap().requests.clone()
+    }
+
+    pub fn tool_outcomes(&self) -> Vec<String> {
+        self.requests()
+            .iter()
+            .flat_map(|request| request.payload["messages"].as_array().unwrap())
+            .filter(|message| message["role"] == "tool")
+            .map(|message| content_text(&message["content"]))
+            .collect()
     }
 
     pub async fn wait_for(&self, count: usize) {
@@ -96,7 +119,7 @@ impl ScriptedProvider {
 
     pub fn assert_drained(&self) {
         let data = self.data.lock().unwrap();
-        assert!(data.replies.is_empty(), "all real delivery/report turns consumed their scripted answers");
+        assert!(data.replies.is_empty() && data.keyed.values().all(VecDeque::is_empty), "all real tool/report turns consumed their scripted answers");
         assert!(data.release.is_none());
     }
 }
@@ -110,8 +133,12 @@ async fn completions(State(provider): State<ScriptedProvider>, Json(request): Js
     let persisted = serde_json::from_slice(&std::fs::read(&provider.state_file).unwrap()).unwrap();
     let (reply, number, gate) = {
         let mut data = provider.data.lock().unwrap();
-        data.requests.push(Request { persisted });
-        let reply = data.replies.pop_front().expect("unexpected unplanned main-agent request");
+        data.requests.push(Request { persisted, payload: request.clone() });
+        let reply = if data.keyed.is_empty() {
+            data.replies.pop_front().expect("unexpected unplanned main-agent request")
+        } else {
+            data.keyed.get_mut(&turn_prompt(&request)).expect("unexpected current-turn prompt").pop_front().expect("exhausted current-turn plan")
+        };
         let gate = if matches!(&reply, Reply::Hold(_)) {
             let (release, released) = oneshot::channel();
             assert!(data.release.replace(release).is_none(), "only one explicit leaf gate");
@@ -124,21 +151,49 @@ async fn completions(State(provider): State<ScriptedProvider>, Json(request): Js
     provider.changed.notify_one();
     match reply {
         Reply::Text(text) => sse(model, json!({"content": text}), "stop"),
-        Reply::Send { to, text } => sse(
-            model,
-            json!({"tool_calls": [{
-                "index": 0, "id": format!("call_cycle_{number}"), "type": "function",
-                "function": {"name": "use_tool", "arguments": json!({
-                    "tool_name": "workspace__send_message", "tool_input": {"toBotId": to, "text": text},
-                }).to_string()},
-            }]}),
-            "tool_calls",
-        ),
+        Reply::Send { to, text } => tool_sse(model, number, "send_message", json!({"toBotId": to, "text": text})),
+        Reply::Tool { name, input } => tool_sse(model, number, name, input),
         Reply::Hold(text) => {
             gate.unwrap().await.expect("cycle leaf gate release");
             sse(model, json!({"content": text}), "stop")
         }
     }
+}
+
+fn content_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts.iter().filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join("\n"),
+        _ => String::new(),
+    }
+}
+
+fn turn_prompt(request: &Value) -> String {
+    let query = request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .filter(|message| message["role"] == "user")
+        .map(|message| content_text(&message["content"]))
+        .find(|text| text.contains("<user_query>"))
+        .expect("engine wraps the current turn in user_query");
+    let start = query.find("<user_query>\n").unwrap() + "<user_query>\n".len();
+    let end = query.rfind("\n</user_query>").unwrap();
+    query[start..end].to_owned()
+}
+
+fn tool_sse(model: &str, number: usize, name: &str, input: Value) -> Response {
+    sse(
+        model,
+        json!({"tool_calls": [{
+            "index": 0, "id": format!("call_cycle_{number}"), "type": "function",
+            "function": {"name": "use_tool", "arguments": json!({
+                "tool_name": format!("workspace__{name}"), "tool_input": input,
+            }).to_string()},
+        }]}),
+        "tool_calls",
+    )
 }
 
 fn sse(model: &str, delta: Value, finish: &str) -> Response {

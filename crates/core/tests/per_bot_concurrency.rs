@@ -21,7 +21,7 @@ use chrono::{DateTime, Utc};
 use grok_bot_core::app::{Backend, BackendOptions};
 use grok_bot_core::runtime::RuntimeOptions;
 use grok_bot_core::scheduler::{RoutineScheduler, SchedulerOptions};
-use grok_bot_model::{AppState, Clock, Conversation, DeliveryStatus, DiskState, ReportStatus, RoutineResultStatus, RunStatus, SettingsInput};
+use grok_bot_model::{AppState, Clock, Conversation, DeliveryStatus, DiskState, ReportStatus, RoutineResultStatus, RunStatus, SettingsInput, ToolStatus};
 use grok_bot_store::Store;
 use provider::Provider;
 use serde_json::{Value, json};
@@ -343,6 +343,12 @@ fn per_bot_concurrency_regressions() {
         tokio::time::timeout(Duration::from_secs(90), group_speakers_share_their_normal_lane(&root)).await.expect("group speaker lanes");
         tokio::time::timeout(Duration::from_secs(90), restart_retains_queue_and_does_not_replay_claims(&root)).await.expect("durable restart claims");
         tokio::time::timeout(Duration::from_secs(90), cyclic_send_message_and_reports_release_capacity(&root)).await.expect("real A to B to A cycle");
+        tokio::time::timeout(Duration::from_secs(90), concurrent_file_approvals_preserve_compare_and_save(&root))
+            .await
+            .expect("concurrent shared-file approvals");
+        tokio::time::timeout(Duration::from_secs(90), group_restart_preserves_unstarted_members_and_next_round(&root))
+            .await
+            .expect("group restart preserves pending members and next round");
     });
 }
 
@@ -585,6 +591,7 @@ async fn group_speakers_share_their_normal_lane(root: &Path) {
     let normal_alpha = f.conversation(&alpha).await;
     let normal_beta = f.conversation(&beta).await;
     let later_alpha = f.conversation(&alpha).await;
+    let independent_alpha = f.conversation(&alpha).await;
     let (status, body) = f.api("POST", "/api/groups", Some(json!({"name": "Contending team", "memberBotIds": [alpha, beta]}))).await;
     assert_eq!(status, 201, "{body}");
     let group = body["group"]["id"].as_str().unwrap();
@@ -614,19 +621,35 @@ async fn group_speakers_share_their_normal_lane(root: &Path) {
         "a blocked next group member must not reserve the previous speaker's free bot lane"
     );
     assert_queue(&f.queue().await, &[(&beta, &conversation, "group")]);
-    assert_eq!(f.get(&conversation).group_round.as_ref().unwrap().pending_bot_ids, [beta.clone()]);
+    assert_eq!(f.get(&conversation).group_round.as_ref().unwrap().pending_bot_ids.as_slice(), std::slice::from_ref(&beta));
     f.provider.release(1);
     f.provider.wait_for(5).await;
     let beta_group = &f.provider.prompts()[4];
     assert!(beta_group.contains("You are Beta."), "{beta_group}");
     assert_eq!(serde_json::to_value(f.get(&conversation).run).unwrap()["botId"], beta);
     assert_eq!(f.get(&later_alpha).run.status, RunStatus::Running);
-    f.provider.release(4);
+    assert!(f.get(&conversation).group_round.is_none(), "the last Beta member is live even though pending IDs are exhausted");
+    f.send(&conversation, "Next group round must wait for Beta").await;
+    let next_round = f.queue().await.into_iter().find(|work| work["conversationId"] == conversation).unwrap();
+    f.send(&independent_alpha, "Alpha stays free while the last group speaker is Beta").await;
     f.provider.release(3);
+    f.provider.wait_for(6).await;
+    assert_eq!(
+        f.provider.prompts()[5],
+        "Alpha stays free while the last group speaker is Beta",
+        "a next-round group dependency must not reserve Alpha while only Beta is speaking"
+    );
+    assert_eq!(f.get(&conversation).run.status, RunStatus::Running);
+    let (status, body) =
+        f.api("POST", &format!("/api/conversations/{conversation}/queued-turns/{}/cancel", next_round["id"].as_str().unwrap()), Some(json!({}))).await;
+    assert_eq!(status, 200, "cancel only the pending next round, never the live Beta speaker: {body}");
+    assert_eq!(f.get(&conversation).run.status, RunStatus::Running);
+    f.provider.release(4);
+    f.provider.release(5);
     let completed = f.finished(&conversation, 3, RunStatus::Completed).await;
     assert!(completed.group_round.is_none());
     assert_eq!(completed.messages.iter().map(|message| message.speaker_bot_id.clone()).collect::<Vec<_>>(), [None, Some(alpha), Some(beta)]);
-    for normal in [&normal_alpha, &normal_beta, &later_alpha] {
+    for normal in [&normal_alpha, &normal_beta, &later_alpha, &independent_alpha] {
         f.finished(normal, 2, RunStatus::Completed).await;
     }
     assert!(f.queue().await.is_empty());
@@ -804,6 +827,208 @@ async fn cyclic_send_message_and_reports_release_capacity(root: &Path) {
     for request in provider.requests() {
         assert_active_claims(&request.persisted, 1);
     }
+    provider.assert_drained();
+    f.close().await;
+    provider_server.abort();
+    assert!(provider_server.await.unwrap_err().is_cancelled());
+}
+
+/// Restart interrupts the current group speaker, not its unstarted members or later user rounds.
+async fn group_restart_preserves_unstarted_members_and_next_round(root: &Path) {
+    let mut f = HeldFixture::new(root, "group-restart", Some(2)).await;
+    let alpha = f.bot_id();
+    let (status, body) = f.api("PATCH", &format!("/api/bots/{alpha}"), Some(json!({"name": "Restart Alpha"}))).await;
+    assert_eq!(status, 200, "{body}");
+    let beta = f.bot("Restart Beta").await;
+    let (status, body) = f.api("POST", "/api/groups", Some(json!({"name": "Durable team", "memberBotIds": [alpha, beta]}))).await;
+    assert_eq!(status, 201, "{body}");
+    let group = body["group"]["id"].as_str().unwrap();
+    let (status, body) = f.api("POST", &format!("/api/groups/{group}/conversations"), Some(json!({}))).await;
+    assert_eq!(status, 201, "{body}");
+    let conversation = body["conversation"]["id"].as_str().unwrap().to_owned();
+    f.send(&conversation, "GROUP_RESTART_FIRST").await;
+    f.provider.wait_for(1).await;
+    assert!(f.provider.prompts()[0].contains("You are Restart Alpha."));
+    let current = f.get(&conversation);
+    assert_eq!(current.run.status, RunStatus::Running);
+    let round = current.group_round.clone().unwrap();
+    assert_eq!(round.pending_bot_ids.as_slice(), std::slice::from_ref(&beta));
+    f.send(&conversation, "GROUP_RESTART_NEXT").await;
+    let queued = f.queue().await;
+    assert_queue(&queued, &[(&alpha, &conversation, "user")]);
+    let next_id = queued[0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(f.get(&conversation).messages.len(), 2, "the next group user request has not entered the interrupted round");
+    f.persisted().await;
+
+    // Crash recovery sees the real live A claim and the frozen pending-B round metadata together.
+    // As elsewhere, never reopen the live writer's own path while it still owns that directory.
+    let checkpoint = root.join("group-restart-checkpoint");
+    std::fs::create_dir_all(&checkpoint).unwrap();
+    std::fs::copy(f.data.join("state.json"), checkpoint.join("state.json")).unwrap();
+    let recovered = Store::open(&checkpoint, clock()).await.unwrap();
+    recovered.read(|state| {
+        let restored = state.conversation(&conversation).unwrap();
+        assert_eq!(restored.run.status, RunStatus::Interrupted);
+        assert_eq!(restored.run.id, current.run.id);
+        assert_eq!(restored.group_round.as_ref(), Some(&round), "crash recovery preserves the accepted pending B turn");
+        assert_eq!(restored.messages.len(), 2);
+        assert!(state.disk().work_queue.iter().any(|work| work.id == next_id), "the next group's accepted User ID survives recovery");
+        assert!(
+            state.disk().work_queue.iter().any(|work| {
+                let value = serde_json::to_value(work).unwrap();
+                value["kind"] == "group" && value["botId"] == beta && value["conversationId"] == conversation && value["roundId"] == round.id
+            }),
+            "the interrupted group's next B member is dispatchable, not silently lost"
+        );
+    });
+    recovered.flush().await.unwrap();
+    drop(recovered);
+
+    f.app.stop_backend().await;
+    let stopped = f.get(&conversation);
+    assert_eq!(stopped.run.status, RunStatus::Interrupted, "shutdown interrupts its live claim; explicit Stop is the separate cancelling path");
+    assert_eq!(stopped.run.id, current.run.id);
+    assert_eq!(stopped.group_round.as_ref(), Some(&round), "graceful shutdown also retains the pending B member");
+    assert!(queue_ids(&f.persisted().await).contains(&next_id));
+    assert_eq!(f.provider.requests().len(), 1, "shutdown cannot start B or the next group user round");
+    f.close().await;
+
+    let restarted = HeldFixture::new(root, "group-restart", Some(2)).await;
+    let initial = restarted.initial.conversations.iter().find(|item| item.id == conversation).unwrap();
+    assert_eq!(initial.run.status, RunStatus::Interrupted);
+    assert_eq!(initial.run.id, current.run.id);
+    assert_eq!(initial.group_round.as_ref(), Some(&round));
+    assert!(queue_ids(&restarted.initial).contains(&next_id));
+    restarted.provider.wait_for(1).await;
+    let first = &restarted.provider.prompts()[0];
+    assert!(
+        first.contains("You are Restart Beta.") && first.contains("Latest user message:\nGROUP_RESTART_FIRST"),
+        "pending B must run first, never replay A or skip to the next user: {first}"
+    );
+    assert!(!first.contains("GROUP_RESTART_NEXT"));
+    assert_eq!(restarted.get(&conversation).messages.len(), 3);
+    assert_queue(&restarted.queue().await, &[(&alpha, &conversation, "user")]);
+    assert_eq!(restarted.queue().await[0]["id"], next_id);
+    restarted.scheduler.tick().await.unwrap();
+    assert_eq!(restarted.provider.requests().len(), 1, "the queued next round cannot interleave with the held last member");
+    restarted.provider.release(0);
+    restarted.provider.wait_for(2).await;
+    let next_alpha = &restarted.provider.prompts()[1];
+    assert!(next_alpha.contains("You are Restart Alpha.") && next_alpha.contains("Latest user message:\nGROUP_RESTART_NEXT"), "{next_alpha}");
+    restarted.provider.release(1);
+    restarted.provider.wait_for(3).await;
+    let next_beta = &restarted.provider.prompts()[2];
+    assert!(next_beta.contains("You are Restart Beta.") && next_beta.contains("Latest user message:\nGROUP_RESTART_NEXT"), "{next_beta}");
+    restarted.provider.release(2);
+    let completed = restarted.finished(&conversation, 6, RunStatus::Completed).await;
+    assert!(completed.group_round.is_none());
+    assert_eq!(
+        completed.messages.iter().map(|message| message.speaker_bot_id.clone()).collect::<Vec<_>>(),
+        [None, Some(alpha.clone()), Some(beta.clone()), None, Some(alpha), Some(beta)]
+    );
+    assert_eq!(completed.messages[0].text, "GROUP_RESTART_FIRST");
+    assert_eq!(completed.messages[3].text, "GROUP_RESTART_NEXT", "the pending user was admitted exactly once after the first round's remaining member");
+    restarted.scheduler.tick().await.unwrap();
+    assert!(restarted.queue().await.is_empty());
+    assert_eq!(restarted.provider.requests().len(), 3, "only B-first, A-next and B-next execute after restart");
+    assert_provider_claims(&restarted.provider, 2);
+    restarted.close().await;
+}
+
+/// Independent Bot slots must not turn a shared workspace's compare-and-save into last-writer wins.
+/// Both actual broker proposals capture the same original hash before either browser approves.
+async fn concurrent_file_approvals_preserve_compare_and_save(root: &Path) {
+    use scripted_provider::{Reply, ScriptedProvider};
+
+    let provider = ScriptedProvider::new(root.join("shared-file/data/state.json"));
+    let (base_url, provider_server) = provider.serve().await;
+    let f = Fixture::new(root, "shared-file", base_url, Some(2)).await;
+    let (alpha, beta) = (f.bot_id(), f.bot("File writer Beta").await);
+    let a = f.conversation(&alpha).await;
+    let b = f.conversation(&beta).await;
+    std::fs::write(f.workspace.join("shared.txt"), "SHARED_ORIGINAL\n").unwrap();
+    let (status, original) = f.api("GET", "/api/file?path=shared.txt", None).await;
+    assert_eq!(status, 200, "{original}");
+    assert_eq!(original["content"], "SHARED_ORIGINAL\n");
+    let hash = original["hash"].as_str().unwrap();
+    assert_eq!(hash.len(), 64);
+    let (a_content, b_content) = ("ALPHA_APPROVED_CONTENT\n", "BETA_APPROVED_CONTENT\n");
+    for (marker, content) in [("CAS_ALPHA", a_content), ("CAS_BETA", b_content)] {
+        // Per-turn plans keep the write's identity independent of whichever Bot's HTTP inference
+        // arrives first. Each engine really reads the original file, then proposes its own edit.
+        provider.plan_for(
+            marker,
+            vec![
+                Reply::tool("read_file", json!({"path": "shared.txt"})),
+                Reply::tool("write_file", json!({"path": "shared.txt", "content": content, "hash": hash})),
+                Reply::text("The approved write attempt is finished; inspect the tool result."),
+            ],
+        );
+    }
+    f.send(&a, "CAS_ALPHA").await;
+    f.send(&b, "CAS_BETA").await;
+    let pending = f
+        .wait("both shared-file proposals awaiting approval", |state| {
+            [&a, &b].into_iter().all(|id| {
+                state.conversations.iter().any(|conversation| {
+                    conversation.id == *id && conversation.run.status == RunStatus::AwaitingPermission && conversation.run.permission.is_some()
+                })
+            })
+        })
+        .await;
+    provider.wait_for(4).await;
+    let reads = provider.tool_outcomes();
+    assert_eq!(reads.len(), 2, "both write proposals follow real workspace read_file results");
+    assert!(reads.iter().all(|result| result.contains(hash) && result.contains("SHARED_ORIGINAL")), "both Bots saw the same original file/hash: {reads:?}");
+    assert_eq!(pending.conversations.iter().filter(|conversation| conversation.run.status.is_active()).count(), 2);
+    assert_active_claims(&f.persisted().await, 2);
+    let (status, unchanged) = f.api("GET", "/api/file?path=shared.txt", None).await;
+    assert_eq!(status, 200, "{unchanged}");
+    assert_eq!(unchanged, original, "neither unapproved proposal has changed the shared file");
+    let approvals: Vec<_> = [(&a, a_content), (&b, b_content)]
+        .into_iter()
+        .map(|(id, content)| {
+            let conversation = pending.conversations.iter().find(|conversation| conversation.id == *id).unwrap();
+            let permission = conversation.run.permission.as_ref().unwrap();
+            assert_eq!(permission.title, "Write shared.txt");
+            assert_eq!(permission.paths, ["shared.txt"]);
+            assert!(permission.description.contains(content), "the keyed provider must propose the right Bot's contents");
+            let option = &permission.options.iter().find(|option| option.kind == "allow_once").unwrap().id;
+            (format!("/api/conversations/{id}/permissions/{}", permission.id), json!({"optionId": option}))
+        })
+        .collect();
+    let (a_decision, b_decision) =
+        tokio::join!(f.api("POST", &approvals[0].0, Some(approvals[0].1.clone())), f.api("POST", &approvals[1].0, Some(approvals[1].1.clone())),);
+    assert_eq!(a_decision.0, 200, "{}", a_decision.1);
+    assert_eq!(b_decision.0, 200, "{}", b_decision.1);
+    let completed = [f.finished(&a, 2, RunStatus::Completed).await, f.finished(&b, 2, RunStatus::Completed).await];
+    let writes: Vec<_> = completed
+        .iter()
+        .flat_map(|conversation| conversation.messages.iter())
+        .flat_map(|message| &message.tools)
+        .filter(|tool| tool.title == "Write shared.txt")
+        .collect();
+    assert_eq!(writes.len(), 2, "one actual approved write activity per Bot");
+    let saved: Vec<_> = writes.iter().filter(|tool| tool.status == ToolStatus::Completed).collect();
+    let stale: Vec<_> = writes.iter().filter(|tool| tool.status == ToolStatus::Failed).collect();
+    assert_eq!(saved.len(), 1, "two approvals against one original hash must not both report save success: {writes:?}");
+    assert_eq!(stale.len(), 1, "the losing save must report its stale-hash failure: {writes:?}");
+    assert_eq!(saved[0].output.as_deref(), Some("Saved shared.txt."));
+    assert_eq!(stale[0].output.as_deref(), Some("File changed on disk. Reload it before saving."));
+    let (status, final_file) = f.api("GET", "/api/file?path=shared.txt", None).await;
+    assert_eq!(status, 200, "{final_file}");
+    assert_eq!(final_file["content"].as_str(), saved[0].input.as_deref(), "the file contains the one successful approved proposal, not the losing edit");
+    assert_ne!(final_file["content"].as_str(), stale[0].input.as_deref());
+    assert_ne!(final_file["hash"], original["hash"]);
+    assert!(
+        provider.tool_outcomes().iter().any(|result| result.contains("File changed on disk. Reload it before saving.")),
+        "the real engine receives the stale-hash broker failure"
+    );
+    assert_eq!(provider.requests().len(), 6, "each Bot read, proposed exactly one write, then consumed its actual outcome");
+    for request in provider.requests() {
+        assert_active_claims(&request.persisted, 2);
+    }
+    assert!(f.queue().await.is_empty());
     provider.assert_drained();
     f.close().await;
     provider_server.abort();

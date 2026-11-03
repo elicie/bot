@@ -485,7 +485,25 @@ pub(super) async fn nested_report_start_failure(f: &Fixture) {
     let (b, c) = (bot(f, "B").await, bot(f, "C").await);
     let root = root(f, &b).await;
     let leaf = child(f, &scheduler, &root, &c).await;
-    answer(f, &scheduler, &leaf.recipient_conversation_id, "C's answer cannot be summarized by B.").await;
+    // Issue #20 fills every eligible Bot slot in one tick. Keep A occupied independently while B's
+    // summary start fails, so A's newly queued error report is not also attempted while disconnected.
+    dispatch(
+        f,
+        &scheduler,
+        &leaf.recipient_conversation_id,
+        vec![use_tool("send_message", json!({"toBotId": b, "text": "This extra message will be denied."}))],
+    )
+    .await;
+    f.pending(&leaf.recipient_conversation_id).await;
+    let blocker = f.conversation(&f.bot_id()).await;
+    let requests = f.provider.inference_len();
+    f.provider.plan(vec![Reply::Hold]);
+    f.runtime.start(&blocker, "Keep A's independent slot occupied during B's failed summary start.").await.unwrap();
+    f.wait(&blocker, "A's independent provider request", |conversation| conversation.run.status == RunStatus::Running && f.provider.inference_len() > requests)
+        .await;
+    f.provider.plan(vec![text("C's answer cannot be summarized by B.")]);
+    f.decide(&leaf.recipient_conversation_id, "reject_once").await;
+    f.completed(&leaf.recipient_conversation_id).await;
     f.runtime.set_origin(String::new());
     scheduler.tick().await.unwrap();
     f.runtime.set_origin(f.origin.clone());
@@ -495,6 +513,9 @@ pub(super) async fn nested_report_start_failure(f: &Fixture) {
     assert_eq!(delivery(f, &leaf).report.unwrap().status, ReportStatus::Error);
     assert_eq!(f.get(&root.recipient_conversation_id).messages.len(), 2, "a failed start adds no hidden input or stale answer");
     assert!(!exchange_texts(f, &root).iter().any(|text| text.contains("DELEGATED_ONLY_NOT_FINAL")));
+    assert_eq!(delivery(f, &root).report.unwrap().status, ReportStatus::Queued, "A's independent slot preserves its error report for reconnect");
+    f.provider.release.notify_one();
+    f.completed(&blocker).await;
     let done = answer(f, &scheduler, &root.source_conversation_id, "B could not finish the nested review.").await;
     assert!(done.messages[2].text.contains(r#""status":"error""#));
     assert!(done.messages[2].text.contains("Runtime is not connected"));

@@ -863,9 +863,18 @@ impl crate::State {
     /// Fail only the oldest SAME-chain queued reports, matching Runtime's report claim. If this
     /// recipient was waiting, fail its handling run too: the initial answer is not a final summary.
     pub fn fail_bot_reports(&mut self, conversation_id: &str, error: &str, now: DateTime<Utc>) -> HttpResult<()> {
+        self.fail_bot_reports_for(conversation_id, None, error, now)
+    }
+
+    /// Fail the exact durable report anchor selected by dispatch, even after wall-clock reversal.
+    pub fn fail_bot_reports_for(&mut self, conversation_id: &str, anchor: Option<&str>, error: &str, now: DateTime<Utc>) -> HttpResult<()> {
         self.assert_writable()?;
         let queued = queued_reports(&self.disk.bot_deliveries, conversation_id);
-        let Some(first) = queued.first() else { return Ok(()) };
+        let first = match anchor {
+            Some(id) => queued.iter().find(|delivery| delivery.id == id),
+            None => queued.first(),
+        };
+        let Some(first) = first else { return Ok(()) };
         let ids: HashSet<String> = queued.iter().filter(|delivery| delivery.chain_id == first.chain_id).map(|delivery| delivery.id.clone()).collect();
         let waiting = inbound(&self.disk.bot_deliveries, conversation_id).is_some_and(|delivery| delivery.status == DeliveryStatus::WaitingChildren);
         let error = js_slice(&self.redact(error), 1000).to_owned();

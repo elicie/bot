@@ -116,7 +116,12 @@ impl Runtime {
                         let Ok(conversation) = state.conversation(&work.conversation_id) else { return false };
                         // A later user round depends on finishing this conversation's prior round;
                         // it must not reserve the speaker ahead of those unfinished member turns.
-                        if matches!(work.kind, WorkKind::User { .. }) && conversation.group_round.is_some() {
+                        if matches!(work.kind, WorkKind::User { .. })
+                            && conversation.group_id.is_some()
+                            && (conversation.group_round.is_some()
+                                || conversation.run.status.is_active()
+                                || self.runs().iter().any(|run| run.conversation_id == conversation.id))
+                        {
                             return false;
                         }
                         if !heads.insert(work.bot_id.as_str()) {
@@ -206,7 +211,7 @@ impl Runtime {
                     WorkKind::Routine { run_id } => state.fail_routine_run(run_id, error, now)?,
                     WorkKind::Delivery { delivery_id } => state.fail_bot_delivery(delivery_id, error, now)?,
                     WorkKind::Group { .. } => state.fail_group_round(&work.conversation_id, error)?,
-                    WorkKind::Report { .. } => state.fail_bot_reports(&work.conversation_id, error, now)?,
+                    WorkKind::Report { delivery_id } => state.fail_bot_reports_for(&work.conversation_id, Some(delivery_id), error, now)?,
                     WorkKind::User { text, attachments } => {
                         use grok_bot_model::{Message, Role, RunState, RunStatus, iso, new_id};
                         let timestamp = iso(now);

@@ -97,6 +97,8 @@ struct Approval {
 #[derive(Default)]
 struct RunFlags {
     stopped: bool,
+    /// Server shutdown interrupts this turn without discarding its conversation's accepted work.
+    interrupted: bool,
     /// A chain-wide deadline stops the engine like Stop, but is recorded as a failure.
     stop_error: Option<String>,
     /// Chains stopped before engine cancellation; finish settles their remaining active receipts.
@@ -974,9 +976,9 @@ impl Runtime {
             });
             let _ = tokio::time::timeout(ENGINE_SETTLE_LIMIT, close).await;
         }
-        let (stopped, stop_error, stop_chains) = {
+        let (stopped, interrupted, stop_error, stop_chains) = {
             let flags = run.flags();
-            (flags.stopped, flags.stop_error.clone(), flags.stop_chains.clone())
+            (flags.stopped, flags.interrupted, flags.stop_error.clone(), flags.stop_chains.clone())
         };
         let Outcome { error, abandoned, .. } = outcome;
         let error = if stopped { stop_error } else { error };
@@ -998,13 +1000,15 @@ impl Runtime {
                 conversation.run.permission = None;
                 conversation.run.status = if error.is_some() {
                     RunStatus::Error
+                } else if interrupted {
+                    RunStatus::Interrupted
                 } else if stopped {
                     RunStatus::Cancelled
                 } else {
                     RunStatus::Completed
                 };
                 conversation.run.finished_at = Some(now);
-                turns::settle(conversation, run.speaker.as_deref(), stopped || error.is_some());
+                turns::settle(conversation, run.speaker.as_deref(), (stopped && !interrupted) || error.is_some());
                 if let Some(error) = error.as_ref() {
                     conversation.run.error = Some(error.clone());
                 }
@@ -1433,6 +1437,12 @@ impl Runtime {
         self.mcp_app_requests.lock().unwrap_or_else(|p| p.into_inner()).clear();
         let runs: Vec<Arc<Run>> = self.runs().clone();
         for run in &runs {
+            {
+                let mut flags = run.flags();
+                if !flags.stopped {
+                    flags.interrupted = true;
+                }
+            }
             self.request_stop(run);
         }
         for run in &runs {

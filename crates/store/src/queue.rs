@@ -161,8 +161,8 @@ fn ready_pointers(disk: &DiskState, existing: &[QueuedWork]) -> Vec<QueuedWork> 
     }
     for conversation in &disk.conversations {
         // While a member is active, the next member is not ready yet and must not reserve a bot.
-        // A failed/cancelled round likewise cannot be resurrected by a stale round object.
-        if !matches!(conversation.run.status, RunStatus::Idle | RunStatus::Completed) {
+        // Stop/failure clears a round, but a server restart keeps accepted future members.
+        if !matches!(conversation.run.status, RunStatus::Idle | RunStatus::Completed | RunStatus::Interrupted) {
             continue;
         }
         if let Some(round) = conversation.group_round.as_ref()

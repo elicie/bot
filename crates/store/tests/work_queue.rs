@@ -283,6 +283,17 @@ async fn group_continuation_is_not_queued_until_the_current_speaker_finishes() {
         })
         .await
         .unwrap();
+    let restarted = f.reopen().await.unwrap();
+    restarted.read(|state| {
+        let recovered = state.conversation(&conversation.id).unwrap();
+        assert_eq!(recovered.run.status, RunStatus::Interrupted);
+        assert_eq!(recovered.group_round.as_ref().unwrap().pending_bot_ids.as_slice(), std::slice::from_ref(&beta.id));
+        assert!(
+            state.disk().work_queue.iter().any(|work| work.bot_id == beta.id && matches!(work.kind, WorkKind::Group { .. })),
+            "only unstarted group members recover; the interrupted current speaker never replays"
+        );
+    });
+    drop(restarted);
     let next = f.store.mutate(|state| state.enqueue_user_turn(&conversation.id, "@Beta next round", Vec::new())).await.unwrap();
     assert_eq!(f.store.read(|state| state.disk().work_queue.clone()), vec![next.clone()]);
     f.finish(&conversation.id).await;
@@ -368,6 +379,58 @@ async fn waiting_children_releases_the_bot_and_report_pointer_is_local_and_stabl
     assert!(f.store.mutate(|state| state.cancel_conversation_work(&first.recipient_conversation_id)).await.unwrap());
     assert_eq!(f.conversation(&child.recipient_conversation_id).run.status, RunStatus::Completed, "local cancellation does not stop a different conversation");
     assert!(f.store.read(|state| !state.disk().work_queue.iter().any(|work| work.id == report.id)));
+}
+
+#[tokio::test]
+async fn report_start_failure_uses_accepted_anchor_not_a_later_reversed_clock() {
+    let f = configured().await;
+    let beta = f.store.mutate(|state| state.add_bot(bot_input("Report peer"))).await.unwrap();
+    f.set_time("2026-01-01T03:00:00.000Z");
+    let first = delivery(&f, &f.bot, &beta.id).await;
+    f.finish(&first.source_conversation_id).await;
+    start_delivery(&f, &first).await;
+    f.finish(&first.recipient_conversation_id).await;
+    let anchor = f.store.read(|state| {
+        state.disk().work_queue.iter().find(|work| matches!(&work.kind, WorkKind::Report { delivery_id } if delivery_id == &first.id)).unwrap().clone()
+    });
+    f.set_time("2026-01-01T02:00:00.000Z");
+    let second = f
+        .store
+        .mutate(|state| {
+            let (run, message) = start_source(state, &first.source_conversation_id)?;
+            state.queue_bot_message(
+                &first.source_conversation_id,
+                &run,
+                &message,
+                BotMessageInput { to_bot_id: beta.id.clone(), text: "A second independent chain".into(), request_id: None },
+            )
+        })
+        .await
+        .unwrap();
+    f.finish(&first.source_conversation_id).await;
+    start_delivery(&f, &second).await;
+    f.finish(&second.recipient_conversation_id).await;
+    assert_eq!(
+        f.store.read(|state| grok_bot_store::bot_messages::queued_reports(&state.disk().bot_deliveries, &first.source_conversation_id)[0].id.clone()),
+        second.id
+    );
+    assert!(f.store.read(|state| state.disk().work_queue.contains(&anchor)), "accepted report anchor is stable despite the backwards clock");
+    f.store
+        .mutate(|state| {
+            state.fail_bot_reports_for(&first.source_conversation_id, Some(&first.id), "The selected report could not start", state.now())?;
+            state.remove_queued_work(&anchor.id);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    f.store.read(|state| {
+        let one = state.disk().bot_deliveries.iter().find(|delivery| delivery.id == first.id).unwrap();
+        let two = state.disk().bot_deliveries.iter().find(|delivery| delivery.id == second.id).unwrap();
+        assert_eq!(one.report.as_ref().unwrap().status, ReportStatus::Error);
+        assert_eq!(two.report.as_ref().unwrap().status, ReportStatus::Queued, "a different chain's report must not inherit the failure");
+        assert!(state.disk().work_queue.iter().any(|work| matches!(&work.kind, WorkKind::Report { delivery_id } if delivery_id == &second.id)));
+    });
+    f.reopen().await.expect("selected-anchor failure receipts and remaining queue survive restart");
 }
 
 #[tokio::test]

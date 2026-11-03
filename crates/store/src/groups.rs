@@ -107,14 +107,15 @@ pub(crate) fn schema_valid(disk: &DiskState) -> bool {
 }
 
 /// Load-time repair: drop members whose bot no longer exists (a bot deleted by an older build or
-/// another feature keeps the group loadable) and rounds a crashed run cannot continue.
+/// another feature keeps the group loadable). A crashed current turn is not replayed, but its
+/// accepted pending members remain recoverable; only explicit Stop/failure discards the round.
 pub(crate) fn normalize(disk: &mut DiskState) {
     let bots: HashSet<String> = disk.bots.iter().map(|bot| bot.id.clone()).collect();
     for group in &mut disk.groups {
         group.member_bot_ids.retain(|id| bots.contains(id));
     }
     for conversation in &mut disk.conversations {
-        if conversation.run.status.is_active() || matches!(conversation.run.status, RunStatus::Error | RunStatus::Cancelled | RunStatus::Interrupted) {
+        if matches!(conversation.run.status, RunStatus::Error | RunStatus::Cancelled) {
             conversation.group_round = None;
         }
         if let Some(round) = conversation.group_round.as_mut() {
