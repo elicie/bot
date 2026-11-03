@@ -33,6 +33,29 @@ impl AppPaths {
         if source.starts_with(&self.data) || self.data.starts_with(&source) {
             bail!("Desktop and source web data roots must be separate, non-overlapping directories");
         }
+        // macOS volumes may resolve case/Unicode aliases to the same real directory without a
+        // symlink. Compare filesystem identities too; canonicalizing strings is not a case fold.
+        use std::os::unix::fs::MetadataExt;
+        let identity = |path: &Path| -> std::io::Result<Option<(u64, u64)>> {
+            match path.metadata() {
+                Ok(meta) => Ok(Some((meta.dev(), meta.ino()))),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error),
+            }
+        };
+        let source_id = identity(&source)?.context("Source web data directory disappeared during startup")?;
+        for ancestor in self.data.ancestors() {
+            if identity(ancestor)? == Some(source_id) {
+                bail!("Desktop and source web data roots must be separate, non-overlapping directories");
+            }
+        }
+        if let Some(data_id) = identity(&self.data)? {
+            for ancestor in source.ancestors() {
+                if identity(ancestor)? == Some(data_id) {
+                    bail!("Desktop and source web data roots must be separate, non-overlapping directories");
+                }
+            }
+        }
         Ok(source)
     }
 }
@@ -66,6 +89,28 @@ mod tests {
         let alias = root.join("alias");
         std::os::unix::fs::symlink(&web, &alias).unwrap();
         assert!(AppPaths::resolve(Some(&web)).unwrap().import_source(&alias).is_err());
+        for data in [&alias, &alias.join("new-desktop")] {
+            assert!(AppPaths::resolve(Some(data)).unwrap().import_source(&web).is_err());
+        }
+        assert!(AppPaths::resolve(Some(&alias)).unwrap().import_source(&web.join("backup")).is_err());
         assert!(!app.data.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn case_insensitive_volume_aliases_are_rejected_before_writes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let web = root.join("OriginalWeb");
+        std::fs::create_dir(&web).unwrap();
+        let alias = root.join("ORIGINALWEB");
+        // Case-sensitive APFS is also supported; this regression applies when aliases exist.
+        if !alias.exists() {
+            return;
+        }
+        for data in [&alias, &alias.join("desktop")] {
+            assert!(AppPaths::resolve(Some(data)).unwrap().import_source(&web).is_err());
+        }
+        assert_eq!(std::fs::read_dir(&web).unwrap().count(), 0);
     }
 }

@@ -38,4 +38,6 @@
 
 추가 [수명 주기 기록](<lifecycle-verification.json>)은 실제 창의 정상 종료 뒤 loopback 리스너 종료, 저장된 Bot ID 유지와 새 토큰 발급/이전 토큰 거절, 기존 시스템 Chrome의 보호된 시작·CDP PNG를 인증 blob으로 표시·중지를 확인했습니다. [관리형 Chrome 실제 창](<after-managed-chrome.png>)도 별도로 캡처했습니다.
 
+[가져오기 사전 검사](<import-preflight-verification.json>)는 실제 CLI에서 같은 원본·중첩 경로·원본/목적지 alias를 startup 전에 거절하고 원본 파일 목록과 권한·엔진/프로필/잠금 파일 부재를 확인했습니다. 기존 디렉터리의 device/inode도 비교해 macOS의 대소문자·Unicode alias가 문자열 비교를 우회하지 않게 합니다. macOS 조건부 회귀 테스트는 CI에서 실행하며 Linux 결과를 macOS 실제 실행으로 부르지 않습니다.
+
 macOS 실제 창 검증, 배포 서명된 DMG/AppImage 검증은 아직 없으며 Linux 캡처로 대체하지 않습니다. 네이티브 CI 결과와 정확한 최종 리뷰 head는 PR에 따로 기록합니다. 이 비교가 있다는 이유만으로 P5의 모든 배포 완료 조건이 충족된 것은 아닙니다.

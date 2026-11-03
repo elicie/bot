@@ -1,0 +1,14 @@
+{
+  "runtime": "actual Linux native binary CLI, before any UI/runtime startup",
+  "checks": [
+    {"case": "same-root", "exitRejected": true, "sourceEntriesAndModeUnchanged": true},
+    {"case": "nested-new-root", "exitRejected": true, "sourceEntriesAndModeUnchanged": true},
+    {"case": "source-inside-app", "exitRejected": true, "sourceEntriesAndModeUnchanged": true},
+    {"case": "source-alias", "exitRejected": true, "sourceEntriesAndModeUnchanged": true},
+    {"case": "destination-alias", "exitRejected": true, "sourceEntriesAndModeUnchanged": true},
+    {"case": "nested-destination-alias", "exitRejected": true, "sourceEntriesAndModeUnchanged": true},
+    {"case": "source-inside-aliased-app", "exitRejected": true, "sourceEntriesAndModeUnchanged": true}
+  ],
+  "additionalAssertions": ["no source engine/", "no source webview/", "no source desktop.lock"],
+  "platformLimit": "Linux CLI and unit runs; macOS case-insensitive alias regression is included in native CI, not claimed as a local macOS execution"
+}
