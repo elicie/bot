@@ -7,7 +7,7 @@ publish.workspace = true
 
 [features]
 default = []
-native = ["dep:tauri", "dep:tauri-build"]
+native = ["dep:tauri", "dep:tauri-build", "dep:grok-bot-core", "dep:grok-bot-engine"]
 
 [[bin]]
 name = "grok-bot-desktop"
@@ -19,8 +19,9 @@ anyhow.workspace = true
 dirs = "6"
 url = "2"
 fs2 = "0.4"
-grok-bot-core.workspace = true
-grok-bot-engine.workspace = true
+# Only the native composition root needs the engine/core; import/path tests stay standalone.
+grok-bot-core = { workspace = true, optional = true }
+grok-bot-engine = { workspace = true, optional = true }
 grok-bot-files.workspace = true
 grok-bot-model.workspace = true
 grok-bot-store.workspace = true

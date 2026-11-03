@@ -491,7 +491,12 @@ mod tests {
                     fs::write(f.root.join("outside"), b"not a unique file").unwrap();
                     fs::hard_link(f.root.join("outside"), &asset).unwrap();
                 }
-                "fifo" => rustix::fs::mknodat(rustix::fs::CWD, &asset, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0).unwrap(),
+                "fifo" => {
+                    let name = std::ffi::CString::new(asset.as_os_str().as_bytes()).unwrap();
+                    // SAFETY: a valid, NUL-terminated temporary fixture path; POSIX mkfifo is
+                    // available on both supported OSes (rustix mknodat is not exposed on macOS).
+                    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+                }
                 _ => File::create(&asset).unwrap().set_len(MAX_ASSET_FILE_BYTES + 1).unwrap(),
             }
             assert!(import_web_data(&f.source, &f.destination).await.is_err(), "{kind}");
