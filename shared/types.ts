@@ -315,6 +315,8 @@ export interface AppState {
   mcpServers?: PublicMcpServer[];
   /** The main bot ("메인 Bot"). Absent from older servers: the first bot is the main bot. */
   mainBotId?: string;
+  /** Opt-in server-side link previews; optional for snapshots from older server revisions. */
+  linkPreviewsEnabled?: boolean;
 }
 export type PermissionCategory = 'file_write' | 'bot_message' | 'bot_create' | 'skill_save' | 'memory_save' | 'mcp_tool';
 export type PermissionAction = 'ask' | 'allow';
