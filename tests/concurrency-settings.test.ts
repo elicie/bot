@@ -45,6 +45,7 @@ function button(html: string, label: string) {
 }
 const renderSettings = (data: AppState) => renderToStaticMarkup(createElement(Settings, {
   data, tab: 'models', busy: false, error: null, onTab() {}, onClose() {}, onFiles() {}, onSave: async () => true,
+  linkPreviewsEnabled: true, linkPreviewsSaving: false, onLinkPreviewsChange: async () => {},
 }));
 
 test('legacy settings default to three and concurrency-only edits participate in dirty/save state', () => {
