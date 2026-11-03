@@ -344,7 +344,9 @@ fn suppress_failed_children(deliveries: &mut [BotDelivery], conversations: &mut 
         deliveries.iter().filter(|delivery| delivery.chain_termination.is_some()).map(|delivery| delivery.chain_id.clone()).collect();
     let failed_conversations: HashSet<&str> = conversations
         .iter()
-        .filter(|conversation| matches!(conversation.run.status, RunStatus::Cancelled | RunStatus::Error | RunStatus::Interrupted))
+        // Stop and restart are conversation-local: already accepted descendants retain their
+        // own queue entries and must not be cancelled as a side effect of this parent's state.
+        .filter(|conversation| conversation.run.status == RunStatus::Error)
         .map(|conversation| conversation.id.as_str())
         .collect();
     // Streamed-token commits normally have no failed recipient: seed in O(C + D), not O(C * D).
@@ -778,7 +780,8 @@ impl crate::State {
         if ids.is_empty() {
             return Ok(ids);
         }
-        let waiting = inbound(&self.disk.bot_deliveries, conversation_id).is_some_and(|delivery| delivery.status == DeliveryStatus::WaitingChildren);
+        let waiting = inbound(&self.disk.bot_deliveries, conversation_id).is_some_and(|delivery| delivery.status == DeliveryStatus::WaitingChildren)
+            && !self.conversation(conversation_id)?.run.status.is_active();
         let selected: HashSet<&str> = ids.iter().map(String::as_str).collect();
         let finished_at = iso(self.now());
         for delivery in self.disk_mut().bot_deliveries.iter_mut().filter(|delivery| selected.contains(delivery.id.as_str())) {

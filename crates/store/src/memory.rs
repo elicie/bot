@@ -251,7 +251,7 @@ impl State {
         if within_run {
             self.assert_writable()?;
         } else {
-            self.assert_idle()?;
+            self.assert_bot_idle(bot_id)?;
         }
         let index = self.bot_index(bot_id)?;
         let mut memories = self.disk.bots[index].memories.clone().unwrap_or_default();
@@ -289,7 +289,7 @@ impl State {
         if within_run {
             self.assert_writable()?;
         } else {
-            self.assert_idle()?;
+            self.assert_bot_idle(bot_id)?;
         }
         let index = self.bot_index(bot_id)?;
         let memory =

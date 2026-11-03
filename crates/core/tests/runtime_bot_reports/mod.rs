@@ -1,6 +1,6 @@
 //! Runtime scenarios for automatic follow-up ("report") turns of bot deliveries, included by
 //! `runtime.rs` (the engine environment is process-global, so they run in that binary's
-//! sequential scenario list). The dispatcher is driven by hand: `tick()` starts one queued item.
+//! sequential scenario list). The dispatcher is driven by hand: `tick()` fills eligible Bot slots.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -241,8 +241,20 @@ pub(super) async fn bot_report_cancellation(f: &Fixture) {
     {
         let source = f.conversation(&sender).await;
         let first = send_from_user(f, &source, &recipient, "Selected A", true).await;
+        // Issue #20 starts all eligible Bot heads, not a globally selected single item. Pause the
+        // recipient at an approval before the second send, then keep the source live while reports queue.
+        f.provider.plan(vec![use_tool("send_message", json!({"toBotId": sender, "text": "This extra recipient message will be denied."}))]);
+        dispatcher.tick().await.unwrap();
+        f.pending(&first.recipient_conversation_id).await;
         let later = send_from_user(f, &source, &recipient, "Later B", true).await;
-        deliver(f, &dispatcher, &first, text("ANSWER_A_NOT_TO_BE_REPORTED")).await;
+        let requests = f.provider.inference_len();
+        f.provider.plan(vec![Reply::Hold]);
+        f.runtime.start(&source, "Keep my own turn separate while the answers arrive.").await.unwrap();
+        f.wait(&source, "the held source turn", |conversation| conversation.run.status == RunStatus::Running && f.provider.inference_len() > requests).await;
+        f.provider.plan(vec![text("ANSWER_A_NOT_TO_BE_REPORTED")]);
+        f.decide(&first.recipient_conversation_id, "reject_once").await;
+        f.completed(&first.recipient_conversation_id).await;
+        assert_eq!(delivery(f, &first.id).report.unwrap().status, ReportStatus::Queued);
         let selected = vec![first.id.clone()];
         deliver(f, &dispatcher, &later, text("ANSWER_B_MUST_STILL_BE_REPORTED")).await;
         let before = f.get(&source);
@@ -251,8 +263,13 @@ pub(super) async fn bot_report_cancellation(f: &Fixture) {
         assert_eq!(f.get(&source), before, "cancelling A creates no run or hidden message");
         assert_eq!(delivery(f, &first.id).report.unwrap().status, ReportStatus::Cancelled);
         assert_eq!(delivery(f, &later.id).report.unwrap().status, ReportStatus::Queued);
+        assert_eq!(f.get(&source).run.status, RunStatus::Running, "cancelling selected reports is not Stop for the live user turn");
+        f.provider.release.notify_one();
+        f.completed(&source).await;
         f.provider.plan(vec![text("Relayed B only.")]);
         dispatcher.tick().await.unwrap();
+        f.wait(&source, "B's separate report turn", |conversation| conversation.messages.len() > before.messages.len() && conversation.run.id != before.run.id)
+            .await;
         let completed = f.completed(&source).await;
         let input = completed.messages.iter().find(|m| m.report_delivery_ids.is_some()).unwrap();
         assert_eq!(input.report_delivery_ids.as_deref(), Some(std::slice::from_ref(&later.id)));
@@ -347,22 +364,64 @@ pub(super) async fn bot_report_failures(f: &Fixture) {
     assert!(prompt.contains("RECIPIENT_FAILURE_CANARY") && prompt.contains(r#""status":"error""#), "{prompt}");
     assert_eq!(delivery(f, &failed.id).report.unwrap().status, ReportStatus::Completed);
 
-    // Stop cancels the report turn; it is not retried.
+    // Stop cancels the selected report turn and its queued user work; it is not retried.
+    // Revised issue #20 scope: even a descendant created by that report stays live in its own Bot.
     let source = f.conversation(&sender).await;
     let stopped = send_from_user(f, &source, &recipient, "Answer, then I stop the follow-up.", true).await;
     deliver(f, &dispatcher, &stopped, text("An answer nobody relays.")).await;
+    let requests = f.provider.inference_len();
+    f.provider.plan(vec![use_tool("send_message", json!({"toBotId": recipient, "text": "This descendant must survive the sender's Stop."})), Reply::Hold]);
+    dispatcher.tick().await.unwrap();
+    f.decide(&source, "allow_once").await;
+    f.wait(&source, "a running report turn after delegation", |c| {
+        c.messages.len() == 4 && c.run.status == RunStatus::Running && f.provider.inference_len() >= requests + 2
+    })
+    .await;
+    let descendant = deliveries(f).last().unwrap().clone();
+    assert_eq!(descendant.chain_id, stopped.chain_id);
+    assert_eq!(descendant.hop, stopped.hop + 1);
+    let requests = f.provider.inference_len();
     f.provider.plan(vec![Reply::Hold]);
     dispatcher.tick().await.unwrap();
-    f.wait(&source, "a running report turn", |c| c.messages.len() == 4 && c.run.status == RunStatus::Running).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let descendant_run = f
+        .wait(&descendant.recipient_conversation_id, "the other Bot's live descendant", |c| {
+            c.run.status == RunStatus::Running && f.provider.inference_len() > requests
+        })
+        .await;
+    let descendant_receipt = delivery(f, &descendant.id);
+    f.runtime.start(&source, "Queued user work must also stop with this conversation.").await.unwrap();
+    assert!(f.public().work_queue.iter().any(|work| work.conversation_id == source));
     f.runtime.cancel(&source).await.unwrap();
-    f.provider.release.notify_waiters();
     assert_eq!(f.get(&source).run.status, RunStatus::Cancelled);
     assert_eq!(delivery(f, &stopped.id).report.unwrap().status, ReportStatus::Cancelled);
+    assert!(!f.public().work_queue.iter().any(|work| work.conversation_id == source));
+    assert_eq!(f.get(&descendant.recipient_conversation_id), descendant_run, "Stop cannot cancel another Bot's live descendant");
+    assert_eq!(delivery(f, &descendant.id), descendant_receipt);
+    assert!(delivery(f, &stopped.id).chain_termination.is_none(), "Stop is local, not a whole-chain latch");
+    // The independent descendant needs its own Stop; remove any report arriving afterward locally.
+    f.runtime.cancel(&descendant.recipient_conversation_id).await.unwrap();
+    assert_eq!(f.get(&descendant.recipient_conversation_id).run.status, RunStatus::Cancelled);
+    f.provider.release.notify_waiters();
+    f.runtime.cancel(&source).await.unwrap();
     let settled = shape(f, &source);
     dispatcher.tick().await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(shape(f, &source), settled, "a stopped report turn does not run again");
+    assert_eq!(shape(f, &source), settled, "a stopped report turn or queued user request does not run again");
+
+    // Stop also removes a report that is already queued in the selected conversation. Unlike a
+    // future answer from an independent Bot, this work is within the explicit local Stop scope.
+    let source = f.conversation(&sender).await;
+    let queued = send_from_user(f, &source, &recipient, "Stop only my queued report.", true).await;
+    deliver(f, &dispatcher, &queued, text("This queued report must not run.")).await;
+    let before = f.get(&source);
+    let requests = f.provider.inference_len();
+    f.runtime.cancel(&source).await.unwrap();
+    assert_eq!(delivery(f, &queued.id).report.unwrap().status, ReportStatus::Cancelled);
+    assert_eq!(f.get(&source), before, "queued-report Stop adds no hidden follow-up input");
+    assert_eq!(f.runtime.start_report(&source).await.unwrap_err().status, 409, "no canonical report work remains to retry");
+    dispatcher.tick().await.unwrap();
+    assert_eq!(f.get(&source), before);
+    assert_eq!(f.provider.inference_len(), requests, "the stopped queued report never reaches inference");
 
     // A report turn that cannot start ends its reports with the error, once.
     let source = f.conversation(&sender).await;
@@ -377,21 +436,31 @@ pub(super) async fn bot_report_failures(f: &Fixture) {
     dispatcher.tick().await.unwrap();
     assert_eq!(f.get(&source).messages.len(), 2);
 
-    // A user turn that started first runs on its own; the report follows as its own turn.
+    // A user turn that truly starts before the answer arrives runs on its own; the report follows
+    // as its own turn. Issue #20 FIFO does not let a user bypass an already-queued report, and Stop
+    // would now cancel that local queued report, so complete the user turn instead of stopping it.
     let source = f.conversation(&sender).await;
     let later = send_from_user(f, &source, &recipient, "Answer after my next message.", true).await;
-    deliver(f, &dispatcher, &later, text("Late answer.")).await;
+    f.provider.plan(vec![use_tool("send_message", json!({"toBotId": sender, "text": "This extra message will be denied."}))]);
+    dispatcher.tick().await.unwrap();
+    f.pending(&later.recipient_conversation_id).await;
+    let requests = f.provider.inference_len();
     f.provider.plan(vec![Reply::Hold]);
     f.runtime.start(&source, "My own next question.").await.unwrap();
-    f.wait(&source, "the user turn", |c| c.run.status == RunStatus::Running).await;
+    f.wait(&source, "the user turn", |c| c.run.status == RunStatus::Running && f.provider.inference_len() > requests).await;
+    f.provider.plan(vec![text("Late answer.")]);
+    f.decide(&later.recipient_conversation_id, "reject_once").await;
+    f.completed(&later.recipient_conversation_id).await;
     dispatcher.tick().await.unwrap();
     assert_eq!(f.get(&source).messages.len(), 4, "the report waits for the user turn");
-    f.runtime.cancel(&source).await.unwrap();
-    f.provider.release.notify_waiters();
+    assert_eq!(delivery(f, &later.id).report.unwrap().status, ReportStatus::Queued);
+    f.provider.release.notify_one();
+    let user = f.completed(&source).await;
     f.provider.plan(vec![text("Relayed the late answer.")]);
     dispatcher.tick().await.unwrap();
     f.wait(&source, "the report after the user turn", |c| c.messages.len() == 6).await;
     let after = f.completed(&source).await;
+    assert_ne!(after.run.id, user.run.id, "the report is a separate turn, not merged into the user run");
     assert_eq!(after.messages[2].text, "My own next question.");
     assert_eq!(after.messages[2].report_delivery_ids, None);
     assert_eq!(after.messages[4].report_delivery_ids.as_deref(), Some(&[later.id.clone()][..]));

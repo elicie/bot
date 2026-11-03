@@ -15,7 +15,14 @@ fn bot_input(name: &str) -> BotInput {
 }
 
 fn settings(base_url: &str, api_key: Option<&str>) -> SettingsInput {
-    SettingsInput { base_url: base_url.into(), model: "model".into(), workspace: String::new(), api_key: api_key.map(Into::into), clear_api_key: None }
+    SettingsInput {
+        base_url: base_url.into(),
+        model: "model".into(),
+        workspace: String::new(),
+        api_key: api_key.map(Into::into),
+        clear_api_key: None,
+        max_concurrent_runs: None,
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -185,9 +192,15 @@ async fn settings_input_matches_the_node_route_and_store_rules() {
         let store = f.store.clone();
         async move { store.mutate(|s| s.update_settings(input)).await.unwrap_err() }
     };
-    let multi =
-        error(SettingsInput { base_url: "x".repeat(2049), model: String::new(), workspace: "w".repeat(4097), api_key: Some("\r".into()), clear_api_key: None })
-            .await;
+    let multi = error(SettingsInput {
+        base_url: "x".repeat(2049),
+        model: String::new(),
+        workspace: "w".repeat(4097),
+        api_key: Some("\r".into()),
+        clear_api_key: None,
+        max_concurrent_runs: None,
+    })
+    .await;
     assert_eq!(
         multi.message,
         "baseUrl: Too big: expected string to have <=2048 characters; model: Too small: expected string to have >=1 characters; workspace: Too big: expected string to have <=4096 characters; apiKey: API key contains invalid characters."
@@ -227,7 +240,13 @@ async fn settings_input_matches_the_node_route_and_store_rules() {
     let saved = f.store.read(|s| s.settings().clone());
     assert_eq!(
         saved,
-        PrivateSettings { base_url: "https://api.example.com/v1".into(), model: "model".into(), workspace: workspace.clone(), api_key: "secret".into() }
+        PrivateSettings {
+            base_url: "https://api.example.com/v1".into(),
+            model: "model".into(),
+            workspace: workspace.clone(),
+            api_key: "secret".into(),
+            max_concurrent_runs: None
+        }
     );
     assert_eq!(f.conversation(&conversation.id).session_id, None);
     // Same origin keeps the stored key; another origin or clearApiKey drops it.
@@ -239,7 +258,13 @@ async fn settings_input_matches_the_node_route_and_store_rules() {
     let snapshot = f.store.snapshot();
     assert_eq!(
         snapshot.settings,
-        PublicSettings { base_url: "http://[::1]:8080/v1".into(), model: "model".into(), has_api_key: false, workspace: String::new() }
+        PublicSettings {
+            base_url: "http://[::1]:8080/v1".into(),
+            model: "model".into(),
+            has_api_key: false,
+            workspace: String::new(),
+            max_concurrent_runs: Some(3)
+        }
     );
     // Settings, bots, and files are locked while a run is active.
     f.start(&conversation.id).await;

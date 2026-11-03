@@ -78,6 +78,9 @@ impl Fixture {
                     workspace: workspace.to_string_lossy().into_owned(),
                     api_key: None,
                     clear_api_key: Some(true),
+                    // These legacy scheduler scenarios exercise an intentionally single-slot cap.
+                    // Cross-Bot overlap/default-three are covered by per_bot_concurrency.rs.
+                    max_concurrent_runs: Some(1),
                 })
             })
             .await
@@ -234,7 +237,7 @@ fn scheduler_regressions() {
     });
 }
 
-/// routines.test.ts: overlapping ticks, global contention, recurring phase, FIFO and tie-breaking.
+/// Single-slot configuration: overlapping ticks, capacity contention, recurring phase and FIFO.
 async fn global_serialization_and_fifo(root: &Path) {
     let f = Fixture::new(root, "fifo", false, false).await;
     let other_bot =

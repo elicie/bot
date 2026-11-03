@@ -29,6 +29,7 @@ async fn version_one_migration_retains_bots_settings_secrets_messages_and_sessio
         workspace,
         api_key: Some("legacy-private-key".into()),
         clear_api_key: None,
+        max_concurrent_runs: None,
     };
     f.store.mutate(|s| s.update_settings(settings)).await.unwrap();
     let bot = f
@@ -393,6 +394,7 @@ async fn startup_failures_create_visible_terminal_errors_without_leaked_secrets_
         workspace: f.workspace.to_string_lossy().into_owned(),
         api_key: Some(secret.into()),
         clear_api_key: None,
+        max_concurrent_runs: None,
     };
     f.store.mutate(|s| s.update_settings(settings)).await.unwrap();
     let input = RoutineInput { name: format!("Name {secret}"), prompt: format!("Prompt {secret}"), ..f.input(once("2026-01-01T00:01:00Z")) };
@@ -431,6 +433,7 @@ async fn public_routine_and_conversation_link_uuids_survive_secret_substring_red
         workspace: f.workspace.to_string_lossy().into_owned(),
         api_key: Some(key.clone()),
         clear_api_key: None,
+        max_concurrent_runs: None,
     };
     f.store.mutate(|s| s.update_settings(settings)).await.unwrap();
     let run = f.store.mutate(|s| s.run_routine(&routine.id, f.now())).await.unwrap();
