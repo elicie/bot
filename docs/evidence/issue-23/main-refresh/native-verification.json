@@ -1,0 +1,20 @@
+{
+  "implementationRevision": "ea4f8863796ccc4f67c690654cb7a43ef0ebbb04",
+  "baselineRevision": "3ff99e8ddad7f3278c519c8d600c39d3f3496b81",
+  "sourceStateSha256": "8973db29196e75c67f2d02e6818175f4ad5e6c1ad09fe1117c8be82f517208f6",
+  "runtime": "real Tauri WebKitGTK via tauri-driver/WebKitWebDriver",
+  "viewport": {
+    "width": 1040,
+    "height": 760
+  },
+  "theme": "dark",
+  "checks": [
+    "current-main saved answer imports into actual Tauri with decoded authenticated blob thumbnail",
+    "turning previews off removes cards and revokes the actual consumer blob",
+    "actual thumbnail consumer fetch includes the per-run API token, not a raw element API request",
+    "preview card click hands only its URL to original-environment OS opener; native popup stays denied",
+    "turning off while thumbnail is pending aborts its consumer signal and removes cards",
+    "opt-out persists through native reload and does not refetch previews",
+    "original stopped main web state remains byte-for-byte unchanged"
+  ]
+}
