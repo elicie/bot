@@ -4,7 +4,7 @@ import { KeyRound, Plug, Plus, Search, ShieldAlert, Terminal, Trash2, X } from '
 import type { AppState, Bot } from '../shared/types';
 import type { McpConfigDocument, PublicMcpServer, PublicSecret, SecretInput, VaultAccess } from '../shared/vault';
 import { errorText, request } from './api';
-import { type Action, runningConversation } from './state';
+import { type Action, isBotRunning, runningConversation } from './state';
 import { ErrorNotice, IconButton, Modal } from './ui';
 import { McpServerForm } from './McpServerForm';
 import './vault.css';
@@ -36,10 +36,12 @@ export function useVaultAccess() {
 
 const scopeLabel = (data: AppState, secret: PublicSecret) =>
   secret.botId ? data.bots.find((bot) => bot.id === secret.botId)?.name ?? '삭제된 Bot' : '모든 Bot';
+export const vaultScopeRunning = (data: AppState, botId?: string) =>
+  botId ? isBotRunning(data, botId) : !!runningConversation(data);
 
 /** "새 시크릿 추가" / replace form. `replace` set: only the value changes. */
-function SecretForm({ data, botId, replace, onClose, onSaved }: {
-  data: AppState; botId?: string; replace?: PublicSecret; onClose: () => void; onSaved: (state: AppState, message: string) => void;
+function SecretForm({ data, botId, replace, busy = false, onClose, onSaved }: {
+  data: AppState; botId?: string; replace?: PublicSecret; busy?: boolean; onClose: () => void; onSaved: (state: AppState, message: string) => void;
 }) {
   const [name, setName] = useState(replace?.name ?? '');
   const [value, setValue] = useState('');
@@ -50,10 +52,13 @@ function SecretForm({ data, botId, replace, onClose, onSaved }: {
   const trimmedName = name.trim();
   const nameProblem = !replace && trimmedName && !SECRET_NAME.test(trimmedName) ? '문자로 시작하는 대문자 환경 변수 이름(A-Z, 0-9, _)을 사용해 주세요' : null;
   const valueProblem = value && value.trim().length < MIN_SECRET ? `시크릿 값은 ${MIN_SECRET}자 이상이어야 해요.` : null;
+  const running = vaultScopeRunning(data, scope);
+  const blocked = pending || busy || running;
   const save = async (event: FormEvent) => {
     event.preventDefault();
     // React propagates portal events through the component tree, which includes the settings form.
     event.stopPropagation();
+    if (blocked || !value.trim() || valueProblem || (!replace && (!trimmedName || nameProblem))) return;
     setPending(true);
     setError(null);
     try {
@@ -93,11 +98,12 @@ function SecretForm({ data, botId, replace, onClose, onSaved }: {
           </select>
         </label>}
         {!replace && botId && <p className="vault-help">이 Bot에만 쓰이는 시크릿이에요. 같은 이름의 모든 Bot용 시크릿보다 우선해요.</p>}
+        {running && <p className="vault-help" role="status">{scope ? '이 Bot의 작업이 끝나면 시크릿을 저장할 수 있어요.' : '모든 Bot의 작업이 끝나면 모든 Bot용 시크릿을 저장할 수 있어요.'} 입력은 유지돼요.</p>}
         {error && <ErrorNotice>{error}</ErrorNotice>}
       </div>
       <footer className="modal-footer">
         <button type="button" className="small-button" onClick={close} disabled={pending}>취소</button>
-        <button type="submit" className="primary-button" disabled={pending || !value.trim() || !!valueProblem || (!replace && (!trimmedName || !!nameProblem))}>{pending ? '저장 중…' : '시크릿 저장'}</button>
+        <button type="submit" className="primary-button" disabled={blocked || !value.trim() || !!valueProblem || (!replace && (!trimmedName || !!nameProblem))}>{pending ? '저장 중…' : '시크릿 저장'}</button>
       </footer>
     </form>
   </Modal>, document.body);
@@ -112,19 +118,20 @@ function SecretRows({ data, secrets, canEdit, onReplace, onDelete, busy }: {
       <KeyRound size={14} aria-hidden="true" />
       <span className="vault-row-copy"><code>{secret.name}</code><small>{scopeLabel(data, secret)}</small></span>
       <span className="vault-masked" aria-label="값 숨김">••••••••</span>
-      <button type="button" className="text-button" disabled={!canEdit || busy} onClick={() => onReplace(secret)} aria-label={`${secret.name} 교체`}>교체</button>
-      <IconButton label={`${secret.name} 삭제`} disabled={!canEdit || busy} onClick={() => onDelete(secret)}><Trash2 size={13} /></IconButton>
+      <button type="button" className="text-button" disabled={!canEdit || busy || vaultScopeRunning(data, secret.botId)} onClick={() => onReplace(secret)} aria-label={`${secret.name} 교체`}>교체</button>
+      <IconButton label={`${secret.name} 삭제`} disabled={!canEdit || busy || vaultScopeRunning(data, secret.botId)} onClick={() => onDelete(secret)}><Trash2 size={13} /></IconButton>
     </li>)}
   </ul>;
 }
 
 /** Shared secret list state: dialogs, deletion, feedback. */
-function useSecretActions(onState?: (state: AppState) => void) {
+function useSecretActions(data: AppState, busy = false, onState?: (state: AppState) => void) {
   const [dialog, setDialog] = useState<'add' | { replace: PublicSecret } | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const remove = async (secret: PublicSecret) => {
+    if (busy || pending || vaultScopeRunning(data, secret.botId)) return;
     if (!window.confirm(`${secret.name} 시크릿을 삭제할까요? 이 시크릿을 참조하는 MCP 서버는 다음 대화부터 시작되지 않아요.`)) return;
     setPending(true); setError(null); setStatus(null);
     try {
@@ -138,10 +145,11 @@ function useSecretActions(onState?: (state: AppState) => void) {
 }
 
 /** The "보관함" settings tab: every secret by name and scope. */
-export function VaultSettings({ data }: { data: AppState }) {
+export function VaultSettings({ data, busy = false }: { data: AppState; busy?: boolean }) {
   const canEdit = useVaultAccess();
   const [query, setQuery] = useState('');
-  const actions = useSecretActions();
+  const actions = useSecretActions(data, busy);
+  const running = !!runningConversation(data);
   const secrets = data.secrets ?? [];
   const needle = query.trim().toLowerCase();
   const shown = secrets.filter((secret) => !needle || secret.name.toLowerCase().includes(needle) || scopeLabel(data, secret).toLowerCase().includes(needle));
@@ -151,21 +159,22 @@ export function VaultSettings({ data }: { data: AppState }) {
     {canEdit === false && <p className="settings-note vault-lan-note" role="note"><ShieldAlert size={14} aria-hidden="true" />{LAN_NOTE}</p>}
     <div className="vault-toolbar">
       <label className="vault-search"><Search size={14} aria-hidden="true" /><input type="search" aria-label="보관함 검색" placeholder="보관함 검색" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') event.preventDefault(); }} /></label>
-      <button type="button" className="small-button" disabled={!canEdit || actions.pending} onClick={() => actions.setDialog('add')}><Plus size={13} />새 시크릿 추가</button>
+      <button type="button" className="small-button" disabled={!canEdit || busy || actions.pending || running} onClick={() => actions.setDialog('add')}><Plus size={13} />새 시크릿 추가</button>
     </div>
     <div className="settings-card">
-      {shown.length ? <SecretRows data={data} secrets={shown} canEdit={!!canEdit} busy={actions.pending} onReplace={(secret) => actions.setDialog({ replace: secret })} onDelete={(secret) => void actions.remove(secret)} />
+      {shown.length ? <SecretRows data={data} secrets={shown} canEdit={!!canEdit} busy={busy || actions.pending} onReplace={(secret) => actions.setDialog({ replace: secret })} onDelete={(secret) => void actions.remove(secret)} />
         : <div className="settings-row"><span className="muted">{secrets.length ? '검색과 일치하는 시크릿이 없어요' : '아직 시크릿이 없습니다'}</span></div>}
     </div>
     {actions.error && <ErrorNotice onDismiss={() => actions.setError(null)}>{actions.error}</ErrorNotice>}
     {actions.status && <p className="vault-status" role="status">{actions.status}</p>}
     <p className="settings-note">시크릿 값은 API 키처럼 서버 데이터 폴더의 state.json(소유자만 읽고 쓸 수 있는 0600 파일)에 저장돼요. 운영체제 키체인과 연동하거나 따로 암호화하지 않으니 서버 컴퓨터의 계정을 보호해 주세요.</p>
-    {actions.dialog === 'add' && <SecretForm data={data} onClose={() => actions.setDialog(null)} onSaved={actions.saved} />}
-    {actions.dialog && typeof actions.dialog === 'object' && <SecretForm data={data} replace={actions.dialog.replace} onClose={() => actions.setDialog(null)} onSaved={actions.saved} />}
+    {running && <p className="settings-note" role="status">모든 Bot용 시크릿은 모든 작업이 끝난 뒤 변경할 수 있어요. 쉬고 있는 Bot의 시크릿은 해당 Bot의 세부 정보에서 관리할 수 있어요.</p>}
+    {actions.dialog === 'add' && <SecretForm data={data} busy={busy} onClose={() => actions.setDialog(null)} onSaved={actions.saved} />}
+    {actions.dialog && typeof actions.dialog === 'object' && <SecretForm data={data} busy={busy} replace={actions.dialog.replace} onClose={() => actions.setDialog(null)} onSaved={actions.saved} />}
   </section>;
 }
 
-function McpEditor({ bot, onClose, onSaved }: { bot: Bot; onClose: () => void; onSaved: (state: AppState) => void }) {
+function McpEditor({ bot, running, onClose, onSaved }: { bot: Bot; running: boolean; onClose: () => void; onSaved: (state: AppState) => void }) {
   const [text, setText] = useState<string | null>(null);
   const [original, setOriginal] = useState('');
   const [pending, setPending] = useState(false);
@@ -179,7 +188,7 @@ function McpEditor({ bot, onClose, onSaved }: { bot: Bot; onClose: () => void; o
   }, [bot.id]);
   const empty = text !== null && /^\s*\{\s*"mcpServers"\s*:\s*\{\s*\}\s*\}\s*$/.test(text);
   const save = async () => {
-    if (text === null) return;
+    if (text === null || pending || running) return;
     try { JSON.parse(text); } catch { setError('구성이 올바른 JSON이 아니에요.'); return; }
     setPending(true); setError(null);
     try {
@@ -194,11 +203,12 @@ function McpEditor({ bot, onClose, onSaved }: { bot: Bot; onClose: () => void; o
       <p className="vault-help">{bot.name}의 대화에서 쓸 서버를 <code>{'{"mcpServers": {"이름": {...}}}'}</code> 형식으로 적어 주세요. 명령 서버는 command·args·env, HTTP 서버는 url·headers를 써요. 토큰은 값에 직접 넣지 말고 보관함에 저장한 뒤 <code>{'${secret:API_TOKEN}'}</code>처럼 참조하세요.</p>
       <textarea aria-label="MCP 서버 JSON" rows={14} spellCheck={false} value={text ?? ''} onChange={(event) => setText(event.target.value)} disabled={pending || text === null} data-autofocus />
       {empty && <button type="button" className="small-button" onClick={() => setText(EXAMPLE)} disabled={pending}>예시 넣기</button>}
+      {running && <p className="vault-help" role="status">이 Bot의 작업이 끝나면 MCP 서버를 저장할 수 있어요. 입력은 유지돼요.</p>}
       {error && <ErrorNotice>{error}</ErrorNotice>}
     </div>
     <footer className="modal-footer">
       <button type="button" className="small-button" onClick={close} disabled={pending}>취소</button>
-      <button type="button" className="primary-button" onClick={() => void save()} disabled={pending || text === null}>{pending ? '저장 중…' : '저장'}</button>
+      <button type="button" className="primary-button" onClick={() => void save()} disabled={pending || running || text === null}>{pending ? '저장 중…' : '저장'}</button>
     </footer>
   </Modal>;
 }
@@ -213,14 +223,14 @@ export function BotIntegrations({ bot, data, dispatch }: { bot: Bot; data: AppSt
   const [status, setStatus] = useState<string | null>(null);
   const lock = useRef(false);
   const snapshot = (state: AppState) => dispatch({ type: 'snapshot', data: state });
-  const secretActions = useSecretActions(snapshot);
+  const secretActions = useSecretActions(data, false, snapshot);
   useEffect(() => { setError(null); setStatus(null); setEditing(null); }, [bot.id]);
   const servers = (data.mcpServers ?? []).filter((server) => server.botId === bot.id);
   const secrets = (data.secrets ?? []).filter((secret) => !secret.botId || secret.botId === bot.id);
   const available = new Set(secrets.map((secret) => secret.name));
-  const running = !!runningConversation(data);
+  const running = isBotRunning(data, bot.id);
   const toggle = async (server: PublicMcpServer, enabled: boolean) => {
-    if (lock.current) return;
+    if (lock.current || running) return;
     if (enabled && server.transport === 'stdio' && !window.confirm(`${server.name} 서버를 켜면 이 Bot의 대화가 시작될 때 서버 컴퓨터에서 명령을 실행해요. 켤까요?`)) return;
     lock.current = true;
     setToggling(server.name); setError(null); setStatus(null);
@@ -241,7 +251,7 @@ export function BotIntegrations({ bot, data, dispatch }: { bot: Bot; data: AppSt
             {server.transport === 'stdio' ? <Terminal size={14} aria-hidden="true" /> : <Plug size={14} aria-hidden="true" />}
             <span className="vault-row-copy"><code>{server.name}</code><small>{server.transport === 'stdio' ? 'STDIO · 서버 컴퓨터에서 명령 실행' : 'HTTP'}{missing.length ? ` · 보관함에 없는 시크릿: ${missing.join(', ')}` : ''}</small></span>
             <label className="vault-switch">
-              <input type="checkbox" role="switch" aria-label={`${server.name} 사용`} checked={server.enabled} disabled={toggling !== null || (!server.enabled && !canEdit)} onChange={(event) => void toggle(server, event.target.checked)} />
+              <input type="checkbox" role="switch" aria-label={`${server.name} 사용`} checked={server.enabled} disabled={running || toggling !== null || (!server.enabled && !canEdit)} onChange={(event) => void toggle(server, event.target.checked)} />
               <span>{server.enabled ? '켜짐' : '꺼짐'}</span>
             </label>
           </li>;
@@ -252,14 +262,14 @@ export function BotIntegrations({ bot, data, dispatch }: { bot: Bot; data: AppSt
       {status && <p className="vault-status" role="status">{status}</p>}
     </section>
     <section className="details-section vault-section" aria-labelledby={`${prefix}-secrets`}>
-      <header><h3 id={`${prefix}-secrets`}>시크릿</h3><button type="button" className="text-button" disabled={!canEdit || secretActions.pending} onClick={() => secretActions.setDialog('add')}>시크릿 추가</button></header>
+      <header><h3 id={`${prefix}-secrets`}>시크릿</h3><button type="button" className="text-button" disabled={!canEdit || secretActions.pending || running} onClick={() => secretActions.setDialog('add')}>시크릿 추가</button></header>
       <p className="vault-help">이 Bot에 필요한 시크릿을 추가하세요. 값은 서버에 저장되고 다시 표시되지 않아요.</p>
       {secrets.length ? <SecretRows data={data} secrets={secrets} canEdit={!!canEdit} busy={secretActions.pending} onReplace={(secret) => secretActions.setDialog({ replace: secret })} onDelete={(secret) => void secretActions.remove(secret)} />
         : <p className="detail-empty">아직 시크릿이 없습니다</p>}
       {secretActions.error && <ErrorNotice onDismiss={() => secretActions.setError(null)}>{secretActions.error}</ErrorNotice>}
       {secretActions.status && <p className="vault-status" role="status">{secretActions.status}</p>}
     </section>
-    {editing === 'json' && <McpEditor bot={bot} onClose={() => setEditing(null)} onSaved={(state) => { snapshot(state); setEditing(null); setStatus('MCP 서버를 저장했어요. 새로 추가하거나 바꾼 서버는 꺼져 있어요.'); }} />}
+    {editing === 'json' && <McpEditor bot={bot} running={running} onClose={() => setEditing(null)} onSaved={(state) => { snapshot(state); setEditing(null); setStatus('MCP 서버를 저장했어요. 새로 추가하거나 바꾼 서버는 꺼져 있어요.'); }} />}
     {editing === 'form' && <McpServerForm bot={bot} data={data} canEdit={!!canEdit} running={running} onClose={() => setEditing(null)} onSaved={(state) => { snapshot(state); setEditing(null); setStatus('MCP 서버를 추가했어요. 목록에서 켜면 다음 대화부터 사용할 수 있어요.'); }} />}
     {secretActions.dialog === 'add' && <SecretForm data={data} botId={bot.id} onClose={() => secretActions.setDialog(null)} onSaved={secretActions.saved} />}
     {secretActions.dialog && typeof secretActions.dialog === 'object' && <SecretForm data={data} replace={secretActions.dialog.replace} onClose={() => secretActions.setDialog(null)} onSaved={secretActions.saved} />}

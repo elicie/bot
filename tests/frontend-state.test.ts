@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { reducer, emptyFiles, draftKey, readRoute, routeSearch, pendingBotWork, ownConversationsFor, type UIState } from '../web/state.js';
-import type { AppState } from '../shared/types.js';
+import { reducer, emptyFiles, draftKey, readRoute, routeSearch, pendingBotWork, ownConversationsFor, actualBotId, hasConversationWork, isBotRunning, queuedWorkForBot, queuedWorkForConversation, runningConversation, runningConversations, runningConversationsForBot, type UIState } from '../web/state.js';
+import type { AppState, Conversation } from '../shared/types.js';
+import { cancelQueuedTurn } from '../web/api.js';
 
 function snapshot(revision: number, status: 'running' | 'completed'): AppState {
   const botId = 'a620c2e4-25b6-410b-9d32-20bf4e67753a';
@@ -94,7 +95,7 @@ test('external document refresh updates clean editors and preserves unsaved edit
   }
 });
 
-test('pendingBotWork keeps Stop available for related deliveries and pending source reports only', () => {
+test('pendingBotWork describes related delivery/report waiting without defining conversation Stop scope', () => {
   const data = snapshot(1, 'completed');
   data.runtime.botMessageChains = true;
   const conversation = data.conversations[0];
@@ -121,7 +122,7 @@ test('pendingBotWork keeps Stop available for related deliveries and pending sou
   }
   for (const status of ['queued', 'running'] as const) {
     data.botDeliveries = [{ ...delivery, status: 'completed', report: { status } }];
-    assert.equal(pendingBotWork(data, conversation), true, `source can stop a ${status} report after delivery completion`);
+    assert.equal(pendingBotWork(data, conversation), true, `source sees a ${status} report after delivery completion`);
     data.botDeliveries[0].sourceConversationId = 'other-source';
     data.botDeliveries[0].recipientConversationId = conversation.id;
     assert.equal(pendingBotWork(data, conversation), false, 'a report belongs to its source, not its recipient');
@@ -156,4 +157,123 @@ test('opening a bot prefers its own newest conversation over a newer one opened 
   data.conversations = [recipient];
   assert.deepEqual(ownConversationsFor(data, own.botId), []);
   assert.equal(reducer(ui(), { type: 'snapshot', data }).selection.conversationId, null);
+});
+
+const conversation = (id: string, botId: string, status: Conversation['run']['status']): Conversation => ({
+  id, botId, title: id, messages: [], run: { id: `run:${id}`, status }, updatedAt: '2026-11-03T00:00:00Z',
+});
+
+test('plural live selectors keep aggregate guards and attribute group/thread work to the actual Bot', () => {
+  const data = snapshot(1, 'completed');
+  const first = conversation('first', 'a', 'running');
+  const approval = conversation('approval', 'b', 'awaiting_permission');
+  const group: Conversation = { ...conversation('group-conversation', 'group-id', 'starting'), groupId: 'group-id', run: { id: 'group-run', botId: 'c', status: 'starting' } };
+  group.messages.push({ id: 'prior-member', role: 'assistant', speakerBotId: 'a', text: '', createdAt: '', tools: [] });
+  const thread = { ...conversation('thread', 'a', 'running'), thread: { parentConversationId: 'first', parentMessageId: 'message' } };
+  data.conversations = [conversation('completed', 'd', 'completed'), first, approval, group, thread];
+  assert.deepEqual(runningConversations(data).map(item => item.id), ['first', 'approval', 'group-conversation', 'thread']);
+  assert.equal(runningConversation(data), first, 'the legacy shared-resource guard still sees any active Bot');
+  assert.equal(actualBotId(group), 'c', 'explicit owner wins over prior group speaker and group ID');
+  assert.deepEqual(runningConversationsForBot(data, 'a').map(item => item.id), ['first', 'thread']);
+  assert.equal(isBotRunning(data, 'b'), true, 'waiting for permission still occupies its own Bot');
+  assert.equal(isBotRunning(data, 'c'), true);
+  assert.equal(isBotRunning(data, 'group-id'), false);
+  assert.equal(isBotRunning(data, 'd'), false);
+  delete group.run.botId;
+  assert.equal(actualBotId(group), 'a', 'legacy group snapshots use the last assistant speaker');
+  group.messages = [];
+  assert.equal(actualBotId(group), 'group-id', 'missing ownership metadata is tolerated');
+  assert.deepEqual(runningConversations(null), []);
+  assert.deepEqual(runningConversationsForBot(undefined, 'a'), []);
+  assert.equal(runningConversation(null), undefined);
+  assert.equal(isBotRunning(data, null), false);
+});
+
+test('queue selectors preserve accepted FIFO and canonical next-speaker ownership without inferring group members', () => {
+  const data = snapshot(1, 'running');
+  data.workQueue = [
+    { id: 'one', botId: 'a', conversationId: 'main', createdAt: '2', kind: 'user', text: 'First', attachments: [] },
+    { id: 'two', botId: 'b', conversationId: 'group', createdAt: '1', kind: 'user', text: '@B', attachments: [], speakerBotIds: ['b', 'c'] },
+    { id: 'three', botId: 'a', conversationId: 'main', createdAt: '3', kind: 'report', deliveryId: 'delivery' },
+    { id: 'four', botId: 'c', conversationId: 'group', createdAt: '4', kind: 'group', roundId: 'round' },
+  ];
+  const before = structuredClone(data.workQueue);
+  assert.deepEqual(queuedWorkForConversation(data, 'main').map(work => work.id), ['one', 'three']);
+  assert.deepEqual(queuedWorkForBot(data, 'b').map(work => work.id), ['two']);
+  assert.deepEqual(queuedWorkForBot(data, 'c').map(work => work.id), ['four'], 'future frozen speaker is not the current waiting lane');
+  assert.deepEqual(data.workQueue, before, 'selectors neither sort nor rewrite frozen speakers');
+  assert.deepEqual(queuedWorkForBot(data, null), []);
+  delete data.workQueue;
+  assert.deepEqual(queuedWorkForConversation(data, 'main'), []);
+  assert.deepEqual(queuedWorkForBot(null, 'a'), []);
+});
+
+test('conversation Stop never follows another Bot or descendant while queued-only own work is stoppable', () => {
+  const data = snapshot(1, 'completed');
+  const source = data.conversations[0];
+  data.runtime.botMessageChains = true;
+  data.workQueue = [];
+  data.botDeliveries = [{
+    id: 'delivery', exchangeId: 'exchange', chainId: 'delivery', hop: 1,
+    sourceConversationId: source.id, sourceMessageId: source.messages[0].id,
+    recipientConversationId: 'recipient', fromBotId: source.botId, toBotId: 'b',
+    text: 'Public fixture', createdAt: '', status: 'running',
+  }];
+  assert.equal(pendingBotWork(data, source), true, 'the transcript may show that another Bot is answering');
+  assert.equal(hasConversationWork(data, source), false, 'waiting on another conversation does not create a misleading Stop');
+  data.workQueue.push({ id: 'queued', conversationId: source.id, botId: source.botId, createdAt: '', kind: 'user', text: 'Second question', attachments: [] });
+  assert.equal(hasConversationWork(data, source), true);
+  data.workQueue[0].conversationId = 'other-conversation';
+  assert.equal(hasConversationWork(data, source), false, 'same Bot, different queued conversation is not owned');
+  source.run.status = 'awaiting_permission';
+  assert.equal(hasConversationWork(data, source), true);
+  assert.equal(hasConversationWork(data, undefined), false);
+});
+
+test('simultaneous approval snapshots and accepted same-conversation queues keep live runs, navigation, and newer drafts intact', () => {
+  const data = snapshot(10, 'running');
+  const first = data.conversations[0];
+  first.run.status = 'awaiting_permission';
+  first.run.permission = { id: 'permission-a', title: 'Approve A', kind: 'file_write', description: '', paths: [], options: [] };
+  const second = conversation('second', 'b', 'awaiting_permission');
+  second.run.permission = { id: 'permission-b', title: 'Approve B', kind: 'bot_message', description: '', paths: [], options: [] };
+  data.conversations.push(second);
+  data.bots.push({ ...data.bots[0], id: 'b', name: 'B' });
+  let state = reducer(ui(), { type: 'snapshot', data });
+  state = reducer(state, { type: 'draft', key: first.id, text: 'sent draft' });
+  state = reducer(state, { type: 'draft', key: first.id, text: 'newer unsent draft' });
+  state = reducer(state, { type: 'select', selection: { botId: 'b', conversationId: second.id } });
+  const queued = structuredClone(data);
+  queued.revision++;
+  queued.workQueue = [{ id: 'queued-input', botId: first.botId, conversationId: first.id, createdAt: '', kind: 'user', text: 'sent draft', attachments: [] }];
+  state = reducer(state, { type: 'snapshot', data: queued });
+  state = reducer(state, { type: 'draft-sent', key: first.id, text: 'sent draft' });
+  assert.deepEqual(state.selection, { botId: 'b', conversationId: second.id });
+  assert.equal(state.drafts[first.id], 'newer unsent draft');
+  assert.deepEqual(state.data?.conversations[0].run, first.run, 'admission does not overwrite the selected live run/permission');
+  assert.equal(state.data?.conversations[1].run.permission?.id, 'permission-b');
+  const accepted = state.data?.workQueue?.[0];
+  assert.equal(accepted?.kind, 'user');
+  if (accepted?.kind === 'user') assert.equal(accepted.text, 'sent draft');
+  assert.equal(reducer(state, { type: 'snapshot', data }), state, 'a delayed HTTP response cannot drop the queue or either approval');
+});
+
+test('individual queue cancellation sends only the selected encoded ID and never falls back to conversation Stop', async (t) => {
+  const data = snapshot(1, 'running');
+  const calls: { path: string; options?: RequestInit }[] = [];
+  t.mock.method(globalThis, 'fetch', async (path: string, options?: RequestInit) => {
+    calls.push({ path, options });
+    return new Response(JSON.stringify(calls.length === 1 ? data : { error: 'This queued turn no longer exists.' }), {
+      status: calls.length === 1 ? 200 : 404,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  });
+  const result = await cancelQueuedTurn('conversation/selected', 'turn?one');
+  assert.equal(result.conversations[0].run.id, data.conversations[0].run.id);
+  assert.equal(calls[0].path, '/api/conversations/conversation%2Fselected/queued-turns/turn%3Fone/cancel');
+  assert.equal(calls[0].options?.method, 'POST');
+  assert.equal(calls[0].options?.body, '{}');
+  await assert.rejects(cancelQueuedTurn('conversation/selected', 'turn?one'), { status: 404 });
+  assert.equal(calls.length, 2, 'a stale ID cannot trigger broad conversation cancellation');
+  assert.equal(calls[1].path, calls[0].path);
 });

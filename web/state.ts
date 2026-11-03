@@ -5,6 +5,7 @@ import type {
   Conversation,
   FileDocument,
   FileListing,
+  QueuedWork,
   RunStatus,
 } from '../shared/types';
 import { previewText } from './preview-text';
@@ -68,9 +69,27 @@ export interface UIState {
 }
 export const activeRun = (status: RunStatus) =>
   status === 'starting' || status === 'running' || status === 'awaiting_permission';
-export const runningConversation = (data: AppState | null) =>
-  data?.conversations.find((conversation) => activeRun(conversation.run.status));
-/** A waiting Bot chain can own descendants even when this conversation has no active engine turn. */
+/** Every live conversation, including independent approvals, group speakers, and threads. */
+export const runningConversations = (data: AppState | null | undefined): Conversation[] =>
+  (data?.conversations ?? []).filter((conversation) => activeRun(conversation.run.status));
+/** Aggregate guard for shared settings, files, and browser resources. Not chat admission. */
+export const runningConversation = (data: AppState | null | undefined) =>
+  runningConversations(data)[0];
+/** Groups own a conversation, but only the current speaking Bot owns the live turn. */
+export const actualBotId = (conversation: Conversation): string =>
+  conversation.run.botId
+  ?? [...conversation.messages].reverse().find((message) => message.role === 'assistant')?.speakerBotId
+  ?? conversation.botId;
+export const runningConversationsForBot = (data: AppState | null | undefined, botId: string | null | undefined): Conversation[] =>
+  botId ? runningConversations(data).filter((conversation) => actualBotId(conversation) === botId) : [];
+export const isBotRunning = (data: AppState | null | undefined, botId: string | null | undefined): boolean =>
+  runningConversationsForBot(data, botId).length > 0;
+export const queuedWorkForConversation = (data: AppState | null | undefined, conversationId: string | null | undefined): QueuedWork[] =>
+  conversationId ? (data?.workQueue ?? []).filter((work) => work.conversationId === conversationId) : [];
+/** Only the queued lane's next Bot, not later frozen group speakers, is waiting for a slot. */
+export const queuedWorkForBot = (data: AppState | null | undefined, botId: string | null | undefined): QueuedWork[] =>
+  botId ? (data?.workQueue ?? []).filter((work) => work.botId === botId) : [];
+/** Related Bot-chain progress for transcript messaging only, not conversation Stop eligibility. */
 export const pendingBotWork = (data: AppState | null, conversation: Conversation | undefined) =>
   !!data?.runtime.botMessageChains && !!conversation && !!data.botDeliveries?.some(delivery =>
     ((delivery.sourceConversationId === conversation.id || delivery.recipientConversationId === conversation.id)
@@ -81,6 +100,18 @@ export const queuedRoutineRun = (data: AppState | null, conversation: Conversati
   conversation?.run.status === 'idle'
     ? data?.routineRuns.find((run) => run.conversationId === conversation.id && !run.result)
     : undefined;
+/** Stop owns only this conversation's live turn and accepted work, never its descendants. */
+export const hasConversationWork = (data: AppState | null, conversation: Conversation | undefined): boolean => {
+  if (!conversation) return false;
+  if (activeRun(conversation.run.status) || conversation.groupRound?.pendingBotIds.length
+    || queuedWorkForConversation(data, conversation.id).length) return true;
+  // Older snapshots have no unified queue. Only directly owned reserved work is stoppable.
+  return data?.workQueue === undefined && (!!queuedRoutineRun(data, conversation)
+    || !!data?.runtime.botMessageChains && !!data.botDeliveries?.some(delivery =>
+      (delivery.recipientConversationId === conversation.id && delivery.status === 'queued')
+      || (delivery.sourceConversationId === conversation.id && !!delivery.report
+        && ['queued', 'running'].includes(delivery.report.status))));
+};
 /** The bot message a conversation was opened to answer: set for a recipient's dedicated conversation. */
 export const recipientDelivery = (data: AppState | null | undefined, conversationId: string | null | undefined): BotDelivery | undefined =>
   conversationId ? data?.botDeliveries?.find((delivery) => delivery.recipientConversationId === conversationId) : undefined;

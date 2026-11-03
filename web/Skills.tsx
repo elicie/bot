@@ -2,6 +2,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent } f
 import { ArrowLeft, ChevronRight, FileText, LockKeyhole, MessageSquare, Plug, Plus, Trash2, X } from 'lucide-react';
 import type { AppState, Bot, Skill } from '../shared/types';
 import { ApiError, errorText, request } from './api';
+import { isBotRunning } from './state';
 import { Avatar, ErrorNotice, IconButton, Modal } from './ui';
 import './skills.css';
 
@@ -61,8 +62,9 @@ function validateDraft(draft: SkillDraft): SkillValidation {
   return errors;
 }
 
-export function Skills({ bot, busy, onClose, onChange, onCreateWithBot }: {
+export function Skills({ bot, data, busy, onClose, onChange, onCreateWithBot }: {
   bot: Bot;
+  data: AppState;
   busy: boolean;
   onClose: () => void;
   onChange: (data: AppState) => void;
@@ -99,7 +101,8 @@ export function Skills({ bot, busy, onClose, onChange, onCreateWithBot }: {
   const stale = !!editor?.initial && !!latest && latest.revision !== editor.initial.revision;
   const editorKey = editor ? editor.initial?.id ?? 'new' : null;
   const errors = [...Object.values(validation).filter((message): message is string => !!message), ...(error ? [error] : [])];
-  const blocked = busy || !!pending;
+  const running = isBotRunning(data, bot.id);
+  const blocked = busy || running || !!pending;
 
   const confirmLeave = () => {
     if (leaving.current) return true;
@@ -202,7 +205,7 @@ export function Skills({ bot, busy, onClose, onChange, onCreateWithBot }: {
     body: unknown,
     message: string,
   ) => {
-    if (busy || requestLock.current) return false;
+    if (blocked || requestLock.current) return false;
     requestLock.current = true;
     setPending(operation);
     setError(null);
@@ -395,7 +398,7 @@ export function Skills({ bot, busy, onClose, onChange, onCreateWithBot }: {
                   <button type="button" className="small-button" onClick={back} disabled={!!pending}>뒤로</button>
                   <button type="submit" className="primary-button" disabled={blocked || removed || (!!editor.initial && !dirty)}>{pending?.kind === 'save' ? '저장 중…' : '저장'}</button>
                 </footer>
-                {busy && <p className="skills-note" role="status">다른 작업이 끝나면 스킬을 저장하거나 삭제할 수 있습니다. 작성 중인 내용은 유지됩니다.</p>}
+                {(busy || running) && <p className="skills-note" role="status">이 Bot의 작업이나 진행 중인 설정 변경이 끝나면 스킬을 저장하거나 삭제할 수 있습니다. 작성 중인 내용은 유지됩니다.</p>}
               </form>
             ) : tab === 'skills' ? (
               <section className="skills-management" aria-labelledby={`${prefix}-management`}>
@@ -425,7 +428,7 @@ export function Skills({ bot, busy, onClose, onChange, onCreateWithBot }: {
                   <button type="button" className="text-button skills-ask" disabled={blocked} onClick={() => leave(onCreateWithBot)}><MessageSquare size={14} aria-hidden="true" />봇에게 스킬 만들기 요청</button>
                 </> : <div className="skills-empty"><span className="skills-empty-icon"><FileText size={26} aria-hidden="true" /></span><h4>아직 비공개 스킬이 없습니다</h4><p>봇에게 반복해서 사용할 작업을 스킬로 만들어 달라고 요청해 보세요. 대화에서 제안된 이름과 지침을 검토한 뒤 저장할 수 있습니다.</p><button type="button" className="primary-button" disabled={blocked} onClick={() => leave(onCreateWithBot)}><MessageSquare size={14} aria-hidden="true" />봇에게 만들기 요청</button><p className="skills-note">‘스킬 추가’로 직접 작성하거나 ‘SKILL.md 가져오기’로 파일을 저장할 수 있습니다. 직접 추가는 이 앱의 로컬 확장입니다.</p></div>}
                 <div className="skills-connector-notice"><Plug size={15} aria-hidden="true" /><p><strong>외부 커넥터</strong>외부 커넥터 인증·연결은 아직 구현되지 않았습니다. 이 화면은 봇별 로컬 비공개 스킬만 관리합니다.</p></div>
-                {busy && <p className="skills-note" role="status">다른 작업이 끝나면 스킬 사용 설정을 변경하거나 봇에게 만들기를 요청할 수 있습니다.</p>}
+                {(busy || running) && <p className="skills-note" role="status">이 Bot의 작업이나 진행 중인 설정 변경이 끝나면 스킬 사용 설정을 변경하거나 봇에게 만들기를 요청할 수 있습니다.</p>}
               </section>
             ) : (
               <section className="skills-connectors" aria-labelledby={`${prefix}-connectors`}><div className="skills-page-heading"><h3 id={`${prefix}-connectors`}>커넥터</h3><p>외부 앱 연결 기능의 지원 범위입니다.</p></div><div className="skills-empty"><span className="skills-empty-icon"><Plug size={26} aria-hidden="true" /></span><h4>외부 커넥터 연결은 아직 지원하지 않습니다</h4><p>계정 인증, 외부 앱 설치, 커넥터 실행은 구현되지 않았습니다. 외부 앱 목록이나 연결된 계정을 표시하지 않습니다.</p><button type="button" className="small-button" onClick={() => changeTab('skills')}>비공개 스킬 관리로 돌아가기</button></div></section>

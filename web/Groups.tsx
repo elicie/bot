@@ -1,10 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowDown, ArrowUp, AtSign, Clock3, Menu, MoreHorizontal, Pencil, Plus, SquarePen, Trash2, Users, X } from 'lucide-react';
 import type { AppState, AvatarShape, Bot, Conversation, Group, GroupInput, Message } from '../shared/types';
-import { request } from './api';
+import { cancelQueuedTurn, request } from './api';
 import { botColors, History } from './Bots';
 import { Composer, Transcript } from './Conversation';
-import { activeRun, conversationPreview, type Surface } from './state';
+import { QueuedTurns } from './QueuedTurns';
+import { activeRun, conversationPreview, hasConversationWork, type Surface } from './state';
 import { ThreadLinks } from './Threads';
 import { Avatar, avatarShapes, ErrorNotice, IconButton, Modal } from './ui';
 import './groups.css';
@@ -163,22 +164,23 @@ export function GroupView({ data, surface, busy, online, run, onSnapshot, onRout
   canvasControl?: ReactNode;
 }) {
   const [history, setHistory] = useState(false);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
   const group = data.groups?.find(item => item.id === surface.groupId);
   const conversations = group ? groupConversations(data, group.id) : [];
   const conversation = shownGroupConversation(data, surface);
   if (!group) return <div className="main-empty"><button type="button" className="mobile-only icon-button group-empty-menu" aria-label="봇 목록 열기" onClick={onSidebar}><Menu size={19} /></button><Users size={28} /><h1>삭제된 그룹</h1><p>이 그룹을 찾을 수 없습니다. 사이드바에서 다른 Bot이나 그룹을 선택하세요.</p></div>;
   const bot = groupAsBot(group);
   const members = group.memberBotIds.map(id => data.bots.find(item => item.id === id)).filter((item): item is Bot => !!item);
-  const globalRun = data.conversations.find(item => activeRun(item.run.status));
   const pending = roundPending(conversation);
-  const running = !!conversation && (activeRun(conversation.run.status) || pending);
+  const running = !!conversation && activeRun(conversation.run.status);
   const key = `group:${group.id}:${conversation?.id ?? 'new'}`;
   const text = draft(key);
   const speakerFor = speakerLookup(data);
   const select = (conversationId: string | null) => onRoute({ kind: 'group', groupId: group.id, conversationId });
   const send = async () => {
     const message = text.trim();
-    if (!message || running || globalRun) return;
+    if (!message || !online || busy || members.length === 0) return;
     if (!data.settings.baseUrl || !data.settings.model) { onSettings(); return; }
     await run('group-message', async () => {
       let target = conversation?.id;
@@ -189,12 +191,16 @@ export function GroupView({ data, surface, busy, online, run, onSnapshot, onRout
         select(target);
       }
       onSnapshot(await request<AppState>(`/api/conversations/${encodeURIComponent(target)}/messages`, { method: 'POST', body: { text: message } }));
-      onDraft(key, '');
+      if (draftRef.current(key) === text) onDraft(key, '');
     });
   };
   const cancel = async () => {
-    if (!conversation || !running) return;
+    if (!conversation || !hasConversationWork(data, conversation)) return;
     await run('cancel', async () => onSnapshot(await request<AppState>(`/api/conversations/${encodeURIComponent(conversation.id)}/cancel`, { method: 'POST', body: {} })));
+  };
+  const cancelQueued = async (turnId: string) => {
+    if (!conversation) return;
+    await run('cancel-queued', async () => onSnapshot(await cancelQueuedTurn(conversation.id, turnId)));
   };
   const permission = async (optionId: string) => {
     const pendingPermission = conversation?.run.permission;
@@ -222,7 +228,7 @@ export function GroupView({ data, surface, busy, online, run, onSnapshot, onRout
       </div>
       <div className="chat-controls">
         <IconButton label="대화 기록" onClick={() => setHistory(true)}><Clock3 size={17} /></IconButton>
-        <IconButton label="새 대화" onClick={() => void newConversation()} disabled={busy || !!globalRun}><SquarePen size={17} /></IconButton>
+        <IconButton label="새 대화" onClick={() => void newConversation()} disabled={busy}><SquarePen size={17} /></IconButton>
         {canvasControl}
       </div>
     </header>
@@ -238,8 +244,9 @@ export function GroupView({ data, surface, busy, online, run, onSnapshot, onRout
       <AtSign size={13} aria-hidden="true" />
       {members.length ? members.map(member => <button type="button" key={member.id} onClick={() => mention(member.name)} aria-label={`${member.name} 멘션`}><Avatar color={member.color} seed={member.id} shape={member.shape} size={14} />{member.name}</button>) : <span>아직 멘션할 대상이 없어요</span>}
     </div>
+    <QueuedTurns data={data} conversationId={conversation?.id} disabled={busy || !online} onCancel={turnId => void cancelQueued(turnId)} />
     <Composer botName={group.name} placeholder="그룹에 메시지 보내기" value={text} onChange={value => onDraft(key, value)} onSend={() => void send()}
-      onCancel={() => void cancel()} running={running} disabled={!online || !!globalRun || pending || members.length === 0} busy={busy} model={data.settings.model} />
-    {history && <History bot={bot} conversations={conversations} selectedId={conversation?.id ?? null} busy={busy || !!globalRun} onClose={() => setHistory(false)} onNew={() => void newConversation()} onSelect={id => { select(id); setHistory(false); }} />}
+      onCancel={() => void cancel()} running={running} pendingWork={hasConversationWork(data, conversation)} disabled={!online || members.length === 0} busy={busy} model={data.settings.model} />
+    {history && <History bot={bot} conversations={conversations} selectedId={conversation?.id ?? null} busy={busy} onClose={() => setHistory(false)} onNew={() => void newConversation()} onSelect={id => { select(id); setHistory(false); }} />}
   </>;
 }

@@ -1,10 +1,11 @@
 import { useRef, useState, type ReactNode } from 'react';
 import { MessageSquareReply, MessagesSquare, X } from 'lucide-react';
 import type { AppState, Bot, Conversation, Message } from '../shared/types';
-import { request } from './api';
+import { cancelQueuedTurn, request } from './api';
 import { Composer, Transcript } from './Conversation';
-import { groupAsBot, roundPending, speakerLookup, type Run } from './Groups';
-import { activeRun } from './state';
+import { QueuedTurns } from './QueuedTurns';
+import { groupAsBot, speakerLookup, type Run } from './Groups';
+import { activeRun, hasConversationWork } from './state';
 import { Avatar, IconButton } from './ui';
 
 const threadFor = (data: AppState, messageId: string) => data.conversations.find(conversation => conversation.thread?.parentMessageId === messageId);
@@ -49,11 +50,10 @@ export function ThreadPanel({ data, threadId, busy, online, run, onSnapshot, onC
   const bot: Bot | undefined = group ? groupAsBot(group) : data.bots.find(item => item.id === thread?.botId);
   const speakerFor = group ? speakerLookup(data) : undefined;
   const author = parentMessage && (parentMessage.role === 'user' ? undefined : speakerFor?.(parentMessage) ?? bot);
-  const globalRun = data.conversations.find(conversation => activeRun(conversation.run.status));
-  const running = !!thread && (activeRun(thread.run.status) || roundPending(thread));
+  const running = !!thread && activeRun(thread.run.status);
   const send = async () => {
     const text = draft.trim();
-    if (!thread || !text || running || globalRun) return;
+    if (!thread || !text || busy || !online) return;
     if (!data.settings.baseUrl || !data.settings.model) { onSettings(); return; }
     await run('thread-message', async () => {
       onSnapshot(await request<AppState>(`/api/conversations/${encodeURIComponent(thread.id)}/messages`, { method: 'POST', body: { text } }));
@@ -61,8 +61,12 @@ export function ThreadPanel({ data, threadId, busy, online, run, onSnapshot, onC
     });
   };
   const cancel = async () => {
-    if (!thread || !running) return;
+    if (!thread || !hasConversationWork(data, thread)) return;
     await run('cancel', async () => onSnapshot(await request<AppState>(`/api/conversations/${encodeURIComponent(thread.id)}/cancel`, { method: 'POST', body: {} })));
+  };
+  const cancelQueued = async (turnId: string) => {
+    if (!thread) return;
+    await run('cancel-queued', async () => onSnapshot(await cancelQueuedTurn(thread.id, turnId)));
   };
   const permission = async (optionId: string) => {
     const pending = thread?.run.permission;
@@ -87,8 +91,9 @@ export function ThreadPanel({ data, threadId, busy, online, run, onSnapshot, onC
           modelConfigured={!!data.settings.baseUrl && !!data.settings.model} runtimeAvailable={data.runtime.available} runtimeError={data.runtime.error}
           busy={busy} onSettings={onSettings} onRuntimeSettings={onSettings} onPermission={optionId => void permission(optionId)} />
       </div>
+      <QueuedTurns data={data} conversationId={thread.id} disabled={busy || !online} onCancel={turnId => void cancelQueued(turnId)} />
       <Composer botName={bot.name} label="스레드 메시지" placeholder="스레드에 답장…" value={draft} onChange={setDraft} onSend={() => void send()}
-        onCancel={() => void cancel()} running={running} disabled={!online || !!globalRun || roundPending(thread)} busy={busy} model={data.settings.model} />
+        onCancel={() => void cancel()} running={running} pendingWork={hasConversationWork(data, thread)} disabled={!online} busy={busy} model={data.settings.model} />
     </>}
   </aside>;
 }
