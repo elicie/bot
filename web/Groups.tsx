@@ -33,6 +33,12 @@ export const shownGroupConversation = (data: AppState | null, surface: GroupSurf
 };
 
 export const roundPending = (conversation: Conversation | undefined) => !!conversation?.groupRound?.pendingBotIds.length;
+/** Structural member edits wait for this group's accepted work, never unrelated Bots. */
+export const groupStructureBusy = (data: AppState, groupId: string): boolean =>
+  data.conversations.some(conversation => conversation.groupId === groupId && (
+    activeRun(conversation.run.status) || roundPending(conversation)
+    || data.workQueue?.some(work => work.conversationId === conversation.id && work.kind === 'user')
+  ));
 
 export function GroupList({ data, search, selectedId, busy, onOpen, onCreate, onEdit }: {
   data: AppState | null; search: string; selectedId: string | null; busy: boolean;
@@ -87,12 +93,15 @@ export function GroupDialog({ data, group, busy, error: serverError, run, onSnap
   const errorRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => { if (error) errorRef.current?.scrollIntoView({ block: 'nearest' }); }, [error]);
   const initialMembers = group?.memberBotIds.join(',') ?? '';
+  const membersChanged = members.join(',') !== initialMembers;
+  const structureBusy = !!group && groupStructureBusy(data, group.id);
   const dirty = name !== (group?.name ?? '') || color !== (group?.color ?? botColors[7]) || shape !== (group?.shape ?? 'cloud') || members.join(',') !== initialMembers;
   const close = () => { if (busy || (dirty && !window.confirm('저장하지 않은 그룹 설정을 버릴까요?'))) return; onClose(); };
   const move = (index: number, delta: number) => setMembers(current => { const next = [...current]; const [item] = next.splice(index, 1); next.splice(index + delta, 0, item); return next; });
   const others = data.bots.filter(bot => !members.includes(bot.id));
   const valid = !!name.trim() && members.length >= 2 && members.length <= 12;
   const save = async () => {
+    if (busy || (membersChanged && structureBusy)) return;
     setAttempted(true);
     const body: GroupInput = { name: name.trim(), color, shape, memberBotIds: members };
     const saved = await run('group', async () => {
@@ -109,7 +118,7 @@ export function GroupDialog({ data, group, busy, error: serverError, run, onSnap
     if (saved) { if (!group) onCreated(saved); onClose(); }
   };
   const remove = async () => {
-    if (!group || !window.confirm('이 그룹과 채팅 기록이 영구적으로 삭제돼요. 안의 Bot은 삭제되지 않고 각각 그대로 쓸 수 있어요. 되돌릴 수 없어요.')) return;
+    if (!group || busy || structureBusy || !window.confirm('이 그룹과 채팅 기록이 영구적으로 삭제돼요. 안의 Bot은 삭제되지 않고 각각 그대로 쓸 수 있어요. 되돌릴 수 없어요.')) return;
     setAttempted(true);
     const removed = await run('group-delete', async () => {
       onSnapshot(await request<AppState>(`/api/groups/${encodeURIComponent(group.id)}`, { method: 'DELETE', body: {} }));
@@ -120,7 +129,7 @@ export function GroupDialog({ data, group, busy, error: serverError, run, onSnap
   const title = group ? '그룹 편집' : '그룹 채팅 만들기';
   return <Modal title={title} onClose={close} className="compact-modal bot-dialog group-dialog">
     <header className="modal-header"><h2>{title}</h2><IconButton label="그룹 설정 닫기" onClick={close} disabled={busy}><X size={18} /></IconButton></header>
-    <form aria-busy={busy} onSubmit={event => { event.preventDefault(); if (valid && dirty && !busy) void save(); }}>
+    <form aria-busy={busy} onSubmit={event => { event.preventDefault(); if (valid && dirty && !busy && !(membersChanged && structureBusy)) void save(); }}>
       <div className="bot-dialog-body">
         <div className="bot-dialog-preview" role="img" aria-label="그룹 아바타 미리보기"><Avatar color={color} seed={group?.id ?? name} size={80} shape={shape} /></div>
         <label className="bot-dialog-name"><span>그룹 이름</span>
@@ -136,21 +145,21 @@ export function GroupDialog({ data, group, busy, error: serverError, run, onSnap
           {members.length === 0 && <p className="muted">아래에서 Bot을 2개 이상 추가하세요.</p>}
           <ol>{members.map((id, index) => { const bot = data.bots.find(item => item.id === id); return <li key={id}>
             <span className="group-member-order">{index + 1}</span><Avatar color={bot?.color} seed={id} shape={bot?.shape} size={22} /><span className="group-member-name">{bot?.name ?? '삭제된 Bot'}</span>
-            <IconButton label={`${bot?.name ?? 'Bot'} 위로`} disabled={busy || index === 0} onClick={() => move(index, -1)}><ArrowUp size={13} /></IconButton>
-            <IconButton label={`${bot?.name ?? 'Bot'} 아래로`} disabled={busy || index === members.length - 1} onClick={() => move(index, 1)}><ArrowDown size={13} /></IconButton>
-            <IconButton label={`${bot?.name ?? 'Bot'} 멤버에서 빼기`} disabled={busy} onClick={() => setMembers(members.filter(item => item !== id))}><X size={13} /></IconButton>
+            <IconButton label={`${bot?.name ?? 'Bot'} 위로`} disabled={busy || structureBusy || index === 0} onClick={() => move(index, -1)}><ArrowUp size={13} /></IconButton>
+            <IconButton label={`${bot?.name ?? 'Bot'} 아래로`} disabled={busy || structureBusy || index === members.length - 1} onClick={() => move(index, 1)}><ArrowDown size={13} /></IconButton>
+            <IconButton label={`${bot?.name ?? 'Bot'} 멤버에서 빼기`} disabled={busy || structureBusy} onClick={() => setMembers(members.filter(item => item !== id))}><X size={13} /></IconButton>
           </li>; })}</ol>
           {others.length > 0 && <div className="group-member-candidates" role="group" aria-label="멤버 추가">
-            {others.map(bot => <button type="button" key={bot.id} className="small-button" disabled={busy || members.length >= 12} onClick={() => setMembers([...members, bot.id])} aria-label={`${bot.name} 멤버 추가`}><Plus size={12} /><Avatar color={bot.color} seed={bot.id} shape={bot.shape} size={16} />{bot.name}</button>)}
+            {others.map(bot => <button type="button" key={bot.id} className="small-button" disabled={busy || structureBusy || members.length >= 12} onClick={() => setMembers([...members, bot.id])} aria-label={`${bot.name} 멤버 추가`}><Plus size={12} /><Avatar color={bot.color} seed={bot.id} shape={bot.shape} size={16} />{bot.name}</button>)}
           </div>}
           <small className="muted">그룹에 보낸 메시지에는 멤버가 순서대로 한 번씩 답합니다. @이름으로 멘션하면 멘션한 멤버만 답합니다.</small>
         </section>
         {error && <div ref={errorRef}><ErrorNotice>{error}</ErrorNotice></div>}
       </div>
       <footer className="modal-footer">
-        {group && <button type="button" className="small-button danger-button" onClick={() => void remove()} disabled={busy}><Trash2 size={14} />그룹 삭제</button>}
+        {group && <button type="button" className="small-button danger-button" onClick={() => void remove()} disabled={busy || structureBusy}><Trash2 size={14} />그룹 삭제</button>}
         <button type="button" className="small-button" onClick={close} disabled={busy}>취소</button>
-        <button type="submit" className="primary-button" aria-label={group ? '그룹 저장' : '그룹 만들기'} disabled={busy || !valid || !dirty}>{busy ? '저장 중…' : group ? '그룹 저장' : '만들기'}</button>
+        <button type="submit" className="primary-button" aria-label={group ? '그룹 저장' : '그룹 만들기'} disabled={busy || (membersChanged && structureBusy) || !valid || !dirty}>{busy ? '저장 중…' : group ? '그룹 저장' : '만들기'}</button>
       </footer>
     </form>
   </Modal>;

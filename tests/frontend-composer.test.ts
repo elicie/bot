@@ -14,7 +14,7 @@ register(`data:text/javascript,${encodeURIComponent(`
 `)}`, import.meta.url);
 const { Composer, OtherRuns, Transcript } = await import('../web/Conversation.js');
 const { QueuedTurns } = await import('../web/QueuedTurns.js');
-const { GroupView } = await import('../web/Groups.js');
+const { GroupView, GroupDialog, groupStructureBusy } = await import('../web/Groups.js');
 const { ThreadPanel } = await import('../web/Threads.js');
 const { botReportDescription } = await import('../web/BotChat.js');
 
@@ -196,6 +196,27 @@ test('group and normal/group thread composers all admit drafts while their own o
       assert.match(threadHtml, /aria-label="스레드 메시지"/);
     }
   }
+});
+
+test('group membership and deletion wait only for that group while normal chat remains independent', () => {
+  const data = fixture();
+  const group = data.groups![0];
+  const render = () => renderToStaticMarkup(createElement(GroupDialog, {
+    data, group, busy: false, error: null, run: async <T,>(_name: string, operation: () => Promise<T>) => operation(),
+    onSnapshot() {}, onClose() {}, onCreated() {}, onDeleted() {},
+  }));
+  data.conversations = [conversation('other-bot', 'b')];
+  assert.equal(groupStructureBusy(data, group.id), false);
+  assert.doesNotMatch(render().match(/<button[^>]*aria-label="B 위로"[^>]*>/)?.[0] ?? '', /disabled/);
+  const own: Conversation = { ...conversation('group-last-speaker', group.id), groupId: group.id, run: { id: 'group-run', botId: 'b', status: 'running' } };
+  data.conversations.push(own);
+  assert.equal(groupStructureBusy(data, group.id), true, 'the last speaker remains busy after pending member IDs are exhausted');
+  assert.match(render().match(/<button[^>]*aria-label="B 위로"[^>]*>/)?.[0] ?? '', /disabled/);
+  own.run.status = 'completed';
+  data.workQueue = [{ id: 'accepted-next-round', botId: 'a', conversationId: own.id, createdAt: '', kind: 'user', text: 'Next group round', attachments: [] }];
+  assert.equal(groupStructureBusy(data, group.id), true, 'accepted future rounds also protect membership order');
+  data.workQueue = [];
+  assert.equal(groupStructureBusy(data, group.id), false);
 });
 
 test('independent approval cards preserve their own permission option identity', () => {
