@@ -140,7 +140,7 @@ for (const viewport of [{ width: 1040, height: 760, startFirst: false }, { width
     try {
       await page.setViewportSize(viewport);
       await page.goto(app.url);
-      await api(page, '/api/settings', { baseUrl: provider.baseUrl, model: 'local-test-model', workspace: '' }, 'PUT');
+      await api(page, '/api/settings', { baseUrl: provider.baseUrl, model: 'local-test-model', workspace: '', maxConcurrentRuns: 1 }, 'PUT');
       await api(page, '/api/bots', { name: 'Reviewer', instructions: '계획을 검토하세요.', color: '#75a9c0' });
       recipientId = (await snapshot(page)).bots.find(bot => bot.name === 'Reviewer')!.id;
       await page.getByLabel('메시지', { exact: true }).fill('Reviewer에게 계획 검토를 요청해 주세요.');
@@ -153,7 +153,9 @@ for (const viewport of [{ width: 1040, height: 760, startFirst: false }, { width
       // Queue an older routine while the recipient is held. FIFO runs it before the report,
       // keeping the follow-up queued without racing the scheduler or forging application state.
       const scheduled = await api<AppState>(page, '/api/routines', { botId: recipientId, name: '정기 점검', prompt: '다른 작업을 처리합니다.', enabled: false, schedule: { kind: 'interval', minutes: 60 } });
-      await api(page, `/api/routines/${scheduled.routines[0].id}/run`, {});
+      const queued = await api<{ state: AppState }>(page, `/api/routines/${scheduled.routines[0].id}/run`, {});
+      const routineWork = queued.state.workQueue!.find(work => work.kind === 'routine' && work.runId === queued.state.routineRuns[0].id)!;
+      expect(routineWork).toBeDefined();
       recipient.release({ text: '계획을 검토했습니다. 진행해도 좋습니다.' });
       await expect.poll(() => stage, { timeout: 60_000 }).toBe(5);
       await expect.poll(async () => (await snapshot(page)).botDeliveries?.[0]?.report?.status).toBe('queued');
@@ -175,6 +177,8 @@ for (const viewport of [{ width: 1040, height: 760, startFirst: false }, { width
         const routineConversation = seeded.conversations.find((conversation: AppState['conversations'][number]) => conversation.id === routine.conversationId);
         routineConversation.messages = [];
         routineConversation.run = { id: '', status: 'idle' };
+        // Restore the routine's original accepted pointer before the report, whose ID/order stay intact.
+        seeded.workQueue.unshift(routineWork);
         blocker.release({ text: '이전 fixture 종료' });
         await app.stop();
         await writeFile(path.join(dataDir, 'state.json'), JSON.stringify(seeded), { mode: 0o600 });
@@ -526,6 +530,7 @@ test('cancelling C follow-up in waiting B reports one non-success to A without a
   try {
     await page.goto(app.url);
     bots = await chainBots(page, provider.baseUrl);
+    await chainApi(page, 'PUT', '/api/settings', { baseUrl: provider.baseUrl, model: 'local-test-model', workspace: '', maxConcurrentRuns: 1 });
     await page.getByLabel('메시지', { exact: true }).fill('Ask B and C for a final review, not an interim answer.');
     await page.getByRole('button', { name: '메시지 보내기', exact: true }).click();
     const permission = page.getByRole('region', { name: '작업 승인 요청', exact: true });
@@ -637,7 +642,7 @@ test('cancelling C follow-up in waiting B reports one non-success to A without a
   }
 });
 
-test('Stop in the waiting root cancels C approval and leaves no descendant or report to replay', async ({ page }) => {
+test('Stop in the waiting root leaves C approval intact; C own Stop cancels that turn without replay', async ({ page }) => {
   test.setTimeout(120_000);
   const app = await startTestApp();
   let bots = { b: '', c: '' };
@@ -652,9 +657,11 @@ test('Stop in the waiting root cancels C approval and leaves no descendant or re
       { tool: { name: 'use_tool', arguments: { tool_name: 'workspace__send_message', tool_input: { toBotId: bots.c, text: 'Prepare a review note.' } } } },
       { text: 'B delegated to C.' },
       { tool: { name: 'search_tool', arguments: { query: 'workspace send_message', limit: 3 } } },
-      { tool: { name: 'use_tool', arguments: { tool_name: 'workspace__send_message', tool_input: { toBotId: bots.b, text: 'An unapproved follow-up that root Stop must cancel.' } } } },
+      { tool: { name: 'use_tool', arguments: { tool_name: 'workspace__send_message', tool_input: { toBotId: bots.b, text: 'An unapproved follow-up that only C Stop may cancel.' } } } },
+      { text: 'B_STOP_SUMMARY: C stopped its review, so no final verdict is available.' },
+      { text: 'A_STOP_SUMMARY: B reported that C stopped its review.' },
     ];
-    return replies[stage++] ?? { text: 'Unexpected answer after root Stop.' };
+    return replies[stage++] ?? { text: 'The selected cancellation has been reported.' };
   } });
   try {
     await page.goto(app.url);
@@ -674,24 +681,52 @@ test('Stop in the waiting root cancels C approval and leaves no descendant or re
     }, { timeout: 60_000 }).toBe('awaiting_permission');
     const waiting = await snapshot(page);
     const leaf = waiting.botDeliveries!.find(delivery => delivery.hop === 2)!;
-    const stale = waiting.conversations.find(conversation => conversation.id === leaf.recipientConversationId)!.run.permission!;
+    const cBefore = waiting.conversations.find(conversation => conversation.id === leaf.recipientConversationId)!;
+    const stale = cBefore.run.permission!;
     await expect(page.getByLabel('Chain B 답변 상태', { exact: true })).toHaveText('하위 답변 대기 중');
+    const rootStop = page.waitForResponse(response => response.url().endsWith(`/api/conversations/${root.sourceConversationId}/cancel`) && response.request().method() === 'POST');
     await page.getByRole('button', { name: 'Bot 체인 중단', exact: true }).click();
-    await expect.poll(async () => (await snapshot(page)).conversations.find(conversation => conversation.id === leaf.recipientConversationId)?.run.status, { timeout: 30_000 }).toBe('cancelled');
-    const stopped = await snapshot(page);
-    expect(stopped.botDeliveries!.find(delivery => delivery.id === root.id)!.chainTermination?.status).toBe('cancelled');
-    expect(stopped.botDeliveries!.every(delivery => !['queued', 'running', 'waiting_children'].includes(delivery.status) && !['queued', 'running'].includes(delivery.report?.status ?? ''))).toBe(true);
-    expect(stopped.conversations.find(conversation => conversation.id === leaf.recipientConversationId)!.run.permission).toBeUndefined();
-    const lateStatus = await page.evaluate(async ({ id, permission }) => (await fetch(`/api/conversations/${id}/permissions/${permission.id}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Grok-Bot': '1' }, body: JSON.stringify({ optionId: permission.options[0].id }) })).status, { id: leaf.recipientConversationId, permission: stale });
-    expect(lateStatus).toBe(409);
-    await page.reload();
-    await expect(page.getByRole('button', { name: 'Bot 체인 중단', exact: true })).toHaveCount(0);
-    await expect(page.getByLabel('Chain B 답변 상태', { exact: true })).toHaveText('중단됨');
-    await expect(page.getByText('Bot 작업을 중단했습니다.', { exact: true })).toBeVisible();
-    await expect(page.getByText('작업 완료', { exact: true })).toHaveCount(0);
-    await expect(page.getByRole('note', { name: '이어서 답한 Bot 답변', exact: true })).toHaveCount(0);
-    await page.waitForTimeout(1200); // Cross a real scheduler poll after reload: no follow-up may restart.
+    expect((await rootStop).ok()).toBe(true);
+    const survived = await snapshot(page);
+    expect(survived.conversations.find(conversation => conversation.id === cBefore.id)!.run).toEqual(cBefore.run);
+    expect(survived.botDeliveries).toEqual(waiting.botDeliveries);
+    expect(survived.botDeliveries!.every(delivery => delivery.chainTermination === undefined)).toBe(true);
+    await expect(page.getByLabel('Chain B 답변 상태', { exact: true })).toHaveText('하위 답변 대기 중');
     expect(stage).toBe(8);
-    expect((await snapshot(page)).conversations.find(conversation => conversation.id === root.sourceConversationId)!.messages).toHaveLength(2);
+
+    // Ordinary Stop is conversation-local: C retains the same live approval until C itself is selected.
+    await page.goto(`${app.url}/?bot=${bots.c}&conversation=${cBefore.id}`);
+    await expect(permission).toContainText('An unapproved follow-up that only C Stop may cancel.');
+    await expect(permission.getByRole('button', { name: 'Send once', exact: true })).toHaveAttribute('data-option-id', stale.options.find(option => option.kind === 'allow_once')!.id);
+    const cStop = page.waitForResponse(response => response.url().endsWith(`/api/conversations/${cBefore.id}/cancel`) && response.request().method() === 'POST');
+    await page.getByRole('button', { name: '작업 중단', exact: true }).click();
+    expect((await cStop).ok()).toBe(true);
+    await expect.poll(async () => (await snapshot(page)).conversations.find(conversation => conversation.id === cBefore.id)?.run.status, { timeout: 30_000 }).toBe('cancelled');
+    const stopped = await snapshot(page);
+    const cStopped = stopped.conversations.find(conversation => conversation.id === cBefore.id)!;
+    expect(cStopped.run.id).toBe(cBefore.run.id);
+    expect(cStopped.run.permission).toBeUndefined();
+    expect(stopped.botDeliveries!.find(delivery => delivery.id === leaf.id)!.status).toBe('cancelled');
+    expect(stopped.botDeliveries!.every(delivery => delivery.chainTermination === undefined)).toBe(true);
+    const lateStatus = await page.evaluate(async ({ id, permission }) => (await fetch(`/api/conversations/${id}/permissions/${permission.id}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Grok-Bot': '1' }, body: JSON.stringify({ optionId: permission.options[0].id }) })).status, { id: cBefore.id, permission: stale });
+    expect(lateStatus).toBe(409);
+    await expect.poll(async () => (await snapshot(page)).botDeliveries!.every(delivery => delivery.report?.status === 'completed'), { timeout: 60_000 }).toBe(true);
+    await page.reload();
+    await expect(permission).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '작업 중단', exact: true })).toHaveCount(0);
+    await expect(page.getByText('작업을 중단했습니다.', { exact: true })).toBeVisible();
+    await page.waitForTimeout(1200); // Cross a real scheduler poll after reload: C must not restart.
+    const restored = await snapshot(page);
+    expect(restored.conversations.find(conversation => conversation.id === cBefore.id)!.run).toEqual(cStopped.run);
+    expect(restored.conversations.find(conversation => conversation.id === cBefore.id)!.messages).toEqual(cStopped.messages);
+    expect(restored.botDeliveries!.find(delivery => delivery.id === leaf.id)!.status).toBe('cancelled');
+    expect(restored.botDeliveries!.every(delivery => delivery.chainTermination === undefined)).toBe(true);
+    expect(stage).toBe(10); // B and A report once each; the cancelled C run never resumes.
+    await page.goto(`${app.url}/?bot=${root.fromBotId}&conversation=${root.sourceConversationId}`);
+    await expect(page.getByRole('button', { name: 'Bot 체인 중단', exact: true })).toHaveCount(0);
+    await expect(page.getByLabel('Chain B 답변 상태', { exact: true })).toHaveText('답변 도착');
+    await expect(page.getByRole('log', { name: '대화 메시지', exact: true })).toContainText('A_STOP_SUMMARY');
+    await expect(page.getByRole('note', { name: '이어서 답한 Bot 답변', exact: true })).toHaveCount(1);
+    expect(restored.conversations.find(conversation => conversation.id === root.sourceConversationId)!.messages).toHaveLength(4);
   } finally { await app.stop(); await provider.close(); }
 });
