@@ -6,11 +6,12 @@
 // the control that opened it. Images can be zoomed with the toolbar, Ctrl/⌘ + wheel, or the
 // + / - / 0 keys, and scrolled when larger than the screen.
 
-import { useState, type KeyboardEvent, type ReactNode, type WheelEvent } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode, type Ref, type WheelEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { Download, Maximize2, Minus, Plus, Scan, X } from 'lucide-react';
 import { IconButton, Modal } from './ui';
 import { useMediaUrl } from './use-media-url';
+import { needsDesktopAuthentication } from './desktop-transport';
 import './previews.css';
 
 export function PreviewModal({ title, closeLabel, heading, className = '', toolbar, onClose, onKeyDown, children }: {
@@ -100,8 +101,8 @@ export function MediaPreview({ src, name, download, onClose }: { src: string; na
  * (shown on hover and focus, always on touch screens) does the same from the keyboard. The image
  * keeps its own role and name.
  */
-export function PreviewTrigger({ label, className = '', onOpen, children, disabled = false }: { label: string; className?: string; onOpen: () => void; children: ReactNode; disabled?: boolean }) {
-  return <span className={`preview-trigger ${className}`} onClick={(event) => { if (!disabled && (event.target as Element).closest('button') === null) onOpen(); }}>
+export function PreviewTrigger({ label, className = '', onOpen, children, disabled = false, elementRef }: { label: string; className?: string; onOpen: () => void; children: ReactNode; disabled?: boolean; elementRef?: Ref<HTMLSpanElement> }) {
+  return <span ref={elementRef} className={`preview-trigger ${className}`} onClick={(event) => { if (!disabled && (event.target as Element).closest('button') === null) onOpen(); }}>
     {children}
     <IconButton label={label} className="preview-open" aria-haspopup="dialog" disabled={disabled} onClick={onOpen}><Maximize2 size={13} /></IconButton>
   </span>;
@@ -110,10 +111,32 @@ export function PreviewTrigger({ label, className = '', onOpen, children, disabl
 /** An image that opens "미디어 미리보기" ("이미지 전체 화면으로 열기"). */
 export function PreviewableImage({ src, alt, className = '', download, loading }: { src: string; alt: string; className?: string; download?: string; loading?: 'lazy' }) {
   const [open, setOpen] = useState(false);
-  const media = useMediaUrl(src);
+  const element = useRef<HTMLSpanElement>(null);
+  const [visibleSource, setVisibleSource] = useState<string | null>(null);
+  const nativeLazy = loading === 'lazy' && needsDesktopAuthentication(src);
+  useEffect(() => {
+    if (!nativeLazy || visibleSource === src) return;
+    const target = element.current;
+    if (!target || typeof IntersectionObserver === 'undefined') {
+      setVisibleSource(src);
+      return;
+    }
+    let active = true;
+    const observer = new IntersectionObserver(entries => {
+      if (!active || !entries.some(entry => entry.isIntersecting)) return;
+      setVisibleSource(src);
+      observer.disconnect();
+    }, { root: target.closest('.transcript'), rootMargin: '100px 0px' });
+    observer.observe(target);
+    return () => { active = false; observer.disconnect(); };
+  }, [nativeLazy, src, visibleSource]);
+  // A native <img loading=lazy> cannot defer a fetch that already buffered its Blob. Gate the
+  // authenticated request itself; explicit keyboard/click Open still loads an offscreen image.
+  const active = !nativeLazy || visibleSource === src || open;
+  const media = useMediaUrl(active ? src : null);
   return <>
-    <PreviewTrigger label="이미지 전체 화면으로 열기" className={`previewable-image ${className}`} disabled={!media.url} onOpen={() => setOpen(true)}>
-      {media.url ? <img src={media.url} alt={alt} loading={loading} /> : <span role={media.error ? 'alert' : 'status'}>{media.error ?? '이미지 불러오는 중…'}</span>}
+    <PreviewTrigger elementRef={element} label="이미지 전체 화면으로 열기" className={`previewable-image ${className}`} disabled={!!media.error || (!media.url && !nativeLazy)} onOpen={() => setOpen(true)}>
+      {media.url ? <img src={media.url} alt={alt} loading={loading} /> : <span role={media.error ? 'alert' : active ? 'status' : undefined}>{media.error ?? (active ? '이미지 불러오는 중…' : alt || '이미지')}</span>}
     </PreviewTrigger>
     {open && media.url && <MediaPreview src={media.url} name={alt} download={download} onClose={() => setOpen(false)} />}
   </>;
