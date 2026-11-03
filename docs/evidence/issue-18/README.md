@@ -1,5 +1,7 @@
 # Issue #18 — matched link-preview evidence
 
+Historical pre-P4 capture record. Its Node-backend reproduction steps apply only to the revisions named below; the current Rust-only comparison and commands are in [the post-#28 record](../issue-18-rust-only/README.md).
+
 All images are actual Chrome application captures, not design mockups. Conversations, model replies and remote-site metadata are disposable fixtures. The thumbnail fixture is the repository's public Issue #6 application capture. No real user conversation, provider key, or private Feishu content is included.
 
 ## Revisions and scenario

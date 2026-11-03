@@ -1,5 +1,7 @@
 # Issue #18 — current-main integration and deterministic cache verification
 
+Historical pre-P4 integration record. Its Node baseline and commands describe the named revisions, not the current application. See [the Rust-only post-#28 comparison](../issue-18-rust-only/README.md) for current verification.
+
 This comparison refreshes the [initial evidence](../issue-18/README.md) after integrating current main. All images are unedited captures of the actual application with disposable model/site fixtures, not mockups or real private conversations.
 
 ## Revisions and matched scenario
