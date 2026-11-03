@@ -42,11 +42,16 @@ const GENERATED_IMAGE_GRACE: std::time::Duration = std::time::Duration::from_sec
 /// Sweep generated images that no stored message references (`grok_bot_store::generated_images`).
 pub(crate) async fn prune_generated_images(store: &std::sync::Arc<grok_bot_store::Store>) {
     let referenced: std::collections::HashSet<String> = store.read(|s| {
-        s.disk()
-            .conversations
+        let disk = s.disk();
+        disk.conversations
             .iter()
-            .flat_map(|conversation| conversation.messages.iter())
-            .flat_map(|message| grok_bot_store::generated_images::referenced_ids(&message.text).map(str::to_owned).collect::<Vec<_>>())
+            .flat_map(|conversation| &conversation.messages)
+            .map(|message| message.text.as_str())
+            .chain(disk.work_queue.iter().filter_map(|work| match &work.kind {
+                grok_bot_model::WorkKind::User { text, .. } => Some(text.as_str()),
+                _ => None,
+            }))
+            .flat_map(|text| grok_bot_store::generated_images::referenced_ids(text).map(str::to_owned).collect::<Vec<_>>())
             .collect()
     });
     let data_dir = store.data_dir().to_path_buf();
@@ -189,4 +194,67 @@ async fn attachment(State(ctx): State<Ctx>, Path((id, attachment_id)): Path<(Str
         headers.insert(header::CONTENT_DISPOSITION, value);
     }
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use grok_bot_store::Store;
+    use grok_bot_store::generated_images::{ROUTE_PREFIX, read_generated_image, save_generated_image};
+
+    #[tokio::test]
+    async fn queued_generated_image_survives_startup_sweep_until_cancelled() {
+        const PNG: &[u8] = b"\x89PNG\r\n\x1a\nqueued fixture";
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path(), grok_bot_model::system_clock()).await.unwrap();
+        let conversation = store
+            .mutate(|state| {
+                state.update_settings(grok_bot_model::SettingsInput {
+                    base_url: "http://127.0.0.1:8000/v1".into(),
+                    model: "fixture-model".into(),
+                    workspace: String::new(),
+                    api_key: None,
+                    clear_api_key: None,
+                    max_concurrent_runs: None,
+                })?;
+                let bot = state.disk().bots[0].id.clone();
+                state.add_conversation(&bot)
+            })
+            .await
+            .unwrap();
+        let queued_id = save_generated_image(store.data_dir(), PNG).unwrap();
+        let unreferenced_id = save_generated_image(store.data_dir(), PNG).unwrap();
+        let queued_path = store.data_dir().join("generated-images").join(&queued_id);
+        let unreferenced_path = store.data_dir().join("generated-images").join(&unreferenced_id);
+        let old = std::time::SystemTime::now() - GENERATED_IMAGE_GRACE - std::time::Duration::from_secs(60);
+        for (id, path) in [(&queued_id, &queued_path), (&unreferenced_id, &unreferenced_path)] {
+            assert_eq!(read_generated_image(store.data_dir(), id).unwrap(), (PNG.to_vec(), "image/png"));
+            let file = std::fs::File::open(path).unwrap();
+            file.set_times(std::fs::FileTimes::new().set_modified(old)).unwrap();
+            assert!(file.metadata().unwrap().modified().unwrap().elapsed().unwrap() >= GENERATED_IMAGE_GRACE);
+        }
+        let text = format!("Please inspect ![queued image]({ROUTE_PREFIX}{queued_id})");
+        let accepted = store.mutate(|state| state.enqueue_user_turn(&conversation.id, &text, Vec::new())).await.unwrap();
+        assert!(store.read(|state| state.conversation(&conversation.id).unwrap().messages.is_empty()));
+        // End the old writer after its durable acceptance before reopening the same data directory.
+        store.flush().await.unwrap();
+        drop(store);
+        let store = Store::open(root.path(), grok_bot_model::system_clock()).await.unwrap();
+        assert_eq!(store.read(|state| state.disk().work_queue.clone()), vec![accepted.clone()]);
+        assert!(store.read(|state| state.disk().conversations.iter().all(|conversation| conversation.messages.is_empty())));
+        assert_eq!(read_generated_image(store.data_dir(), &queued_id).unwrap(), (PNG.to_vec(), "image/png"));
+        assert_eq!(read_generated_image(store.data_dir(), &unreferenced_id).unwrap(), (PNG.to_vec(), "image/png"));
+
+        prune_generated_images(&store).await;
+        assert_eq!(read_generated_image(store.data_dir(), &queued_id).unwrap(), (PNG.to_vec(), "image/png"));
+        assert!(queued_path.exists(), "the durable queued reference is a retention root before dispatch");
+        assert!(!unreferenced_path.exists(), "the startup sweep removes an equally old unreferenced image");
+        assert_eq!(read_generated_image(store.data_dir(), &unreferenced_id).unwrap_err().status, 404);
+
+        assert_eq!(store.mutate(|state| state.cancel_user_turn(&conversation.id, &accepted.id)).await.unwrap(), accepted);
+        assert!(store.read(|state| state.disk().work_queue.is_empty()));
+        prune_generated_images(&store).await;
+        assert!(!queued_path.exists(), "cancellation releases the final reference without another grace delay");
+        assert_eq!(read_generated_image(store.data_dir(), &queued_id).unwrap_err().status, 404);
+    }
 }
