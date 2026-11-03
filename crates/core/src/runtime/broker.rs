@@ -404,7 +404,16 @@ impl Runtime {
         }
         let saved = {
             let (filename, content, expected) = (filename.clone(), content, expected);
-            files(root, move |files| files.save(&filename, &content, &expected)).await
+            // Different Bots may approve proposals against the same original hash. Serialize
+            // only the final compare-and-save, never the approval wait or whole model turn.
+            self.queue
+                .run(async {
+                    if run.inactive() {
+                        return Err(conflict_finished());
+                    }
+                    files(root, move |files| files.save(&filename, &content, &expected)).await
+                })
+                .await
         };
         match saved {
             Ok(document) => {

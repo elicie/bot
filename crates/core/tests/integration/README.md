@@ -7,7 +7,7 @@ another copy of the engine.
 ```sh
 # All core library and integration tests:
 node scripts/cargo.mjs test --locked -p grok-bot-core
-# List the 47 integration cases (30 are independent runtime scenarios):
+# List the 48 integration cases (30 runtime scenarios plus per-Bot concurrency coverage):
 node scripts/cargo.mjs test --locked -p grok-bot-core --test integration -- --list
 # Run one scenario, including its output:
 node scripts/cargo.mjs test --locked -p grok-bot-core --test integration \

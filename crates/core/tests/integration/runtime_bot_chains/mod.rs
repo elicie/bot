@@ -175,15 +175,22 @@ pub(super) async fn nested_bot_reports(f: &Fixture) {
     no_replay(f, &scheduler, &root, "final").await;
 
     // A waiting logical chain does not reserve its source conversation from a new user turn.
+    // Issue #20 also dispatches eligible C when A starts; hold C first so both Bot slots are explicit
+    // and the shared scripted provider cannot accidentally answer the wrong conversation.
     let another = self::root(f, &b).await;
     let nested = child(f, &scheduler, &another, &c).await;
-    f.provider.plan(vec![text("An independent answer while C is queued.")]);
+    held(f, &scheduler, &nested.recipient_conversation_id).await;
+    let c_run = f.get(&nested.recipient_conversation_id).run.clone();
+    f.provider.plan(vec![text("An independent answer while C is active.")]);
     f.runtime.start(&another.source_conversation_id, "A separate user question.").await.unwrap();
     f.wait(&another.source_conversation_id, "the independent user turn", |conversation| conversation.messages.len() == 4).await;
-    f.completed(&another.source_conversation_id).await;
+    let independent = f.completed(&another.source_conversation_id).await;
+    assert_eq!(last_text(&independent), "An independent answer while C is active.");
+    assert_eq!(f.get(&nested.recipient_conversation_id).run, c_run, "the other Bot's live turn remains independent");
     assert_eq!(delivery(f, &another).status, DeliveryStatus::WaitingChildren);
-    assert!(another.chain_termination.is_none());
-    answer(f, &scheduler, &nested.recipient_conversation_id, "C answered after the user turn.").await;
+    assert!(delivery(f, &another).chain_termination.is_none());
+    f.provider.release.notify_one();
+    f.completed(&nested.recipient_conversation_id).await;
     answer(f, &scheduler, &another.recipient_conversation_id, "B includes the late C answer.").await;
     let final_a = answer(f, &scheduler, &another.source_conversation_id, "A reports the late result once.").await;
     assert_eq!(final_a.messages.len(), 6);
@@ -201,6 +208,30 @@ pub(super) async fn stop_nested_bot_chains(f: &Fixture) {
         let leaf = child(f, &scheduler, &root, &c).await;
         let mut active = None;
         let mut stale = None;
+        // Start this user before A's report becomes ready: canonical Bot FIFO must not be bypassed.
+        let unrelated = if boundary == "unrelated-user" {
+            let id = f.conversation(&f.bot_id()).await;
+            // Pause C at an approval first so accepting this user cannot consume C's reply script.
+            dispatch(
+                f,
+                &scheduler,
+                &leaf.recipient_conversation_id,
+                vec![use_tool("send_message", json!({"toBotId": b, "text": "This extra message will be denied."}))],
+            )
+            .await;
+            f.pending(&leaf.recipient_conversation_id).await;
+            let before = f.provider.inference_len();
+            f.provider.plan(vec![Reply::Hold]);
+            f.runtime.start(&id, "An independent user question.").await.unwrap();
+            f.wait(&id, "independent inference", |c| c.run.status == RunStatus::Running && f.provider.inference_len() > before).await;
+            let unrelated = Some((id.clone(), f.get(&id).run.id));
+            f.provider.plan(vec![text("C answered while the independent user is active.")]);
+            f.decide(&leaf.recipient_conversation_id, "reject_once").await;
+            f.completed(&leaf.recipient_conversation_id).await;
+            unrelated
+        } else {
+            None
+        };
         match boundary {
             "leaf-approval" => {
                 dispatch(
@@ -218,7 +249,9 @@ pub(super) async fn stop_nested_bot_chains(f: &Fixture) {
                 active = Some(leaf.recipient_conversation_id.clone());
             }
             "recipient-report" | "root-report" | "unrelated-user" => {
-                answer(f, &scheduler, &leaf.recipient_conversation_id, "C answered.").await;
+                if boundary != "unrelated-user" {
+                    answer(f, &scheduler, &leaf.recipient_conversation_id, "C answered.").await;
+                }
                 if boundary == "recipient-report" {
                     held(f, &scheduler, &root.recipient_conversation_id).await;
                     active = Some(root.recipient_conversation_id.clone());
@@ -229,34 +262,97 @@ pub(super) async fn stop_nested_bot_chains(f: &Fixture) {
             }
             _ => {}
         }
-        let unrelated = if boundary == "unrelated-user" {
-            let id = f.conversation(&f.bot_id()).await;
-            let before = f.provider.inference_len();
-            f.provider.plan(vec![Reply::Hold]);
-            f.runtime.start(&id, "An independent user question.").await.unwrap();
-            f.wait(&id, "independent inference", |c| c.run.status == RunStatus::Running && f.provider.inference_len() > before).await;
-            Some((id.clone(), f.get(&id).run.id))
-        } else {
-            None
-        };
+        let source_before = f.get(&root.source_conversation_id);
+        let descendants_before = [f.get(&root.recipient_conversation_id), f.get(&leaf.recipient_conversation_id)];
+        let leaf_before = delivery(f, &leaf);
+        let root_before = delivery(f, &root);
+        let queued_descendants: Vec<_> = f
+            .public()
+            .work_queue
+            .into_iter()
+            .filter(|work| work.conversation_id == root.recipient_conversation_id || work.conversation_id == leaf.recipient_conversation_id)
+            .collect();
         tokio::time::timeout(Duration::from_secs(5), f.runtime.cancel(&root.source_conversation_id))
             .await
-            .expect("root Stop must settle its descendant")
+            .expect("local Stop must not wait for another Bot's descendant")
             .unwrap();
+        // Revised issue #20 scope: retain all six former whole-chain Stop boundaries, but only
+        // queued work in A is removed. B/C's queued, approval, inference, and report turns survive.
+        assert_eq!(f.get(&root.source_conversation_id), source_before, "an idle/queued-report Stop creates no run or hidden input: {boundary}");
+        for before in descendants_before {
+            assert_eq!(f.get(&before.id), before, "root Stop must leave the other Bot conversation unchanged: {boundary}");
+        }
+        assert_eq!(delivery(f, &leaf), leaf_before, "root Stop must not change a descendant receipt: {boundary}");
+        assert_eq!(delivery(f, &root).status, root_before.status, "root Stop cannot terminate another Bot's aggregate: {boundary}");
+        assert!(delivery(f, &root).chain_termination.is_none(), "local Stop never latches a whole-chain cancellation: {boundary}");
+        assert!(!f.public().work_queue.iter().any(|work| work.conversation_id == root.source_conversation_id));
+        for queued in queued_descendants {
+            assert!(f.public().work_queue.contains(&queued), "other Bot queued work remains dispatchable: {boundary}");
+        }
+        if matches!(boundary, "root-report" | "unrelated-user") {
+            assert_eq!(delivery(f, &root).report.unwrap().status, ReportStatus::Cancelled, "Stop removes A's selected queued report");
+        }
         if let Some(id) = active {
-            assert_eq!(f.settled(&id).await.run.status, RunStatus::Cancelled, "{boundary}");
+            assert!(f.get(&id).run.status.is_active(), "the descendant remains live until its own Stop: {boundary}");
+            f.runtime.cancel(&id).await.unwrap();
+            assert_eq!(f.settled(&id).await.run.status, RunStatus::Cancelled, "local descendant cleanup: {boundary}");
             if let Some(permission) = stale {
                 assert_eq!(f.runtime.resolve(&id, &permission.id, &permission.options[0].id, false).await.unwrap_err().status, 409);
             }
         }
         if let Some((id, run_id)) = unrelated {
-            assert_eq!((f.get(&id).run.id, f.get(&id).run.status), (run_id, RunStatus::Running), "root Stop must not cancel another user's turn");
+            assert_eq!((f.get(&id).run.id, f.get(&id).run.status), (run_id, RunStatus::Running), "root Stop must not cancel another user's same-Bot turn");
             f.provider.release.notify_waiters();
             f.completed(&id).await;
         } else {
             f.provider.release.notify_waiters();
         }
-        assert_eq!(delivery(f, &root).chain_termination.unwrap().status, RunStatus::Cancelled);
+        // Clean each conversation up through its own Stop, including any newly arrived upstream
+        // report. The no-replay and write-safety checks still cover the former broad cases.
+        for id in [&leaf.recipient_conversation_id, &root.recipient_conversation_id, &root.source_conversation_id] {
+            f.runtime.cancel(id).await.unwrap();
+        }
+        assert!(delivery(f, &root).chain_termination.is_none());
+        no_pending(&chain(f, &root));
+        assert_eq!(f.notes(), "original\n");
+        no_replay(f, &scheduler, &root, boundary).await;
+    }
+
+    // Rule 7 also applies when Stop targets an intermediate Bot's live turn after it has already
+    // delegated: neither queued nor running C is B's cancellation scope, despite the shared chain.
+    for boundary in ["queued-child", "running-child"] {
+        let root = root(f, &b).await;
+        let requests = f.provider.inference_len();
+        dispatch(
+            f,
+            &scheduler,
+            &root.recipient_conversation_id,
+            vec![use_tool("send_message", json!({"toBotId": c, "text": "Finish independently if B is stopped."})), Reply::Hold],
+        )
+        .await;
+        f.decide(&root.recipient_conversation_id, "allow_once").await;
+        f.wait(&root.recipient_conversation_id, "B's held turn after its approved delegation", |conversation| {
+            conversation.run.status == RunStatus::Running && f.provider.inference_len() >= requests + 2
+        })
+        .await;
+        let leaf = chain(f, &root).into_iter().find(|item| item.source_conversation_id == root.recipient_conversation_id).unwrap();
+        if boundary == "running-child" {
+            held(f, &scheduler, &leaf.recipient_conversation_id).await;
+        }
+        let descendant = f.get(&leaf.recipient_conversation_id);
+        let receipt = delivery(f, &leaf);
+        let queued: Vec<_> = f.public().work_queue.into_iter().filter(|work| work.conversation_id == leaf.recipient_conversation_id).collect();
+        tokio::time::timeout(Duration::from_secs(5), f.runtime.cancel(&root.recipient_conversation_id)).await.expect("B's Stop must not wait for C").unwrap();
+        assert_eq!(f.get(&root.recipient_conversation_id).run.status, RunStatus::Cancelled);
+        assert_eq!(f.get(&leaf.recipient_conversation_id), descendant, "stopping B leaves C independent: {boundary}");
+        assert_eq!(delivery(f, &leaf), receipt, "stopping B cannot cancel C's delivery: {boundary}");
+        assert_eq!(f.public().work_queue.into_iter().filter(|work| work.conversation_id == leaf.recipient_conversation_id).collect::<Vec<_>>(), queued);
+        assert!(delivery(f, &root).chain_termination.is_none());
+        f.runtime.cancel(&leaf.recipient_conversation_id).await.unwrap();
+        assert_eq!(f.get(&leaf.recipient_conversation_id).run.status, RunStatus::Cancelled, "C stops only through its own Stop");
+        f.provider.release.notify_waiters();
+        f.runtime.cancel(&root.recipient_conversation_id).await.unwrap();
+        f.runtime.cancel(&root.source_conversation_id).await.unwrap();
         no_pending(&chain(f, &root));
         assert_eq!(f.notes(), "original\n");
         no_replay(f, &scheduler, &root, boundary).await;
@@ -389,7 +485,25 @@ pub(super) async fn nested_report_start_failure(f: &Fixture) {
     let (b, c) = (bot(f, "B").await, bot(f, "C").await);
     let root = root(f, &b).await;
     let leaf = child(f, &scheduler, &root, &c).await;
-    answer(f, &scheduler, &leaf.recipient_conversation_id, "C's answer cannot be summarized by B.").await;
+    // Issue #20 fills every eligible Bot slot in one tick. Keep A occupied independently while B's
+    // summary start fails, so A's newly queued error report is not also attempted while disconnected.
+    dispatch(
+        f,
+        &scheduler,
+        &leaf.recipient_conversation_id,
+        vec![use_tool("send_message", json!({"toBotId": b, "text": "This extra message will be denied."}))],
+    )
+    .await;
+    f.pending(&leaf.recipient_conversation_id).await;
+    let blocker = f.conversation(&f.bot_id()).await;
+    let requests = f.provider.inference_len();
+    f.provider.plan(vec![Reply::Hold]);
+    f.runtime.start(&blocker, "Keep A's independent slot occupied during B's failed summary start.").await.unwrap();
+    f.wait(&blocker, "A's independent provider request", |conversation| conversation.run.status == RunStatus::Running && f.provider.inference_len() > requests)
+        .await;
+    f.provider.plan(vec![text("C's answer cannot be summarized by B.")]);
+    f.decide(&leaf.recipient_conversation_id, "reject_once").await;
+    f.completed(&leaf.recipient_conversation_id).await;
     f.runtime.set_origin(String::new());
     scheduler.tick().await.unwrap();
     f.runtime.set_origin(f.origin.clone());
@@ -399,6 +513,9 @@ pub(super) async fn nested_report_start_failure(f: &Fixture) {
     assert_eq!(delivery(f, &leaf).report.unwrap().status, ReportStatus::Error);
     assert_eq!(f.get(&root.recipient_conversation_id).messages.len(), 2, "a failed start adds no hidden input or stale answer");
     assert!(!exchange_texts(f, &root).iter().any(|text| text.contains("DELEGATED_ONLY_NOT_FINAL")));
+    assert_eq!(delivery(f, &root).report.unwrap().status, ReportStatus::Queued, "A's independent slot preserves its error report for reconnect");
+    f.provider.release.notify_one();
+    f.completed(&blocker).await;
     let done = answer(f, &scheduler, &root.source_conversation_id, "B could not finish the nested review.").await;
     assert!(done.messages[2].text.contains(r#""status":"error""#));
     assert!(done.messages[2].text.contains("Runtime is not connected"));

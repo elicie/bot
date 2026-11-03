@@ -299,6 +299,7 @@ async fn matching_a_public_canvas_timestamp_does_not_mask_structural_metadata_or
                 workspace: String::new(),
                 api_key: Some("2026-01".into()),
                 clear_api_key: None,
+                max_concurrent_runs: None,
             })
         })
         .await

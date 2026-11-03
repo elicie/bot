@@ -13,24 +13,25 @@
 //! - every bot message delivery and pair exchange it sent or received, the deliveries chained from
 //!   those (they cannot stay valid without their parent, including messages sent from the report
 //!   turn of a removed delivery), and the read-only recipient conversations those deliveries
-//!   created for other bots; queued reports of removed deliveries are dropped with them,
+//!   created for other bots; report records of removed deliveries are dropped with them,
 //! - links from surviving source messages to removed exchanges, and removed delivery IDs from
 //!   surviving report messages (the message stays marked as a report).
 //!
 //! Deleting the main bot is allowed: the first remaining bot becomes the main bot
 //! (`crate::main_bot`).
 //!
-//! Refused while any run is active (like every other bot change), while queued routine or bot
-//! message work depends on the bot, and for the last remaining bot.
+//! Refused while this bot is active, while active or queued work depends on the affected history,
+//! and for the last remaining bot. Unrelated bots may keep running.
 
 use std::collections::HashSet;
 
-use grok_bot_model::{HttpError, HttpResult};
+use grok_bot_model::{HttpError, HttpResult, WorkKind};
 
 use crate::State;
 use crate::bot_messages::chain_parent;
 
 const LAST_BOT: &str = "Keep at least one bot. Add another bot before deleting this one.";
+const QUEUED_WORK: &str = "Wait for or cancel this bot’s queued work before deleting it.";
 const QUEUED_ROUTINES: &str = "Wait for or cancel this bot’s queued routine runs before deleting it.";
 const QUEUED_DELIVERIES: &str = "Wait for or cancel the queued bot messages of this bot before deleting it.";
 
@@ -64,7 +65,7 @@ impl State {
     /// Delete a bot with its history (see the module documentation). Returns the IDs of the removed
     /// conversations so the caller can remove their files outside `state.json` after the commit.
     pub fn delete_bot(&mut self, id: &str) -> HttpResult<Vec<String>> {
-        self.assert_idle()?;
+        self.assert_bot_idle(id)?;
         let index = self.bot_index(id)?;
         if self.disk.bots.len() <= 1 {
             return Err(HttpError::conflict(LAST_BOT));
@@ -102,8 +103,25 @@ impl State {
                 break;
             }
         }
-        if disk.bot_deliveries.iter().any(|d| deliveries.contains(d.id.as_str()) && d.status.is_pending()) {
+        if disk.bot_deliveries.iter().any(|d| {
+            deliveries.contains(d.id.as_str())
+                && (d.status.is_pending() || d.report.as_ref().is_some_and(|report| report.status == grok_bot_model::ReportStatus::Running))
+        }) || disk.conversations.iter().any(|conversation| conversations.contains(conversation.id.as_str()) && conversation.run.status.is_active())
+        {
             return Err(HttpError::conflict(QUEUED_DELIVERIES));
+        }
+        if self.queued_group_work_for_bot(id)
+            || disk.bot_deliveries.iter().any(|delivery| {
+                deliveries.contains(delivery.id.as_str())
+                    && delivery.report.as_ref().is_some_and(|report| report.status == grok_bot_model::ReportStatus::Queued)
+            })
+            || disk.work_queue.iter().any(|work| {
+                work.bot_id == id
+                    || conversations.contains(work.conversation_id.as_str())
+                    || matches!(&work.kind, WorkKind::Report { delivery_id } if deliveries.contains(delivery_id.as_str()))
+            })
+        {
+            return Err(HttpError::conflict(QUEUED_WORK));
         }
         let exchanges: HashSet<String> = disk.bot_deliveries.iter().filter(|d| deliveries.contains(d.id.as_str())).map(|d| d.exchange_id.clone()).collect();
         let deliveries: HashSet<String> = deliveries.into_iter().map(str::to_owned).collect();
