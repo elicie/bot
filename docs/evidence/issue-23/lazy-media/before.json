@@ -1,0 +1,18 @@
+{
+  "mode": "before",
+  "imageCount": 80,
+  "imageBytes": 70,
+  "totalFixtureBytes": 5600,
+  "baselineArtifactRevision": "5294e3e9bceae98587134f636e31a14f45da7ae0",
+  "implementationRevision": "5294e3e9bceae98587134f636e31a14f45da7ae0",
+  "sourceSha256": "9f363942c3ccd2c2753331e6b4aba65b106302b664f50c244e3b7ea9701e82ba",
+  "checks": [
+    "unfixed native consumer eagerly buffers every historical image despite loading=lazy",
+    "synthetic stopped source state preserved"
+  ],
+  "initial": {
+    "buffered": 80,
+    "visible": 9,
+    "mounted": 80
+  }
+}

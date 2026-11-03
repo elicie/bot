@@ -1,6 +1,6 @@
 # P5 실제 웹 → Tauri 비교와 검증
 
-최신 main 통합 뒤 링크 카드·설정·업데이트의 현재 비교는 [main-refresh](<main-refresh/README.md>)에 있습니다. 아래는 최초 P4 기반 검증 이력이며 새 캡처로 바꾸어 부르지 않습니다.
+최신 Bot 동시 실행 main 통합 뒤 링크 카드·설정·업데이트의 현재 비교는 [latest-main](<latest-main/README.md>)에 있습니다. [main-refresh](<main-refresh/README.md>)는 이전 3ff 기준 이력입니다. 아래는 최초 P4 기반 검증 이력이며 새 캡처로 바꾸어 부르지 않습니다.
 
 ## 비교 조건과 출처
 

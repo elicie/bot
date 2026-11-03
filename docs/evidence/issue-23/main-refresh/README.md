@@ -1,4 +1,6 @@
-# 최신 main 통합 뒤 실제 웹 / Tauri 비교
+# 3ff main 통합 당시 실제 웹 / Tauri 비교
+
+현재 Bot 동시 실행 main 기준의 새 비교는 [latest-main](<../latest-main/README.md>)에 있습니다. 아래 캡처와 결과는 리비전별 이력으로 보존합니다.
 
 ## 리비전과 같은 조건
 
