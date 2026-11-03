@@ -1,6 +1,6 @@
 //! Canvas HTTP admission and revision contract, including edits while a model run is active.
 
-mod common;
+use crate::common;
 
 use common::{TestApp, run};
 use grok_bot_model::{RunStatus, iso};

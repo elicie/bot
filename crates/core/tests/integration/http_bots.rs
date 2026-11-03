@@ -1,6 +1,6 @@
 //! HTTP routes for bot memories, knowledge files, and templates.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 

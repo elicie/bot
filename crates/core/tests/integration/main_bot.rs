@@ -1,6 +1,6 @@
 //! HTTP route for choosing the main bot (`POST /api/bots/:id/main`).
 
-mod common;
+use crate::common;
 
 use common::{TestApp, run};
 use serde_json::json;

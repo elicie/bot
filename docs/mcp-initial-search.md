@@ -27,7 +27,7 @@ HTTP API·저장 형식·도구 스키마는 바꾸지 않습니다. OAuth 인�
 기본 회귀 검사는 실제 Rust 앱·네이티브 엔진과 인증 없는 합성 Notion HTTP MCP를 사용합니다. 즉시 도구를 요청하는 공급자를 두고 `tools/list`를 3.5초 지연합니다.
 
 ```sh
-node scripts/cargo.mjs test --locked -p grok-bot-core --test mcp_initial_search
+node scripts/cargo.mjs test --locked -p grok-bot-core --test integration mcp_initial_search::
 ```
 
 변경 전 첫 검색은 `results: []`, `total_hidden_tools: 22`, `status: "partial"`로 재현했습니다. 이는 앱 도구만 있는 인덱스입니다. 새 세션·저장 세션에서 준비된 합성 도구의 검색, 호출 전 한 번 승인, 연결 실패 후 대화 지속, 초기화 중 중단, 시작 제한 시간도 같은 검사에서 다룹니다.
@@ -39,7 +39,7 @@ MCP_SEARCH_LIVE_MODEL='<model-id>' \
 MCP_SEARCH_LIVE_BASE_URL='<OpenAI-compatible-base-url>' \
 MCP_SEARCH_LIVE_API_KEY="$YOUR_PROVIDER_KEY" \
 MCP_SEARCH_DELAY_MS=9000 \
-node scripts/cargo.mjs test --locked -p grok-bot-core --test mcp_initial_search -- --nocapture
+node scripts/cargo.mjs test --locked -p grok-bot-core --test integration mcp_initial_search:: -- --nocapture
 ```
 
 `grok-4.7-build-fast` 실제 추론으로도 변경 전 9초 지연에서 첫 검색의 빈 `partial`을 확인했습니다. 같은 모델의 3.5초 지연에서는 모델 응답 전에 도구가 준비되어 `ready`가 나왔습니다. 따라서 실제 모델에서도 발생 가능한 타이밍 문제이지, 모든 호출에서 반드시 나타나는 현상은 아닙니다.

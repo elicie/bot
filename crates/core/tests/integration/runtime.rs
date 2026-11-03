@@ -3,8 +3,8 @@
 //! `tests/backend-grok.test.ts`, `tests/runtime.integration.test.ts`, and the runtime parts of
 //! `tests/skills.test.ts` and `tests/bot-messages.test.ts` (managed-computer cases excluded).
 //!
-//! Engine configuration and `GROK_HOME` are process-global, so this binary holds one `#[test]` that
-//! prepares the environment first and then runs every scenario sequentially (like the P0 test).
+//! Each scenario is an independent libtest case with its own fixture, provider, and temporary root.
+//! The shared harness isolates process-global engine state without linking the engine per scenario.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 
 #[path = "runtime_bot_data/mod.rs"]
 mod bot_data;
-mod common;
+use crate::common;
 #[path = "runtime_todos/mod.rs"]
 mod todos;
 use bot_data::bot_memory_and_knowledge;
@@ -1300,56 +1300,67 @@ async fn permission_rules(f: &Fixture) {
     assert_eq!(f.notes(), "default asks\n");
 }
 
-#[test]
-fn runtime_on_the_in_process_engine() {
-    let base = std::env::temp_dir().join(format!("grok-bot-runtime-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    std::fs::create_dir_all(&base).unwrap();
-    let base = std::fs::canonicalize(&base).unwrap();
-    let engine_root = base.join("engine");
-    // SAFETY: set before the test runtime and engine threads start.
-    unsafe { grok_bot_engine::host::prepare_process_environment(&engine_root) };
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    runtime.block_on(async {
-        macro_rules! scenario {
-            ($name:literal, $options:expr, $body:ident) => {{
-                let started = Instant::now();
-                let f = Fixture::new(&base, &engine_root, $name, $options).await;
-                $body(&f).await;
-                f.close().await;
-                eprintln!("[runtime] {} ok in {:?}", $name, started.elapsed());
-            }};
-        }
-        scenario!("rules-reload", Options::default(), rules_survive_session_reloads);
-        scenario!("files", Options::default(), file_approvals_and_sessions);
-        scenario!("canvas", Options::default(), canvas_edits);
-        scenario!("canvas-literal-data", Options::default(), canvas_literal_data);
-        scenario!("canvas-redaction", Options::default(), canvas_redaction);
-        scenario!("scripted", Options::default(), scripted_file_reply_flow);
-        scenario!("fingerprint", Options::default(), fingerprint_migration);
-        scenario!("provider-failure", Options::default(), provider_failure);
-        scenario!("redaction", Options::default(), streamed_redaction);
-        scenario!("deadlines", Options { idle: TEST_INACTIVITY, ..Options::default() }, deadlines_and_cancellation);
-        scenario!("limits", Options::default(), write_limits_and_model_only);
-        scenario!("skills", Options::default(), skills);
-        scenario!("bot-messages", Options::default(), bot_messages);
-        scenario!("bot-reports", Options::default(), bot_reports);
-        scenario!("bot-report-failures", Options::default(), bot_report_failures);
-        scenario!("bot-report-cancellation", Options::default(), bot_report_cancellation);
-        scenario!("nested-bot-reports", Options::default(), nested_bot_reports);
-        scenario!("stop-nested-bot-chains", Options::default(), stop_nested_bot_chains);
-        scenario!("expire-nested-bot-chains", Options::default(), expire_nested_bot_chains);
-        scenario!("four-hop-bot-reports", Options::default(), four_hop_bot_reports);
-        scenario!("nested-report-start-failure", Options::default(), nested_report_start_failure);
-        scenario!("bot-creation", Options::default(), bot_creation);
-        scenario!("bot-data", Options::default(), bot_memory_and_knowledge);
-        scenario!("permission-rules", Options::default(), permission_rules);
-        scenario!("custom-mcp", Options::default(), custom_mcp_servers);
-        scenario!("mcp-apps", Options::default(), mcp_apps);
-        scenario!("chat-routines", Options::default(), chat_routines);
-        scenario!("restart", Options::default(), restart_continuation);
-        todos::checklist_updates(&base, &engine_root).await;
-        startup_errors(&base, &engine_root).await;
-    });
-    let _ = std::fs::remove_dir_all(&base);
+mod scenarios {
+    use super::*;
+
+    macro_rules! scenario {
+        ($body:ident) => {
+            scenario!($body, Options::default());
+        };
+        ($body:ident, $options:expr) => {
+            #[test]
+            fn $body() {
+                common::run(stringify!($body), async |base| {
+                    let started = Instant::now();
+                    let f = Fixture::new(&base, &base.join("engine"), stringify!($body), $options).await;
+                    super::$body(&f).await;
+                    f.close().await;
+                    eprintln!("[runtime] {} ok in {:?}", stringify!($body), started.elapsed());
+                });
+            }
+        };
+    }
+
+    scenario!(rules_survive_session_reloads);
+    scenario!(file_approvals_and_sessions);
+    scenario!(canvas_edits);
+    scenario!(canvas_literal_data);
+    scenario!(canvas_redaction);
+    scenario!(scripted_file_reply_flow);
+    scenario!(fingerprint_migration);
+    scenario!(provider_failure);
+    scenario!(streamed_redaction);
+    scenario!(deadlines_and_cancellation, Options { idle: TEST_INACTIVITY, ..Options::default() });
+    scenario!(write_limits_and_model_only);
+    scenario!(skills);
+    scenario!(bot_messages);
+    scenario!(bot_reports);
+    scenario!(bot_report_failures);
+    scenario!(bot_report_cancellation);
+    scenario!(nested_bot_reports);
+    scenario!(stop_nested_bot_chains);
+    scenario!(expire_nested_bot_chains);
+    scenario!(four_hop_bot_reports);
+    scenario!(nested_report_start_failure);
+    scenario!(bot_creation);
+    scenario!(bot_memory_and_knowledge);
+    scenario!(permission_rules);
+    scenario!(custom_mcp_servers);
+    scenario!(mcp_apps);
+    scenario!(chat_routines);
+    scenario!(restart_continuation);
+
+    #[test]
+    fn checklist_updates() {
+        common::run("todos", async |base| {
+            todos::checklist_updates(&base, &base.join("engine")).await;
+        });
+    }
+
+    #[test]
+    fn startup_errors() {
+        common::run("startup", async |base| {
+            super::startup_errors(&base, &base.join("engine")).await;
+        });
+    }
 }

@@ -2,7 +2,7 @@
 //! actual subprocess launch context, and are cleaned on browser disconnect and backend shutdown.
 #![cfg(unix)]
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::sync::Arc;

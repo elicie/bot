@@ -1,7 +1,7 @@
 //! HTTP tests for vault secrets and custom MCP servers: loopback-only changes (the server has no
 //! login), LAN read-only views, write-only secret values, and the loopback-only MCP JSON route.
 
-mod common;
+use crate::common;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -51,13 +51,13 @@ async fn api(app: &TestApp, source: Ipv4Addr, method: &str, route: &str, body: O
 
 #[test]
 fn vault_and_custom_mcp_routes_are_loopback_only() {
-    let log = Log::default();
-    let writer = log.clone();
-    tracing::subscriber::set_global_default(
-        tracing_subscriber::fmt().with_max_level(tracing::Level::TRACE).without_time().with_ansi(false).with_writer(move || writer.clone()).finish(),
-    )
-    .unwrap();
     run("vault-mcp", async |root| {
+        let log = Log::default();
+        let writer = log.clone();
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::fmt().with_max_level(tracing::Level::TRACE).without_time().with_ansi(false).with_writer(move || writer.clone()).finish(),
+        )
+        .unwrap();
         let engine = root.join("engine");
         let app = TestApp::start(&engine, root.join("data")).await;
         let bot = app.store.snapshot().bots[0].id.clone();
