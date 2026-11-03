@@ -17,6 +17,7 @@ required-features = ["native"]
 [dependencies]
 anyhow.workspace = true
 dirs = "6"
+url = "2"
 fs2 = "0.4"
 grok-bot-core.workspace = true
 grok-bot-engine.workspace = true

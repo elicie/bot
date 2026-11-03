@@ -5,6 +5,7 @@ use grok_bot_core::{
     desktop_auth::DesktopToken,
 };
 use grok_bot_desktop::{
+    browser::SystemBrowser,
     import::import_web_data,
     paths::{APP_ID, AppPaths},
 };
@@ -77,6 +78,7 @@ fn main() -> anyhow::Result<()> {
     fs2::FileExt::try_lock_exclusive(&lock).context("This desktop data directory is already open")?;
     let downloads =
         dirs::download_dir().or_else(|| dirs::home_dir().map(|home| home.join("Downloads"))).context("Cannot determine the user download directory")?;
+    let browser = SystemBrowser::capture();
     let context = tauri::generate_context!();
     if context.config().identifier != APP_ID {
         bail!("Desktop application identifier does not match its data path");
@@ -144,8 +146,13 @@ fn main() -> anyhow::Result<()> {
                 // Keep its browser storage ephemeral rather than share a misleading default store.
                 .incognito(cfg!(target_os = "macos"))
                 .initialization_script(script)
-                .on_navigation(move |url| url.origin() == allowed_origin)
-                .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
+                // Wry reports iframe navigations here too. Existing sandboxed previews need
+                // inert srcdoc/blank documents; neither receives the top-level origin bootstrap.
+                .on_navigation(move |url| url.origin() == allowed_origin || matches!(url.as_str(), "about:srcdoc" | "about:blank"))
+                .on_new_window(move |url, _| {
+                    let _ = browser.open(url.as_str());
+                    tauri::webview::NewWindowResponse::Deny
+                })
                 .on_download(move |_, event| {
                     if let tauri::webview::DownloadEvent::Requested { url, destination } = event {
                         if url.scheme() != "blob" || url.origin() != download_origin {
