@@ -1,5 +1,4 @@
-//! `ManagedComputer`: one private, sandboxed Chrome behind the loopback proxy. Port of
-//! `server/computer.ts`.
+//! `ManagedComputer`: one private, sandboxed Chrome behind the loopback proxy.
 //!
 //! Every start gets a new epoch, a fresh 0700 profile directory, a new proxy with new credentials,
 //! and a verified Chrome: the command line must carry the protection flags, Linux must report an

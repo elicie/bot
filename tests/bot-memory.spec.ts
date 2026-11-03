@@ -3,9 +3,6 @@ import { startTestApp } from './app-fixture';
 import { startMockProvider, type MockCompletion, type MockProviderRequest } from './mock-provider';
 import type { AppState } from '../shared/types';
 
-// Bot memory, knowledge, and templates are implemented by the Rust server only.
-test.skip(process.env.GROK_BOT_BACKEND !== 'rust', 'Bot memory runs against the Rust server.');
-
 const snapshot = (page: Page): Promise<AppState> => page.evaluate(async () => (await fetch('/api/state')).json());
 const details = (page: Page) => page.getByRole('complementary', { name: '대화 세부 정보', exact: true });
 const memoryList = (page: Page) => details(page).getByRole('list', { name: /의 메모리$/ });

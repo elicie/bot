@@ -1,6 +1,5 @@
-//! Per-run workspace MCP broker (`POST /internal/mcp/:runId`). Port of `mcp()`, `brokerCall()`,
-//! `sendBotMessage()`, and `createSkill()` in `server/runtime.ts`. The managed-computer tools live
-//! in [`computer`].
+//! Per-run workspace MCP broker (`POST /internal/mcp/:runId`) for app-owned tools and approvals.
+//! The managed-computer tools live in [`computer`].
 
 use std::sync::Arc;
 
@@ -379,6 +378,7 @@ impl Runtime {
             paths: Some(vec![public_path.clone()]),
             local_only: None,
             approved_by_rule: None,
+            mcp_app: None,
         };
         let tool_id = tool.id.clone();
         let (allow, _, options) = approval_options("Allow once", "Deny");
@@ -464,6 +464,7 @@ impl Runtime {
             paths: None,
             local_only: None,
             approved_by_rule: None,
+            mcp_app: None,
         };
         let tool_id = tool.id.clone();
         let (allow, _, options) = approval_options("Send once", "Deny");
@@ -539,6 +540,7 @@ impl Runtime {
             paths: None,
             local_only: None,
             approved_by_rule: None,
+            mcp_app: None,
         };
         let tool_id = tool.id.clone();
         let (allow, _, options) = approval_options("Save skill once", "Deny");
@@ -615,6 +617,7 @@ impl Runtime {
             paths: None,
             local_only: None,
             approved_by_rule: None,
+            mcp_app: None,
         };
         let tool_id = tool.id.clone();
         let (allow, _, options) = approval_options("Create bot once", "Deny");

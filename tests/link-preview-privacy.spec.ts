@@ -5,7 +5,6 @@ import { startTestApp } from './app-fixture';
 import { startMockProvider } from './mock-provider';
 
 test('preview rendering stays safe at 320px and failed opt-out stays paused in this tab', async ({ page }) => {
-  test.skip(process.env.GROK_BOT_BACKEND !== 'rust', 'Link previews require the Rust server.');
   const hits: string[] = [];
   const title = '길이가아주긴문서제목'.repeat(25);
   const server = createServer((request, response) => {

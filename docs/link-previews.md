@@ -2,7 +2,7 @@
 
 ## 사용과 외부 접속
 
-Rust 서버에서 **설정 → 일반 → 링크 미리보기**를 켜면 완료된 봇 답변 아래에 최대 세 개의 링크 카드가 나타납니다. 기본값은 **꺼짐**이며, 서버에 저장한 선택은 브라우저 새로고침과 서버 재시작 뒤에도 유지됩니다. 서버를 공유하는 브라우저 모두에 적용됩니다. 모델 설정이나 작업 폴더 연결 없이도 이 설정을 바꿀 수 있습니다.
+**설정 → 일반 → 링크 미리보기**를 켜면 완료된 봇 답변 아래에 최대 세 개의 링크 카드가 나타납니다. 기본값은 **꺼짐**이며, 서버에 저장한 선택은 브라우저 새로고침과 서버 재시작 뒤에도 유지됩니다. 서버를 공유하는 브라우저 모두에 적용됩니다. 모델 설정이나 작업 폴더 연결 없이도 이 설정을 바꿀 수 있습니다.
 
 켜면 화면 근처에 있는 완료된 답변의 URL에 서버가 접속합니다. 원격 페이지에는 서버 IP와 해당 URL이 전달됩니다. 브라우저의 쿠키·인증 헤더·Referer는 전달하지 않습니다. 브라우저는 메타데이터와 썸네일을 앱의 동일 출처 API에서만 받으며, 썸네일을 표시하려고 외부 서버에 직접 접속하지 않습니다. 원래 링크나 카드를 직접 누르는 것은 별도의 일반 링크 이동입니다.
 
@@ -17,7 +17,7 @@ Markdown 링크, 참조 링크, 자동 링크와 일반 텍스트의 HTTP(S) URL
 - 공개 HTTP/SSE 스냅샷의 `linkPreviewsEnabled`는 Rust 서버에서 항상 boolean입니다. 디스크에는 `true`일 때만 선택 필드를 기록하며, 기존 파일에 없으면 `false`입니다.
 - 꺼진 상태와 비공개 목적지는 403, 잘못된 URL은 400, 큰 응답은 413, HTML이 아닌 페이지는 422, 다운로드 실패는 502, 전체 기한 초과는 504, 동시 요청 한도 초과는 503입니다. 썸네일만 실패하면 이미지 없는 정상 카드로 반환합니다.
 
-기존 Node 서버는 이 API를 제공하지 않으므로 UI에서 설정을 비활성화합니다. 해당 설정 필드만 추가된 호환 상태 파일은 Node 저장소에서도 읽고 보존하지만, 미리보기 지원을 광고하지 않습니다. 다른 Rust 전용 기능의 상태 파일까지 Node로 되돌릴 수 있다는 의미는 아닙니다.
+이 설정을 제공하지 않는 구버전 서버에 새 화면을 연결한 경우에는 설정을 비활성화하고 서버 업데이트를 안내합니다. 기존 상태 파일에 설정 필드가 없으면 외부 접속 없이 꺼진 상태로 시작합니다.
 
 ## 네트워크 보안 경계
 
@@ -50,9 +50,9 @@ Markdown 링크, 참조 링크, 자동 링크와 일반 텍스트의 HTTP(S) URL
 
 ## 검증과 화면 증거
 
-- URL 선택/상태 호환 회귀: `npx tsx --test tests/link-preview-*.test.ts tests/frontend-state.test.ts tests/store-ordering.test.ts`.
-- Rust 보안/캐시/설정 회귀: 새 미리보기 모듈의 단위 테스트와 HTTP 통합 테스트.
-- 브라우저: `GROK_BOT_BACKEND=rust npx playwright test tests/link-previews.spec.ts tests/link-preview-privacy.spec.ts`.
-- [Before / After와 재현 시나리오](evidence/issue-18/README.md).
+- URL 선택/화면 상태 회귀: `npx tsx --test tests/link-preview-urls.test.ts tests/frontend-state.test.ts`.
+- Rust 보안/캐시/설정 회귀: 미리보기 모듈의 단위 테스트와 HTTP/저장소 통합 테스트.
+- 브라우저: `npx playwright test tests/link-previews.spec.ts tests/link-preview-privacy.spec.ts`.
+- [Rust 단일 서버 통합 후 Before / After](<evidence/issue-18-rust-only/README.md>).
 
 테스트의 HTTP 사이트와 모델은 모두 격리된 로컬 fixture입니다. e2e에서만 debug 바이너리를 `NODE_ENV=test`로 실행하고 `GROK_BOT_LINK_PREVIEW_TEST_ORIGINS`에 JSON 배열로 명시한 loopback HTTP origin을 허용합니다. 호스트 이름·wildcard·임의 포트 허용은 없으며 release 빌드에서는 환경 값으로 이 예외를 켤 수 없습니다. 실제 외부 사이트에 대한 SSRF 탐침은 수행하지 않습니다.

@@ -1,5 +1,4 @@
-//! Hide local-computer approval and tool details from non-loopback clients. Port of
-//! `server/public-state.ts`.
+//! Hide local-computer approval and tool details from non-loopback clients.
 
 use grok_bot_model::{AppState, PendingPermission, ToolActivity};
 use serde_json::{Map, Value};
@@ -29,6 +28,7 @@ pub fn project_computer_permissions(mut state: AppState, local: bool) -> AppStat
                         paths: None,
                         local_only: Some(true),
                         approved_by_rule: None,
+                        mcp_app: None,
                     };
                 }
             }
@@ -137,6 +137,7 @@ mod tests {
             paths: Some(vec![detail.into()]),
             local_only,
             approved_by_rule: None,
+            mcp_app: None,
         }
     }
 

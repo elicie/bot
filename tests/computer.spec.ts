@@ -1,23 +1,14 @@
 import { test, expect } from '@playwright/test';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
-import { networkInterfaces, tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { createBackend } from '../server/app';
+import { networkInterfaces } from 'node:os';
+import { startTestApp } from './app-fixture';
 import { startMockProvider, type MockCompletion } from './mock-provider';
 import type { AppState } from '../shared/types';
 
-const rust = process.env.GROK_BOT_BACKEND === 'rust';
 const lanAddress = () => Object.values(networkInterfaces()).flat().find(address => address?.family === 'IPv4' && !address.internal)?.address;
 
 async function fixture() {
-  const previous = process.env.NODE_ENV;
-  process.env.NODE_ENV = 'test';
-  const root = await mkdtemp(join(tmpdir(), 'grok-computer-browser-'));
-  const workspace = join(root, 'workspace');
-  await mkdir(workspace);
-  await writeFile(join(workspace, 'notes.txt'), 'Local files remain available.');
   let releaseHang!: () => void;
   let signalHang!: () => void;
   const hang = new Promise<void>(resolve => { signalHang = resolve; });
@@ -29,33 +20,30 @@ async function fixture() {
   });
   await new Promise<void>(resolve => site.listen(0, '127.0.0.1', resolve));
   const siteOrigin = `http://127.0.0.1:${(site.address() as AddressInfo).port}`;
-  // The Rust server reads its loopback fixture origin from a variable honoured only by test builds
-  // started with NODE_ENV=test. It listens on every interface so a LAN request can be checked.
-  let backend: Awaited<ReturnType<typeof createBackend>> | undefined;
-  let app: Awaited<ReturnType<typeof import('./app-fixture')['startTestApp']>> | undefined;
-  let url: string;
-  let lanUrl: string | undefined;
-  if (rust) {
-    const { startTestApp } = await import('./app-fixture');
-    const hostname = lanAddress();
-    if (!hostname) throw Error('This verification requires a network interface');
-    app = await startTestApp({ network: true, hostname, env: { GROK_BOT_COMPUTER_TEST_ORIGINS: siteOrigin } });
-    lanUrl = app.url;
-    url = `http://127.0.0.1:${new URL(app.url).port}`;
-  } else {
-    backend = await createBackend({ dataDir: join(root, 'data'), dev: true, routines: { autoStart: false }, computer: { allowTestOrigins: [siteOrigin] } });
-    await new Promise<void>(resolve => backend!.server.listen(0, '127.0.0.1', resolve));
-    url = `http://127.0.0.1:${(backend.server.address() as AddressInfo).port}`;
-  }
-  return { backend, url, lanUrl, siteOrigin, workspace, hang, releaseHang, close: async () => {
+  const closeSite = async () => {
     releaseHang();
-    await backend?.close();
-    await app?.stop();
     site.closeAllConnections();
     await new Promise<void>(resolve => site.close(() => resolve()));
-    await rm(root, { recursive: true, force: true });
-    if (previous === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = previous;
-  } };
+  };
+  try {
+    // Only debug test servers honour this loopback fixture origin. Listen on every interface
+    // so the permission test can verify that a LAN client cannot approve local-only actions.
+    const hostname = lanAddress();
+    if (!hostname) throw Error('This verification requires a network interface');
+    const app = await startTestApp({ network: true, hostname, env: { GROK_BOT_COMPUTER_TEST_ORIGINS: siteOrigin } });
+    return {
+      url: `http://127.0.0.1:${new URL(app.url).port}`,
+      lanUrl: app.url,
+      siteOrigin,
+      workspace: app.workspace,
+      hang,
+      releaseHang,
+      close: async () => { releaseHang(); try { await app.stop(); } finally { await closeSite(); } },
+    };
+  } catch (error) {
+    await closeSite();
+    throw error;
+  }
 }
 
 const snapshot = (page: import('@playwright/test').Page): Promise<AppState> => page.evaluate(async () => (await fetch('/api/state')).json());
@@ -143,15 +131,10 @@ test('real source-engine computer observation waits for one-use approval and kee
     expect(provider.requests.some(request => JSON.stringify(request.messages).includes('Computer browser fixture'))).toBe(false);
     const pending = (await snapshot(page)).conversations.find(conversation => conversation.run.permission)!.run.permission!;
     expect(pending.localOnly).toBe(true);
-    if (f.backend) {
-      const conversation = f.backend.store.conversations.find(conversation => conversation.run.permission)!;
-      await expect(f.backend.runtime.resolve(conversation.id, pending.id, pending.options[0].id, false)).rejects.toThrow('loopback');
-    } else {
-      const conversation = (await snapshot(page)).conversations.find(conversation => conversation.run.permission)!;
-      const remote = await fetch(`${f.lanUrl}/api/conversations/${conversation.id}/permissions/${pending.id}`, { method: 'POST', headers: { Origin: f.lanUrl!, 'Content-Type': 'application/json', 'X-Grok-Bot': '1' }, body: JSON.stringify({ optionId: pending.options[0].id }) });
-      expect(remote.status).toBe(403);
-      expect(await remote.text()).toContain('loopback');
-    }
+    const conversation = (await snapshot(page)).conversations.find(conversation => conversation.run.permission)!;
+    const remote = await fetch(`${f.lanUrl}/api/conversations/${conversation.id}/permissions/${pending.id}`, { method: 'POST', headers: { Origin: f.lanUrl, 'Content-Type': 'application/json', 'X-Grok-Bot': '1' }, body: JSON.stringify({ optionId: pending.options[0].id }) });
+    expect(remote.status).toBe(403);
+    expect(await remote.text()).toContain('loopback');
     await approval.getByRole('button', { name: 'Allow once', exact: true }).click();
     await expect(page.getByRole('log', { name: '대화 메시지', exact: true })).toContainText('I observed the managed page after approval.');
     expect(provider.requests.some(request => request.messages.some(message => message.role === 'tool' && String(message.content).includes('Computer browser fixture')))).toBe(true);
@@ -184,7 +167,6 @@ test('real source-engine computer observation waits for one-use approval and kee
 });
 
 test('a network HTTP client gets a clear local-only computer state while its workspace editor stays usable', async ({ browser }) => {
-  const { startTestApp } = await import('./app-fixture');
   const hostname = lanAddress();
   if (!hostname) throw Error('This LAN verification requires a network interface');
   const app = await startTestApp({ network: true, hostname });

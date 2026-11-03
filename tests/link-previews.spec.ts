@@ -84,7 +84,6 @@ async function capture(page: Page, info: TestInfo, name: string) {
 
 for (const viewport of [{ width: 1040, height: 760 }, { width: 390, height: 844 }]) {
   test(`link preview visual comparison at ${viewport.width}px`, async ({ page }, info) => {
-    test.skip(!baseline && process.env.GROK_BOT_BACKEND !== 'rust', 'Link preview fetching and generated images use the Rust server.');
     const site = await previewSite();
     const app = await startTestApp({ env: { GROK_BOT_LINK_PREVIEW_TEST_ORIGINS: JSON.stringify([site.origin]) } });
     const provider = await startMockProvider({ reply: () => ({ text: `참고할 자료를 찾았습니다.\n\n[${title}](${site.origin}/guide)` }) });
@@ -135,7 +134,7 @@ for (const viewport of [{ width: 1040, height: 760 }, { width: 390, height: 844 
 }
 
 test('opt-in previews are capped, deduplicated, same-origin, cached and disabled durably', async ({ page }) => {
-  test.skip(baseline || process.env.GROK_BOT_BACKEND !== 'rust', 'The Rust backend owns link previews.');
+  test.skip(baseline, 'The pre-feature baseline has no preview setting.');
   const site = await previewSite();
   const answer = [
     '참고할 자료입니다.',

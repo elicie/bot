@@ -1,0 +1,11 @@
+/* An MCP app remains visibly separate from the host's one-use approval controls. */
+.mcp-app-announcement { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.mcp-app-policy { margin: 0; padding: 7px 12px; color: var(--secondary); font-size: 11px; line-height: 1.5; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.mcp-app-session.is-fill { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.mcp-app-session.is-fill > .visualization-stage { flex: 1; min-height: 120px; }
+.mcp-app-permission { margin: 10px; width: auto; min-width: 0; flex-shrink: 0; }
+.mcp-app-permission h3 { overflow-wrap: anywhere; }
+.mcp-app-permission .permission-description { max-height: 160px; overflow: auto; }
+.mcp-app-error { margin: 10px 12px; color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+.mcp-app-card > .visualization-code { max-height: 420px; margin: 0; padding: 12px; overflow: auto; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-height: 600px) { .mcp-app-permission .permission-description { max-height: 80px; } }

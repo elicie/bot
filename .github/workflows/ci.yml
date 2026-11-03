@@ -1,19 +1,16 @@
 name: CI
 
-# PRs check affected crates (including reverse dependents) and changed JS/browser tests.
-# Daily and manual runs cover the full suite; see docs/ci.md for scope and diagnostics.
+# PRs and main pushes check only affected crates (including reverse dependents), the web build,
+# and changed unit/browser tests. Release-path changes also verify the standalone Rust binary
+# outside the checkout without Node on PATH. There is no full-suite run; see docs/ci.md for diagnostics.
 # Build jobs use the self-hosted grok-bot runner except for fork PRs.
 
 on:
   push:
     branches: [main]
   pull_request:
-  schedule:
-    - cron: '17 3 * * *' # Daily at 03:17 UTC on the default branch (main).
-  workflow_dispatch:
 
 concurrency:
-  # A main push must not cancel the daily full check.
   group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
@@ -35,8 +32,9 @@ jobs:
       web: ${{ steps.detect.outputs.web }}
       rust: ${{ steps.detect.outputs.rust }}
       packages: ${{ steps.detect.outputs.packages }}
-      node: ${{ steps.detect.outputs.node }}
+      unit: ${{ steps.detect.outputs.unit }}
       specs: ${{ steps.detect.outputs.specs }}
+      release: ${{ steps.detect.outputs.release }}
       tools: ${{ steps.detect.outputs.tools }}
     steps:
       - uses: actions/checkout@v4
@@ -51,16 +49,11 @@ jobs:
         shell: bash # Explicit bash enables pipefail so selector failures cannot hide behind tee.
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-          FULL: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         run: |
-          if [ "$FULL" = true ]; then
-            node scripts/ci-changes.mjs --full | tee -a "$GITHUB_OUTPUT"
-          else
-            # Missing/zero base (e.g. first push): check the last commit, never the full suite.
-            { [ -n "$BASE" ] && git diff --name-only "$BASE"...HEAD > changed.txt; } || git diff --name-only HEAD~1 HEAD > changed.txt
-            cat changed.txt
-            node scripts/ci-changes.mjs < changed.txt | tee -a "$GITHUB_OUTPUT"
-          fi
+          # Missing/zero base (e.g. first push): check the last commit, never the full suite.
+          { [ -n "$BASE" ] && git diff --name-only "$BASE"...HEAD > changed.txt; } || git diff --name-only HEAD~1 HEAD > changed.txt
+          cat changed.txt
+          node scripts/ci-changes.mjs < changed.txt | tee -a "$GITHUB_OUTPUT"
 
   ci-tools:
     name: CI diagnostic regressions
@@ -144,7 +137,7 @@ jobs:
           else
             echo "Rust lint cache exact match = $EXACT_HIT (see restore/save logs for fallback hits and uploads)" | tee -a "$GITHUB_STEP_SUMMARY"
           fi
-      - name: Install ripgrep (bundled into the engine build)
+      - name: Install ripgrep (bundled into the Rust server)
         if: needs.changes.outputs.packages != '' && runner.environment == 'github-hosted'
         run: sudo apt-get update && sudo apt-get install -y ripgrep
       # scripts/cargo.mjs stages a checksum-verified protoc and sets the ripgrep paths.
@@ -158,23 +151,22 @@ jobs:
         run: df -h / . /tmp && df -i / . /tmp && du -sh -- "${CARGO_TARGET_DIR:-target}" 2>/dev/null || true
 
   test:
-    name: Tests (affected crates, Node tests, specs)
+    name: Tests (affected crates, frontend units, Rust specs)
     needs: changes
-    if: needs.changes.outputs.packages != '' || needs.changes.outputs.node != '' || needs.changes.outputs.specs != ''
-    # Same-repo PRs and pushes use the self-hosted ai-dev runner (warm build cache); fork PRs
-    # (which need maintainer approval to run at all) use a GitHub-hosted runner.
+    if: needs.changes.outputs.packages != '' || needs.changes.outputs.unit != '' || needs.changes.outputs.specs != ''
+    # Same-repo PRs and pushes use the pinned, persistent self-hosted build environment.
     runs-on: ${{ github.event.pull_request.head.repo.fork && fromJSON('["ubuntu-latest"]') || fromJSON('["self-hosted", "grok-bot"]') }}
     timeout-minutes: 120
     env:
       PACKAGES: ${{ needs.changes.outputs.packages }}
-      NODE_TESTS: ${{ needs.changes.outputs.node }}
+      UNIT_TESTS: ${{ needs.changes.outputs.unit }}
       SPECS: ${{ needs.changes.outputs.specs }}
     steps:
       - name: Free disk space
         if: runner.environment == 'github-hosted'
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
       - uses: actions/checkout@v4
-      # One target dir for cargo, scripts/build-engine.mjs (defaults to engine/target), and rust-cache.
+      # One persistent target dir for the Rust workspace and browser fixture.
       - name: Cargo target dir (persistent on self-hosted)
         run: |
           if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
@@ -210,44 +202,32 @@ jobs:
           node-version: 24
           # ~/.npm persists on the self-hosted runner; uploading it to the Actions cache only costs time.
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
-      - name: Install ripgrep (bundled into the engine build)
+      - name: Install ripgrep (bundled into the Rust server)
         if: runner.environment == 'github-hosted'
         run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: node scripts/ci-run.mjs npm ci
       - name: Rust tests (affected crates)
         if: env.PACKAGES != ''
         run: node scripts/ci-run.mjs node scripts/cargo.mjs test --locked $PACKAGES
-      # Keep compilation separate so a stall cannot be mistaken for a silent Node test.
-      - name: Build engine for Node tests
-        if: env.NODE_TESTS != ''
-        timeout-minutes: 30
-        run: node scripts/ci-run.mjs npm run build:engine
-      - name: Node tests (selected or full)
-        if: env.NODE_TESTS != ''
+      - name: Unit tests (changed files)
+        if: env.UNIT_TESTS != ''
         timeout-minutes: 30
         run: |
-          if [ "$NODE_TESTS" = all ]; then files="tests/*.test.ts"; else files="$NODE_TESTS"; fi
           # Clip pathological lines: a multi-megabyte line (e.g. a failure message dumping a 64 MiB test
           # state) stalls the runner's log processing for hours instead of failing the step (#13).
           set -o pipefail
-          node scripts/ci-run.mjs npx tsx --test --test-timeout=180000 --test-reporter=spec $files 2>&1 | node scripts/clip-lines.mjs
+          node scripts/ci-run.mjs npx tsx --test --test-timeout=180000 --test-reporter=spec $UNIT_TESTS 2>&1 | node scripts/clip-lines.mjs
       - name: Build web and Rust server for end-to-end specs
         if: env.SPECS != ''
         run: |
           node scripts/ci-run.mjs npm run build
           node scripts/ci-run.mjs npm run build:server
-      - name: End-to-end specs (selected or full, Rust backend, system Chrome)
+      - name: End-to-end specs (changed, Rust server, system Chrome)
         if: env.SPECS != ''
         timeout-minutes: 30
         env:
-          GROK_BOT_BACKEND: rust
           GROK_BOT_SERVER_BIN: ${{ env.CARGO_TARGET_DIR }}/debug/grok-bot
-        run: |
-          if [ "$SPECS" = all ]; then
-            node scripts/ci-run.mjs npx playwright test
-          else
-            node scripts/ci-run.mjs npx playwright test $SPECS
-          fi
+        run: node scripts/ci-run.mjs npx playwright test $SPECS
       - name: Final disk usage
         if: always()
         run: df -h / . /tmp && df -i / . /tmp && du -sh -- "${CARGO_TARGET_DIR:-target}" 2>/dev/null || true
@@ -258,3 +238,58 @@ jobs:
           name: playwright-results
           path: /tmp/grok-bot-playwright-results
           retention-days: 7
+
+  release:
+    name: Standalone Rust release
+    needs: changes
+    if: needs.changes.outputs.release == 'true'
+    runs-on: ${{ github.event.pull_request.head.repo.fork && fromJSON('["ubuntu-latest"]') || fromJSON('["self-hosted", "grok-bot"]') }}
+    timeout-minutes: 120
+    steps:
+      - name: Free disk space
+        if: runner.environment == 'github-hosted'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+      - uses: actions/checkout@v4
+      - name: Cargo target dir (persistent on self-hosted)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
+            # Match the existing per-runner cache and cap policy used by lint/test.
+            dir="$HOME/.cache/grok-bot-ci/$RUNNER_NAME/target"
+            real=$(readlink -f "$dir" || true)
+            if [ -d "$real" ] && [ "$(du -s --block-size=1G "$real" | cut -f1)" -gt "$SELF_HOSTED_TARGET_CAP_GB" ]; then
+              echo "Clearing $real (over ${SELF_HOSTED_TARGET_CAP_GB}G)"; rm -rf "$real"; rm -f "$dir"
+            fi
+            echo "RUSTUP_TOOLCHAIN=$SELF_HOSTED_RUST" >> "$GITHUB_ENV"
+          else
+            dir="$GITHUB_WORKSPACE/target"
+          fi
+          echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
+      - if: runner.environment == 'github-hosted'
+        uses: dtolnay/rust-toolchain@stable
+      - if: runner.environment == 'github-hosted'
+        id: rust-cache
+        uses: Swatinem/rust-cache@v2
+      - name: Rust cache status
+        env:
+          EXACT_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
+            echo "Rust release uses persistent target: $CARGO_TARGET_DIR (no Actions cache upload)" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Rust release cache exact match = $EXACT_HIT (see restore/save logs for fallback hits and uploads)" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
+      - name: Install ripgrep (bundled into the Rust server)
+        if: runner.environment == 'github-hosted'
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - run: node scripts/ci-run.mjs npm ci
+      - name: Build standalone release with embedded frontend
+        run: node scripts/ci-run.mjs npm run build:release
+      - name: Verify release outside the checkout without Node
+        run: node scripts/ci-run.mjs node scripts/verify-release.mjs "$CARGO_TARGET_DIR/release/grok-bot"
+      - name: Final disk usage
+        if: always()
+        run: df -h / . /tmp && df -i / . /tmp && du -sh -- "${CARGO_TARGET_DIR:-target}" 2>/dev/null || true

@@ -7,9 +7,6 @@ import type { McpConfigDocument, SecretInput } from '../shared/vault';
 import { startTestApp } from './app-fixture';
 import { startMockProvider, type MockCompletion, type MockProviderRequest } from './mock-provider';
 
-// Vault secrets and custom MCP servers are implemented by the Rust server only.
-test.skip(process.env.GROK_BOT_BACKEND !== 'rust', 'Vault and custom MCP servers run against the Rust server.');
-
 const SECRET = 'e2e-vault-secret-value-31337';
 const snapshot = (page: Page): Promise<AppState> => page.evaluate(async () => (await fetch('/api/state')).json());
 const details = (page: Page) => page.getByRole('complementary', { name: '대화 세부 정보', exact: true });

@@ -1,5 +1,5 @@
-//! HTTP layer. Port of `server/app.ts`: Host/Origin validation, security headers, same-origin JSON
-//! mutations, the `/api` routes, SSE state events, the internal MCP broker route, and static files.
+//! HTTP layer: Host/Origin validation, security headers, same-origin JSON mutations, `/api`
+//! routes, SSE state events, the internal MCP broker route, and frontend assets.
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -40,8 +40,9 @@ pub struct HttpContext {
     /// Bound port, set once the listener is open; Host must name this port.
     pub port: AtomicU16,
     pub closing: AtomicBool,
-    /// Built frontend (`dist/`). `None` serves the API only.
+    /// Explicit frontend directory override, or the debug build's `dist/` fallback.
     pub web_root: Option<PathBuf>,
+    pub embedded_web: Option<crate::web::EmbeddedWeb>,
     /// Bounded disposable probes, tracked independently of the app command queue for shutdown.
     pub(crate) mcp_tests: crate::mcp_probe::Probes,
     /// Flips to `true` after final state flush; open SSE streams can then finish.
@@ -69,6 +70,7 @@ impl HttpContext {
             port: AtomicU16::new(0),
             closing: AtomicBool::new(false),
             web_root,
+            embedded_web: None,
             mcp_tests: crate::mcp_probe::Probes::default(),
             stopping: tokio::sync::watch::Sender::new(false),
         }
@@ -284,6 +286,7 @@ pub fn router(ctx: Ctx) -> Router {
         .merge(crate::groups_http::routes())
         .merge(crate::computer_http::routes())
         .merge(crate::vault_http::routes())
+        .merge(crate::mcp_apps_http::routes())
         .merge(crate::main_bot::routes())
         .fallback(|| async { (StatusCode::NOT_FOUND, Json(json!({ "error": "API endpoint does not exist." }))) });
     let mut app = Router::new()
@@ -300,13 +303,17 @@ pub fn router(ctx: Ctx) -> Router {
                 }));
             app.fallback_service(files)
         }
-        None => app.fallback(|| async { StatusCode::NOT_FOUND }),
+        None => match ctx.embedded_web {
+            Some(assets) => app.fallback(move |request: Request| async move { crate::web::embedded_response(request, assets) }),
+            None => app.fallback(|| async { StatusCode::NOT_FOUND }),
+        },
     };
     app.layer(middleware::from_fn_with_state(ctx.clone(), guard)).layer(axum::extract::DefaultBodyLimit::max(MAX_JSON_BYTES)).with_state(ctx)
 }
 
 async fn spa_fallback(request: Request, index: PathBuf) -> Response {
-    if request.uri().path().starts_with("/internal") || !matches!(*request.method(), Method::GET | Method::HEAD) {
+    let path = request.uri().path();
+    if path == "/internal" || path.starts_with("/internal/") || !matches!(*request.method(), Method::GET | Method::HEAD) {
         return StatusCode::NOT_FOUND.into_response();
     }
     match tokio::fs::read(&index).await {

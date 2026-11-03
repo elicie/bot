@@ -74,7 +74,7 @@ interface BrowserPreferences {
 }
 const preferencesKey = 'grok-bot.browser-preferences';
 const defaultPreferences: BrowserPreferences = { theme: 'dark', spellcheck: true };
-const buildCommand = 'npm run build:engine && npm run build';
+const buildCommand = 'npm run build:release';
 
 function readBrowserPreferences(): BrowserPreferences {
   try {
@@ -132,8 +132,7 @@ function RuntimeDetails({ runtime }: { runtime: AppState['runtime'] }) {
           <div className="settings-copy">
             <span className="danger-text">{runtime.error || '앱 엔진을 사용할 수 없습니다.'}</span>
             <span>
-              서버 컴퓨터의 앱 폴더에서 npm run build:engine 명령으로 엔진을 빌드한 뒤 서버를 다시
-              시작해 주세요.
+              서버 로그를 확인한 뒤 grok-bot을 다시 시작해 주세요.
             </span>
           </div>
         </div>
@@ -398,7 +397,7 @@ export function Settings({
                       <label className="settings-copy" htmlFor="settings-link-previews">
                         <strong>링크 미리보기</strong>
                         <span id="settings-link-previews-description">기본값은 꺼짐입니다. 켜면 완료된 봇 답변마다 링크를 최대 3개 미리 보여줍니다.</span>
-                        {typeof data.linkPreviewsEnabled !== 'boolean' && <span>이 서버에서는 지원하지 않습니다. Rust 서버에서 사용할 수 있습니다.</span>}
+                        {typeof data.linkPreviewsEnabled !== 'boolean' && <span>이 서버 버전에서는 지원하지 않습니다. 서버를 업데이트해 주세요.</span>}
                         {linkPreviewsSaving && <span role="status">서버에 저장 중…</span>}
                       </label>
                       <span className="settings-switch">
@@ -555,8 +554,9 @@ export function Settings({
                   )}
                   <ol className="settings-instructions">
                     <li>Node.js 22.12 이상, Rust stable, 네이티브 컴파일러와 ripgrep이 필요합니다.</li>
-                    <li>의존성이 바뀌었다면 먼저 <code>npm install</code>을 실행합니다.</li>
-                    <li>엔진과 웹 앱 빌드가 끝나면 실행 중인 서버를 중지하고 <code>npm start</code>로 다시 시작합니다.</li>
+                    <li>빌드 전에 <code>npm ci</code>로 의존성을 설치합니다.</li>
+                    <li>빌드가 끝나면 실행 중인 서버를 중지하고 <code>./target/release/grok-bot</code>으로 다시 시작합니다.</li>
+                    <li>완성된 바이너리에는 엔진과 웹 화면이 포함되어 Node.js 없이 실행할 수 있습니다.</li>
                     <li>설정을 다시 열어 엔진의 버전과 사용 가능 상태를 확인합니다.</li>
                   </ol>
                 </section>

@@ -1,6 +1,20 @@
 import type { PublicMcpServer, PublicSecret } from './vault';
 export type RunStatus = 'idle' | 'starting' | 'running' | 'awaiting_permission' | 'completed' | 'cancelled' | 'error' | 'interrupted';
 export type ToolStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
+/** A bounded MCP UI resource saved with its originating tool activity (Rust custom MCP). */
+export interface McpApp {
+  botId: string;
+  serverId: string;
+  serverUpdatedAt: string;
+  server: string;
+  tool: string;
+  uri: string;
+  html: string;
+  /** JSON object containing the original tool arguments, not instructions. */
+  input: string;
+  /** The engine's text/content fallback; structuredContent and result _meta are not exposed. */
+  output: string;
+}
 export interface ToolActivity {
   id: string;
   title: string;
@@ -12,6 +26,7 @@ export interface ToolActivity {
   localOnly?: boolean;
   /** ID of the permission rule that approved this action without asking. */
   approvedByRule?: string;
+  mcpApp?: McpApp;
 }
 export interface Message {
   id: string;
@@ -279,7 +294,7 @@ export interface AppState {
   mcpServers?: PublicMcpServer[];
   /** The main bot ("메인 Bot"). Absent from older servers: the first bot is the main bot. */
   mainBotId?: string;
-  /** Opt-in server-side link previews. Missing on legacy Node servers: unsupported. */
+  /** Opt-in server-side link previews; optional for snapshots from older server revisions. */
   linkPreviewsEnabled?: boolean;
 }
 export type PermissionCategory = 'file_write' | 'bot_message' | 'bot_create' | 'skill_save' | 'memory_save' | 'mcp_tool';

@@ -1,9 +1,9 @@
-//! Workspace file confinement and private application file helpers. Port of `server/files.ts`.
+//! Workspace file confinement and private application file helpers.
 //!
 //! Every path is opened by walking its segments from `/` with `openat(O_DIRECTORY | O_NOFOLLOW)`
 //! relative to the previously opened directory descriptor, so no symbolic link or non-directory
 //! component is ever followed. Files are then opened, created and renamed relative to that pinned
-//! parent descriptor. (The Node version reached the same lookups through `/proc/self/fd/<fd>/<name>`.)
+//! parent descriptor.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;

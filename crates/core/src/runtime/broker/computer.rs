@@ -1,5 +1,4 @@
-//! Broker tools for the managed browser: `computer_observe` and `computer_act`. Port of
-//! `computerCall()` in `server/runtime.ts`.
+//! Broker tools for the managed browser: `computer_observe` and `computer_act`.
 //!
 //! The tools work only on a browser the user started locally for this bot. Every observation and
 //! action asks for its own one-use approval that only a loopback client can decide (permission

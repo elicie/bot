@@ -1,6 +1,5 @@
 //! Managed computer: an app-owned private Chrome the user starts locally and the model may observe
-//! or act on with one-use local approval. Port of `shared/computer.ts`, `server/computer.ts`,
-//! `server/computer-network.ts`, and `server/computer-api.ts`.
+//! or act on with one-use local approval. Its JSON contract follows `shared/computer.ts`.
 //!
 //! - [`network`]: public-origin allowlist, DNS validation of every answer, address pinning.
 //! - [`proxy`]: the authenticated loopback forward proxy Chrome must use for every request.

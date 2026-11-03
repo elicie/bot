@@ -9,32 +9,21 @@
   and dependency paths without resolving/downloading the external dependency graph.
   Renamed, optional, dev, build and target-specific workspace dependencies are
   conservatively included. Unknown/deleted crate directories select the workspace.
-- **Run the full suite daily on main**, at **03:17 UTC**, to cover gaps in the
-  intentionally selective Node/browser mapping. Scheduled runs do not diff a base
-  commit: they run web typecheck/build, workspace rustfmt/clippy/tests, every Node
-  test and every Playwright spec. GitHub schedules use the default branch and may
-  start late. Main push concurrency cannot cancel a scheduled check.
-- **Manual runs are full runs too.** Use the Actions UI's CI → Run workflow, or:
-
-  ```sh
-  gh workflow run ci.yml --repo elicie/bot --ref main
-  ```
-
-- Pull requests never run the full application suite, including PRs that edit the
-  CI workflow, selector or diagnostics. A missing or invalid diff base falls back
+- **There is no full-suite run** — not on PRs, main pushes, a schedule or manual
+  dispatch, including changes that edit the CI workflow, selector or diagnostics. A missing or invalid diff base falls back
   to the last commit. Root Cargo manifests/lockfile and Rust build-environment
   changes select the Rust workspace; a rustfmt-only change needs just formatting.
 - Detect runs only deterministic selector regressions. Timing-sensitive diagnostic
   process tests have a separate `CI diagnostic regressions` job, selected only for
-  CI workflow/helper changes and daily/manual runs, so an ordinary application PR
+  CI workflow/helper changes, so an ordinary application PR
   does not depend on process-lifecycle timing checks.
 - Conventional crate-root READMEs and Markdown under a crate's `docs/` tree do not
   select Rust jobs by themselves. Source/test fixtures and other assets remain
   conservative inputs, including Markdown outside those documentation locations.
 - Existing application-PR Node/backend and changed-spec mapping is preserved;
-  reverse-dependency expansion concerns Rust crates. The daily full run is the
-  safety net for cross-cutting JS/browser behavior, not a claim that selective
-  checks cover every downstream behavior.
+  reverse-dependency expansion concerns Rust crates. Selective checks are not a
+  claim that every downstream JS/browser behavior is covered; run broader tests
+  locally when a change is known to be cross-cutting.
 
 ## When a command stops producing output
 
@@ -72,7 +61,6 @@ Local smoke checks (no npm install required):
 ```sh
 node --test scripts/ci-*.test.mjs
 printf 'crates/store/src/lib.rs\n' | node scripts/ci-changes.mjs
-node scripts/ci-changes.mjs --full
 CI_RESOURCE_INTERVAL_MS=1000 node scripts/ci-run.mjs node -e 'setTimeout(() => {}, 2200)'
 ```
 
@@ -145,7 +133,7 @@ so they are not proof of warm/full Node CI performance. An
 **18m27s**, including 105 passing Node tests in 32 seconds.
 
 The under-15-minute target applies to ordinary selective PRs, not an empty-cache
-workspace rebuild or the daily/manual full suite. Keep measuring the critical-path
+workspace rebuild. Keep measuring the critical-path
 job and whether the Rust cache actually restored; do not infer a guarantee from a
 single run. New reverse-dependent coverage can increase the work for low-level
 crate changes, intentionally trading some selectivity for correctness.

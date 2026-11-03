@@ -9,10 +9,6 @@ publish = false
 name = "grok_bot_engine"
 path = "src/lib.rs"
 
-[[bin]]
-name = "grok-bot-engine"
-path = "src/main.rs"
-
 [dependencies]
 agent-client-protocol = { version = "=0.10.4", features = ["unstable"] }
 anyhow = "1"
