@@ -1,4 +1,4 @@
-//! Bot-to-bot delivery data rules. Port of `server/bot-messages.ts`. CONTRACT (store agent).
+//! Bot-to-bot delivery admission, persistence, and follow-up data rules.
 //!
 //! A recipient waits for all work it sent from its conversation, including later report turns.
 //! Child results are consumed by hidden report user/assistant pairs before the recipient's final

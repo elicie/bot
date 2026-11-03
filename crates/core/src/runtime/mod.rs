@@ -1,14 +1,11 @@
-//! Agent runtime. Port of `server/runtime.ts` onto the in-process engine host
-//! (`grok_bot_engine::host::EngineHost`). CONTRACT (runtime agent): keep these signatures; the HTTP
-//! layer and scheduler call them.
+//! Agent runtime on the in-process engine host (`grok_bot_engine::host::EngineHost`), called by the
+//! HTTP layer and scheduler.
 //!
-//! Differences forced by hosting the engine in-process (everything else matches the Node runtime):
-//! - One shared engine serves every conversation. It starts on the first run and restarts when the
-//!   provider settings change while no run is active. Each turn still uses its own broker URL and
-//!   bearer token, so the session is closed when the turn ends and loaded again from disk on the
-//!   next turn, exactly as the per-process engine loaded it after every respawn.
-//! - There is no process to kill. Cancellation and inactivity send `session/cancel`; when the prompt
-//!   does not return within `cancel_deadline` the session is abandoned (see [`Runtime::execute`]).
+//! One shared engine serves every conversation. It starts on the first run and restarts when the
+//! provider settings change while no run is active. Each turn uses its own broker URL and bearer
+//! token, so its session is closed when the turn ends and loaded from disk on the next turn.
+//! There is no engine process to kill. Cancellation and inactivity send `session/cancel`; when the
+//! prompt does not return within `cancel_deadline`, its session is abandoned (see [`Runtime::execute`]).
 
 pub mod attachments;
 mod broker;

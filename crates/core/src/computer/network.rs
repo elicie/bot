@@ -1,5 +1,4 @@
-//! Network policy of the managed computer. Port of `ComputerNetworkPolicy`,
-//! `isGlobalComputerAddress`, `computerUrl`, and `computerOrigin` in `server/computer-network.ts`.
+//! Public-origin and address policy for the managed computer.
 //!
 //! Only user-allowlisted public HTTP(S) origins are reachable. Every DNS answer must be a global
 //! unicast address (one private answer denies the whole name, which defeats DNS rebinding through

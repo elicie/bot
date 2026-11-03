@@ -1,6 +1,5 @@
-//! Per-run workspace MCP broker (`POST /internal/mcp/:runId`). Port of `mcp()`, `brokerCall()`,
-//! `sendBotMessage()`, and `createSkill()` in `server/runtime.ts`. The managed-computer tools live
-//! in [`computer`].
+//! Per-run workspace MCP broker (`POST /internal/mcp/:runId`) for app-owned tools and approvals.
+//! The managed-computer tools live in [`computer`].
 
 use std::sync::Arc;
 

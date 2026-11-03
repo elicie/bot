@@ -138,7 +138,11 @@ export class Deployment {
     // Build into a new immutable release; neither live web assets nor running binary is overwritten.
     await this.execute('npm', ['run', 'build', '--', '--outDir', path.join(release, 'dist')]);
     const target = path.resolve(root, process.env.CARGO_TARGET_DIR || 'target');
-    await this.execute(process.execPath, ['scripts/cargo.mjs', 'build', '--locked', '--release', '--target-dir', target, '-p', 'grok-bot-server']);
+    // Embed this staged UI, not a missing or stale checkout dist/. Force only this Cargo build's
+    // environment entry; do not mutate the updater process or overwrite live frontend assets.
+    const webRoot = `env.GROK_BOT_BUILD_WEB_ROOT.value=${JSON.stringify(path.join(release, 'dist'))}`;
+    await this.execute(process.execPath, ['scripts/cargo.mjs', 'build', '--locked', '--release', '--target-dir', target, '-p', 'grok-bot-server',
+      '--config', webRoot, '--config', 'env.GROK_BOT_BUILD_WEB_ROOT.force=true']);
     await copyFile(path.join(target, 'release/grok-bot'), path.join(release, 'grok-bot'));
     await chmod(path.join(release, 'grok-bot'), 0o700);
     await lstat(path.join(release, 'dist/index.html'));

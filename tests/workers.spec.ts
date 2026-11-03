@@ -5,8 +5,7 @@ import type { AppState } from '../shared/types';
 import { startTestApp } from './app-fixture';
 import { startMockProvider, type MockCompletion, type MockProviderRequest } from './mock-provider';
 
-// These tests use the real app/engine and disposable fixture state, not injected worker snapshots.
-test.skip(process.env.GROK_BOT_BACKEND !== 'rust', 'App-managed workers are implemented by the Rust backend only.');
+// The Rust-only fixture runs the real app/engine with disposable state, not injected worker snapshots.
 
 const snapshot = (page: Page): Promise<AppState> => page.evaluate(async () => {
   const response = await fetch('/api/state');

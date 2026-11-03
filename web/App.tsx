@@ -445,7 +445,7 @@ export function App() {
         type: 'error',
         error:
           before.data.runtime.error ||
-          '앱 엔진을 사용할 수 없습니다. 서버 컴퓨터의 앱 폴더에서 npm run build:engine 명령으로 엔진을 빌드한 뒤 서버를 다시 시작해 주세요.',
+          '앱 엔진을 사용할 수 없습니다. 서버 로그를 확인한 뒤 grok-bot을 다시 시작해 주세요.',
       });
       return;
     }

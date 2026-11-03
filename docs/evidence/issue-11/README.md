@@ -1,6 +1,6 @@
 # Issue #11: queued Bot follow-up cancellation
 
-All images are actual Chrome application captures, not mockups. They show disposable synthetic conversations with a local scripted OpenAI-compatible provider and the real pinned application engine. No credentials or personal conversation content are included.
+All images are actual Chrome application captures, not mockups. They show disposable synthetic conversations with a local scripted OpenAI-compatible provider and the real pinned application engine. No credentials or personal conversation content are included. Captures and check results belong to the revisions below; they are historical evidence, not a fresh verification of the rebased P4 review head.
 
 ## Matched Before / After
 
@@ -30,7 +30,7 @@ Follow-up reports remain Rust-backend-only. After writing an unstarted cancellat
 
 ## Completed verification
 
-All checks below passed locally:
+All checks below passed locally at the recorded implementation revision; obsolete commands are preserved as historical evidence, not current P4 instructions:
 
 ```sh
 npm run build

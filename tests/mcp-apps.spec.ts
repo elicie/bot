@@ -6,7 +6,6 @@ import { startTestApp } from './app-fixture';
 import { startMockProvider } from './mock-provider';
 import { startMcpAppsFixture, mcpAppsReply } from './mcp-app-fixture';
 
-test.skip(process.env.GROK_BOT_BACKEND !== 'rust', 'MCP apps extend the existing Rust custom-MCP capability.');
 const baseline = process.env.MCP_APP_BASELINE === '1';
 const snapshot = (page: Page): Promise<AppState> => page.evaluate(async () => (await fetch('/api/state')).json());
 const api = (page: Page, path: string, body: unknown, method = 'POST') => page.evaluate(async ({ path, body, method }) => {

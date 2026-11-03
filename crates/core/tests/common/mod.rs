@@ -48,6 +48,7 @@ impl TestApp {
             data_dir: options.data_dir.clone(),
             engine_root: options.engine_root.to_path_buf(),
             web_root: None,
+            embedded_web: None,
             allowed_hosts: options.allowed_hosts,
             now: None,
             scheduler: None,

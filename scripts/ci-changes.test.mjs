@@ -8,9 +8,8 @@ import { readCargoMetadata, selectChanges } from './ci-changes.mjs';
 
 const script = fileURLToPath(new URL('./ci-changes.mjs', import.meta.url));
 const cwd = path.resolve('synthetic-workspace');
-const empty = { web: false, rust: false, packages: '', node: '', specs: '', tools: false };
-const full = { web: true, rust: true, packages: '--workspace', node: 'all', specs: 'all', tools: true };
-const noMetadata = { loadMetadata: () => assert.fail('metadata must remain lazy') };
+const empty = { web: false, rust: false, packages: '', unit: '', specs: '', release: false, tools: false };
+const noMetadata = { loadMetadata: () => assert.fail('metadata must remain lazy'), fileExists: () => true };
 const dependency = (dir, fields = {}) => ({ name: path.basename(dir), path: path.join(cwd, dir), ...fields });
 const member = (name, dir, dependencies = []) => ({
   id: `workspace:${name}`, name, manifest_path: path.join(cwd, dir, 'Cargo.toml'), dependencies,
@@ -24,7 +23,9 @@ const workspace = () => metadataFor([
   member('core', 'crates/core', [dependency('crates/store'), dependency('engine')]),
   member('server', 'crates/server', [dependency('crates/core'), dependency('engine')]),
 ]);
-const select = (files, metadata = workspace()) => selectChanges(files, { cwd, loadMetadata: () => metadata });
+const select = (files, metadata = workspace()) => selectChanges(files, {
+  cwd, loadMetadata: () => metadata, fileExists: () => true,
+});
 const cli = (args = [], input = '') => spawnSync(process.execPath, [script, ...args], {
   encoding: 'utf8', input, timeout: 10_000, env: { ...process.env, PATH: '' },
 });
@@ -34,7 +35,9 @@ const outputs = result => {
   assert.equal(result.stderr, '');
   return Object.fromEntries(result.stdout.trimEnd().split('\n').map(line => line.split('=')));
 };
+const emptyOutputs = { web: 'false', rust: 'false', packages: '', unit: '', specs: '', release: 'false', tools: 'false' };
 
+// Preserve main's affected-crate coverage, including the engine as an in-process Rust library.
 test('selects the transitive reverse closure, not upstream or unrelated crates', () => {
   const cases = [
     ['crates/model/src/lib.rs', '-p core -p files -p model -p server -p store'],
@@ -45,7 +48,7 @@ test('selects the transitive reverse closure, not upstream or unrelated crates',
     ['engine/src/lib.rs', '-p core -p engine -p server'],
   ];
   for (const [file, packages] of cases) {
-    assert.deepEqual(select([file]), { ...empty, rust: true, packages }, file);
+    assert.deepEqual(select([file]), { ...empty, rust: true, packages, release: file.startsWith('crates/server/') }, file);
   }
 });
 
@@ -127,10 +130,10 @@ test('metadata failures are not silently swallowed', () => {
   }), /broken workspace metadata/);
 });
 
-test('root manifests and Rust build helpers select the workspace without metadata', () => {
+test('root manifests and Rust build helpers select the workspace without app or release expansion', () => {
   for (const file of [
     'Cargo.toml', 'Cargo.lock', '.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml',
-    'scripts/cargo.mjs', 'scripts/rust-env.mjs', 'scripts/build-engine.mjs',
+    'scripts/cargo.mjs', 'scripts/rust-env.mjs',
   ]) {
     assert.deepEqual(selectChanges([file], noMetadata), { ...empty, rust: true, packages: '--workspace' }, file);
   }
@@ -191,18 +194,14 @@ test('mixed crate docs and Rust changes keep focused reverse-dependent selection
   }
 });
 
-test('--full selection includes every check and bypasses metadata', () => {
-  for (const files of [[], ['README.md'], ['crates/deleted/src/lib.rs']]) {
-    assert.deepEqual(selectChanges(files, { ...noMetadata, full: true }), full);
-  }
-});
-
-test('CI workflow, selector and runner changes select only tools, not app suites', () => {
+test('CI workflow, selector and runner changes select diagnostics without expanding app suites', () => {
   for (const file of [
     '.github/workflows/ci.yml', 'scripts/ci-changes.mjs', 'scripts/ci-changes.test.mjs',
     'scripts/ci-run.mjs', 'scripts/ci-run.test.mjs', 'scripts/ci-future.mjs',
   ]) {
-    assert.deepEqual(selectChanges([file], noMetadata), { ...empty, tools: true }, file);
+    assert.deepEqual(selectChanges([file], noMetadata), {
+      ...empty, tools: true, unit: file.endsWith('.test.mjs') ? file : '',
+    }, file);
   }
 });
 
@@ -210,7 +209,7 @@ test('tools selection stays independent from mixed focused app and Rust checks',
   const files = ['web/App.tsx', 'crates/store/src/lib.rs', 'tests/one.test.ts', 'tests/ui.spec.ts'];
   assert.deepEqual(select(files), {
     ...empty, web: true, rust: true, packages: '-p core -p server -p store',
-    node: 'tests/one.test.ts', specs: 'tests/ui.spec.ts',
+    unit: 'tests/one.test.ts', specs: 'tests/ui.spec.ts',
   });
   for (const file of ['scripts/ci-run.mjs', '.github/workflows/ci.yml']) {
     assert.deepEqual(select([...files, file]), { ...select(files), tools: true }, file);
@@ -229,52 +228,104 @@ test('unrelated scripts, workflows and lookalike paths do not select tools', () 
 
 test('web selection preserves existing paths and config files without broadening other jobs', () => {
   for (const file of [
-    'web/App.tsx', 'shared/protocol.ts', 'index.html', 'vite.config.ts', 'vite.config.mjs',
+    'web/App.tsx', 'shared/types.ts', 'index.html', 'vite.config.ts', 'vite.config.mjs',
     'tsconfig.json', 'tsconfig.node.json', 'package.json', 'package-lock.json',
   ]) {
     assert.deepEqual(selectChanges([file], noMetadata), { ...empty, web: true }, file);
   }
 });
 
-test('Node backend changes still run all Node tests but no unrelated suites', () => {
-  assert.deepEqual(selectChanges(['server/index.ts', 'tests/one.test.ts'], noMetadata), { ...empty, node: 'all' });
+test('frontend unit tests stay targeted without a Rust or standalone engine build', () => {
+  for (const file of ['tests/frontend-state.test.ts', 'tests/frontend-composer.test.ts', 'tests/canvas-state.test.ts', 'tests/visualization-document.test.ts']) {
+    assert.deepEqual(selectChanges([file], noMetadata), { ...empty, unit: file }, file);
+  }
 });
 
-test('otherwise selects only changed top-level Node tests and Playwright specs', () => {
+test('fixtures, legacy Node paths and browser configuration never broaden suites', () => {
+  for (const file of [
+    'tests/app-fixture.ts', 'tests/mock-provider.ts', 'tests/mcp-app-fixture.ts', 'playwright.config.ts',
+    'server/app.ts', 'server/canvas.ts', 'scripts/build-engine.mjs', 'scripts/clip-lines.mjs',
+  ]) {
+    assert.deepEqual(selectChanges([file], noMetadata), empty, file);
+  }
+  assert.deepEqual(selectChanges(['server/app.ts', 'tests/frontend-state.test.ts'], noMetadata), {
+    ...empty, unit: 'tests/frontend-state.test.ts',
+  });
+});
+
+test('selects only changed top-level unit tests, script tests and Playwright specs', () => {
   assert.deepEqual(selectChanges([
-    'tests/one.test.ts', 'tests/two.test.ts', 'tests/one.test.ts',
+    'tests/one.test.ts', 'tests/two.test.ts', 'tests/one.test.ts', 'scripts/service.test.mjs',
     'tests/ui.spec.ts', 'tests/ui.spec.ts', 'tests/another.spec.ts',
     'tests/nested/ignored.test.ts', 'tests/nested/ignored.spec.ts', 'tests/ignored.test.js',
+    'scripts/nested/ignored.test.mjs', 'scripts/ignored.test.ts', 'scripts/service.mjs',
   ], noMetadata), {
-    ...empty, node: 'tests/one.test.ts tests/two.test.ts', specs: 'tests/ui.spec.ts tests/another.spec.ts',
+    ...empty, unit: 'tests/one.test.ts tests/two.test.ts scripts/service.test.mjs', specs: 'tests/ui.spec.ts tests/another.spec.ts',
   });
 });
 
-test('CLI --full preserves the five app outputs and adds tools without Cargo', () => {
-  assert.deepEqual(outputs(cli(['--full'])), {
-    web: 'true', rust: 'true', packages: '--workspace', node: 'all', specs: 'all', tools: 'true',
+test('ignores deleted unit, script and spec paths and resolves existence against the selected workspace', () => {
+  const probes = [];
+  const fileExists = absolute => {
+    probes.push(absolute);
+    return [path.join(cwd, 'tests/kept.test.ts'), path.join(cwd, 'scripts/kept.test.mjs'), path.join(cwd, 'tests/kept.spec.ts')].includes(absolute);
+  };
+  assert.deepEqual(selectChanges([
+    ' tests/kept.test.ts ', 'tests/deleted.test.ts', 'scripts/kept.test.mjs', 'scripts/deleted.test.mjs',
+    'tests/kept.spec.ts', 'tests/deleted.spec.ts', 'tests/kept.test.ts', 'tests/app-fixture.ts',
+  ], { ...noMetadata, cwd, fileExists }), {
+    ...empty, unit: 'tests/kept.test.ts scripts/kept.test.mjs', specs: 'tests/kept.spec.ts',
   });
+  assert.deepEqual(probes, [
+    'tests/kept.test.ts', 'tests/deleted.test.ts', 'scripts/kept.test.mjs', 'scripts/deleted.test.mjs',
+    'tests/kept.spec.ts', 'tests/deleted.spec.ts',
+  ].map(file => path.join(cwd, file)));
 });
 
-test('CLI parses stdin and preserves focused web, Node and spec outputs without Cargo', () => {
-  assert.deepEqual(outputs(cli([], 'shared/protocol.ts\r\n tests/one.test.ts \n\ntests/ui.spec.ts\n')), {
-    web: 'true', rust: 'false', packages: '', node: 'tests/one.test.ts', specs: 'tests/ui.spec.ts', tools: 'false',
-  });
-});
-
-test('CLI infrastructure changes select nothing beyond the CI script tests', () => {
-  for (const file of ['scripts/ci-run.test.mjs', '.github/workflows/ci.yml']) {
-    assert.deepEqual(outputs(cli([], `${file}\n`)), {
-      web: 'false', rust: 'false', packages: '', node: '', specs: '', tools: 'true',
-    });
+test('release selection is limited to the explicit standalone release paths', () => {
+  assert.deepEqual(select(['crates/server/build.rs']), { ...empty, rust: true, packages: '-p server', release: true });
+  assert.deepEqual(select(['crates/core/src/web.rs']), { ...empty, rust: true, packages: '-p core -p server', release: true });
+  assert.deepEqual(selectChanges(['scripts/verify-release.mjs'], noMetadata), { ...empty, release: true });
+  // Even documentation under crates/server/** is within the explicitly requested release gate.
+  assert.deepEqual(selectChanges(['crates/server/README.md'], noMetadata), { ...empty, release: true });
+  for (const file of [
+    'web/App.tsx', 'shared/types.ts', 'tests/app-fixture.ts', 'tests/frontend-state.test.ts',
+    'scripts/service.test.mjs', 'package.json', 'Cargo.toml', 'scripts/cargo.mjs',
+    '.github/workflows/ci.yml', 'scripts/ci-changes.mjs',
+  ]) {
+    assert.equal(selectChanges([file], noMetadata).release, false, file);
   }
+  for (const file of ['crates/core/src/http.rs', 'crates/store/src/lib.rs', 'engine/src/lib.rs']) {
+    assert.equal(select([file]).release, false, file);
+  }
+});
+
+test('CLI parses stdin and preserves focused web, unit and spec outputs without Cargo', () => {
+  assert.deepEqual(outputs(cli([], 'shared/types.ts\r\n tests/frontend-state.test.ts \n\ntests/computer.spec.ts\n')), {
+    ...emptyOutputs, web: 'true', unit: 'tests/frontend-state.test.ts', specs: 'tests/computer.spec.ts',
+  });
+});
+
+test('CLI selects only existing script unit files and never deleted tests or specs', () => {
+  assert.deepEqual(outputs(cli([], 'scripts/service.test.mjs\ntests/backend-api.test.ts\nscripts/no-longer-present.test.mjs\ntests/no-longer-present.spec.ts\n')), {
+    ...emptyOutputs, unit: 'scripts/service.test.mjs',
+  });
+});
+
+test('CLI infrastructure changes stay limited to changed script tests and CI diagnostics', () => {
+  assert.deepEqual(outputs(cli([], 'scripts/ci-run.test.mjs\n')), {
+    ...emptyOutputs, unit: 'scripts/ci-run.test.mjs', tools: 'true',
+  });
+  assert.deepEqual(outputs(cli([], '.github/workflows/ci.yml\n')), { ...emptyOutputs, tools: 'true' });
+});
+
+test('CLI release-verifier changes select only the standalone release job', () => {
+  assert.deepEqual(outputs(cli([], 'scripts/verify-release.mjs\n')), { ...emptyOutputs, release: 'true' });
 });
 
 test('CLI empty and documentation-only changes stay focused without Cargo', () => {
   for (const input of ['', 'README.md\n', 'crates/core/README.md\ncrates/core/docs/runtime.md\nengine/docs/usage.md\n']) {
-    assert.deepEqual(outputs(cli([], input)), {
-      web: 'false', rust: 'false', packages: '', node: '', specs: '', tools: 'false',
-    });
+    assert.deepEqual(outputs(cli([], input)), emptyOutputs);
   }
 });
 
@@ -301,12 +352,26 @@ test('workflow detection preserves selector failure through tee', { skip: proces
   assert.match(result.stderr, /cargo.*ENOENT/);
 });
 
-test('CLI rejects unknown flags rather than silently producing partial coverage', () => {
-  const result = cli(['--all']);
-  assert.equal(result.error, undefined);
-  assert.equal(result.status, 1);
-  assert.equal(result.stdout, '');
-  assert.match(result.stderr, /Usage:.*\[--full\]/);
+test('workflow keeps Rust-only changed tests, log clipping and standalone release diagnostics', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /unit: \$\{\{ steps\.detect\.outputs\.unit \}\}/);
+  assert.match(workflow, /UNIT_TESTS: \$\{\{ needs\.changes\.outputs\.unit \}\}/);
+  assert.match(workflow, /node scripts\/ci-run\.mjs npx tsx --test [^\n]+\$UNIT_TESTS 2>&1 \| node scripts\/clip-lines\.mjs/);
+  assert.match(workflow, /node scripts\/ci-run\.mjs npx playwright test \$SPECS/);
+  assert.match(workflow, /if: needs\.changes\.outputs\.release == 'true'/);
+  assert.match(workflow, /node scripts\/ci-run\.mjs npm run build:release/);
+  assert.match(workflow, /node scripts\/ci-run\.mjs node scripts\/verify-release\.mjs "\$CARGO_TARGET_DIR\/release\/grok-bot"/);
+  assert.doesNotMatch(workflow, /build:engine|NODE_TESTS|outputs\.node|GROK_BOT_BACKEND|schedule:|workflow_dispatch:|= all|tests\/\*\.test\.ts/);
+});
+
+test('CLI rejects flags, including the removed --full mode', () => {
+  for (const flag of ['--all', '--full']) {
+    const result = cli([flag]);
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /Usage:/);
+  }
 });
 
 test('importing the selector does not read stdin, invoke child processes or print outputs', () => {

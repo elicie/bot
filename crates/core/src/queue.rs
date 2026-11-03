@@ -1,5 +1,5 @@
-//! Serialized command queue. Port of the Node `command` chain: HTTP mutations, scheduler ticks, and
-//! broker mutations run one at a time, in arrival order.
+//! Serialized command queue: HTTP mutations, scheduler ticks, and broker mutations run one at a
+//! time, in arrival order.
 
 use std::future::Future;
 use std::sync::Arc;
