@@ -40,7 +40,7 @@ Bot 답변의 ```` ```html ````, ```` ```svg ````, ```` ```visualization ```` �
 
 ## 검증
 
-- Rust: `crates/store/tests/main_bot.rs`(기본값·무기록, 선택·고정·영속, 실행 중 거절, 삭제 재지정, 잘못된 참조 거부), `crates/core/tests/main_bot.rs`(라우트, 400/404/403, 삭제 후 재지정).
+- Rust: `crates/store/tests/main_bot.rs`(기본값·무기록, 선택·고정·영속, 실행 중 거절, 삭제 재지정, 잘못된 참조 거부), `crates/core/tests/integration/main_bot.rs`(라우트, 400/404/403, 삭제 후 재지정).
 - 단위: `tests/visualization-document.test.ts`(CSP가 소스보다 먼저, 문서/조각 처리, nonce 검증, 메시지 검증·길이 제한, 런타임 인라인 안전성, 메인 Bot 계산).
 - 브라우저(Rust 서버, 1280px·390px): `tests/visualizations.spec.ts`(부모 문서·저장소·쿠키·`/api/state`·외부 fetch·이미지·팝업·최상위 이동 차단, 다른 출처 메시지 무시, d3, 코드 보기, 전체 화면과 Esc·포커스 복귀, 스크립트 오류, 링크·이동·새로고침 차단, 감시 서버에 연결·요청 0, 10초 시간 초과), `tests/previews.spec.ts`, `tests/main-bot.spec.ts`.
 

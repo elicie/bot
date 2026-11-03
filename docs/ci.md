@@ -137,3 +137,29 @@ workspace rebuild. Keep measuring the critical-path
 job and whether the Rust cache actually restored; do not infer a guarantee from a
 single run. New reverse-dependent coverage can increase the work for low-level
 crate changes, intentionally trading some selectivity for correctness.
+
+## Self-hosted build speed and memory
+
+The ai-dev runners share a compiler cache, and a memory cap keeps CI builds from
+taking down the machine:
+
+- `sccache` (apt) runs as the systemd unit `sccache-grok-bot` on port 4231 with
+  `SCCACHE_DIR=~/.cache/grok-bot-ci/sccache` and a 20G limit. It runs outside the jobs
+  because the runner kills processes a job started when that job ends, which would stop
+  a job-started server during the other runner's build. CI sets `RUSTC_WRAPPER=sccache`
+  only when the unit is active. The `Final disk usage` step prints hit/miss counts.
+- sccache puts every `CARGO_*` environment variable into its cache keys. An absolute,
+  per-runner `CARGO_TARGET_DIR` therefore made every Rust compile miss on the other
+  runner. CI sets `CARGO_TARGET_DIR=ci-target`, a relative symlink in the workspace to
+  `~/.cache/grok-bot-ci/$RUNNER_NAME/target`, so the variable is identical on both
+  runners while each keeps its own cargo lock. Keep any other `CARGO_*` setting
+  identical across runners too (`--target-dir`/config files do not affect the key).
+- Both runner services and `sccache-grok-bot` (whose children are the actual `rustc`
+  processes) run in `grok-bot-ci.slice`: `MemoryMax=14G`, `MemorySwapMax=0`, via `Slice=grok-bot-ci.slice` drop-ins. A build over the cap fails
+  instead of exhausting the 31G host, which also runs VMs and other repos' runners.
+- `CARGO_BUILD_JOBS=3` per runner. Every `crates/core/tests/*.rs` file is a separate binary
+  that embeds the engine, and each link (rust-lld) takes ~1.5G. With cargo's default
+  `-j8`, seven links ran at once per runner; on 2026-11-03 that drove the host into swap
+  thrashing (load ~270, unreachable until reboot), and under a `MemoryHigh` limit it
+  stalled builds for 30+ minutes. The slice therefore has only `MemoryMax` (an over-cap
+  build is OOM-killed rather than throttled indefinitely).

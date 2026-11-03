@@ -27,6 +27,7 @@ import { activeRun, pendingBotWork, pendingWorkerBatch, runLabels } from './stat
 import { Avatar, ErrorNotice, IconButton } from './ui';
 import { BotMessageLinks, BotReportMarker, BotRequestBanner } from './BotChat';
 import { RichMarkdown } from './RichMarkdown';
+import { LinkPreviewGroup } from './LinkPreviews';
 import { TodoList } from './TodoList';
 import { WorkerProgress, WorkerReportMarker } from './Workers';
 import { McpAppCard } from './McpApp';
@@ -101,7 +102,7 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
     </details>
   );
 }
-function MessageView({ message, bot, conversationId, named }: { message: Message; bot: Bot; conversationId?: string; named?: boolean }) {
+function MessageView({ message, bot, conversationId, named, settled }: { message: Message; bot: Bot; conversationId?: string; named?: boolean; settled: boolean }) {
   // Plans have their checklist. A worker's broker approval is already represented by the engine
   // invocation row (and its separate approval card), so do not show a second completed tool row.
   const tools = message.tools.filter(tool =>
@@ -128,6 +129,7 @@ function MessageView({ message, bot, conversationId, named }: { message: Message
             )}
           </div>
         )}
+        {message.role === 'assistant' && !!message.text && <LinkPreviewGroup text={message.text} settled={settled} />}
         {tools.length > 0 && (
           <div className="tool-stack">
             {tools.map((tool) => (
@@ -346,7 +348,7 @@ export function Transcript({
                     <TodoList key={`${conversationId}-${conversation.run.id}`} todos={conversation.run.todos} running={!!running} />
                   )}
                   <WorkerReportMarker messageId={message.id} data={data} />
-                  <MessageView message={message} bot={speakerFor?.(message) ?? bot} conversationId={conversation?.id} named={!!speakerFor} />
+                  <MessageView message={message} bot={speakerFor?.(message) ?? bot} conversationId={conversation?.id} named={!!speakerFor} settled={!running || message !== tail} />
                   {workerBatches.filter(batch => batch.sourceMessageId === message.id).map(batch => <WorkerProgress key={batch.id} batch={batch} />)}
                   {data && onBotChat && <BotMessageLinks message={message} data={data} onOpen={onBotChat} onCancelReports={onCancelReports} cancelReportsDisabled={cancelReportsDisabled} />}
                   {onRoutines && <RoutineLinks message={message} onOpen={onRoutines} />}

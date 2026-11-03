@@ -19,9 +19,11 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Rust on the self-hosted runner: `rustup toolchain install <ver> --profile minimal -c clippy -c rustfmt`.
+  # Rust on the self-hosted runner: `rustup toolchain install <ver> --profile minimal -c clippy -c rustfmt`,
+  # plus `apt install sccache`, the sccache-grok-bot unit and the grok-bot-ci.slice memory cap (docs/ci.md).
   SELF_HOSTED_RUST: 1.98.0
-  SELF_HOSTED_TARGET_CAP_GB: 40
+  # Per-runner target dirs; with the shared sccache (20G) a cleared dir rebuilds quickly.
+  SELF_HOSTED_TARGET_CAP_GB: 30
 
 jobs:
   changes:
@@ -105,17 +107,33 @@ jobs:
         run: |
           if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
             # One target dir per runner so parallel jobs don't wait on each other's cargo lock.
-            dir="$HOME/.cache/grok-bot-ci/$RUNNER_NAME/target"
-            # Each dir grows with every branch built; clear it past the cap (next build is cold).
-            real=$(readlink -f "$dir" || true)
-            if [ -d "$real" ] && [ "$(du -s --block-size=1G "$real" | cut -f1)" -gt "$SELF_HOSTED_TARGET_CAP_GB" ]; then
-              echo "Clearing $real (over ${SELF_HOSTED_TARGET_CAP_GB}G)"; rm -rf "$real"; rm -f "$dir"
+            persist="$HOME/.cache/grok-bot-ci/$RUNNER_NAME/target"
+            # Each dir grows with every branch built; clear it past the cap (next build reuses sccache).
+            if [ -d "$persist" ] && [ "$(du -s --block-size=1G "$persist" | cut -f1)" -gt "$SELF_HOSTED_TARGET_CAP_GB" ]; then
+              echo "Clearing $persist (over ${SELF_HOSTED_TARGET_CAP_GB}G)"; rm -rf "$persist"
             fi
+            mkdir -p "$persist"
+            # sccache hashes every CARGO_* variable into its keys, so CARGO_TARGET_DIR must be the same string
+            # on both runners: a relative `ci-target` symlink in the workspace to this runner's own dir.
+            ln -sfn "$persist" ci-target
+            dir=ci-target
             # A pinned toolchain installed on the runner, so its default `stable` (shared with other repos) stays untouched.
             echo "RUSTUP_TOOLCHAIN=$SELF_HOSTED_RUST" >> "$GITHUB_ENV"
+            # Compiler cache shared by both runners (systemd unit sccache-grok-bot, port 4231), so a new or
+            # cleared per-runner target dir reuses dependency builds. It runs outside the job: a job-started
+            # server would be killed by the runner's orphan cleanup mid-way through the other runner's build.
+            # Each integration-test binary embeds the engine; its link takes ~1.5G. cargo's default -j8 ran 7
+            # links at once per runner and exhausted the host. 3 jobs per runner keeps both runners' links
+            # (and compiles: 2 x 3 of 8 cores) under the grok-bot-ci.slice memory cap. Same value on both
+            # runners: it is a CARGO_* variable, so it is part of the sccache key.
+            echo "CARGO_BUILD_JOBS=3" >> "$GITHUB_ENV"
+            if systemctl is-active --quiet sccache-grok-bot; then
+              { echo "RUSTC_WRAPPER=sccache"; echo "SCCACHE_SERVER_PORT=4231"; } >> "$GITHUB_ENV"
+            fi
           else
-            dir="$GITHUB_WORKSPACE/target"
+            dir=target
           fi
+          # Relative to the workspace on both runner kinds; use $GITHUB_WORKSPACE/$CARGO_TARGET_DIR for absolute paths.
           echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
@@ -148,7 +166,9 @@ jobs:
         run: node scripts/ci-run.mjs node scripts/cargo.mjs clippy --locked $PACKAGES --all-targets -- -D warnings
       - name: Final disk usage
         if: always()
-        run: df -h / . /tmp && df -i / . /tmp && du -sh -- "${CARGO_TARGET_DIR:-target}" 2>/dev/null || true
+        run: |
+          df -h / . /tmp && df -i / . /tmp && du -sh -- "${CARGO_TARGET_DIR:-target}/" 2>/dev/null || true
+          if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --show-stats 2>/dev/null | grep -E '^(Compile requests|Cache (hits|misses)|Cache size|Max cache size)' || true; fi
 
   test:
     name: Tests (affected crates, frontend units, Rust specs)
@@ -171,17 +191,33 @@ jobs:
         run: |
           if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
             # One target dir per runner so parallel jobs don't wait on each other's cargo lock.
-            dir="$HOME/.cache/grok-bot-ci/$RUNNER_NAME/target"
-            # Each dir grows with every branch built; clear it past the cap (next build is cold).
-            real=$(readlink -f "$dir" || true)
-            if [ -d "$real" ] && [ "$(du -s --block-size=1G "$real" | cut -f1)" -gt "$SELF_HOSTED_TARGET_CAP_GB" ]; then
-              echo "Clearing $real (over ${SELF_HOSTED_TARGET_CAP_GB}G)"; rm -rf "$real"; rm -f "$dir"
+            persist="$HOME/.cache/grok-bot-ci/$RUNNER_NAME/target"
+            # Each dir grows with every branch built; clear it past the cap (next build reuses sccache).
+            if [ -d "$persist" ] && [ "$(du -s --block-size=1G "$persist" | cut -f1)" -gt "$SELF_HOSTED_TARGET_CAP_GB" ]; then
+              echo "Clearing $persist (over ${SELF_HOSTED_TARGET_CAP_GB}G)"; rm -rf "$persist"
             fi
+            mkdir -p "$persist"
+            # sccache hashes every CARGO_* variable into its keys, so CARGO_TARGET_DIR must be the same string
+            # on both runners: a relative `ci-target` symlink in the workspace to this runner's own dir.
+            ln -sfn "$persist" ci-target
+            dir=ci-target
             # A pinned toolchain installed on the runner, so its default `stable` (shared with other repos) stays untouched.
             echo "RUSTUP_TOOLCHAIN=$SELF_HOSTED_RUST" >> "$GITHUB_ENV"
+            # Compiler cache shared by both runners (systemd unit sccache-grok-bot, port 4231), so a new or
+            # cleared per-runner target dir reuses dependency builds. It runs outside the job: a job-started
+            # server would be killed by the runner's orphan cleanup mid-way through the other runner's build.
+            # Each integration-test binary embeds the engine; its link takes ~1.5G. cargo's default -j8 ran 7
+            # links at once per runner and exhausted the host. 3 jobs per runner keeps both runners' links
+            # (and compiles: 2 x 3 of 8 cores) under the grok-bot-ci.slice memory cap. Same value on both
+            # runners: it is a CARGO_* variable, so it is part of the sccache key.
+            echo "CARGO_BUILD_JOBS=3" >> "$GITHUB_ENV"
+            if systemctl is-active --quiet sccache-grok-bot; then
+              { echo "RUSTC_WRAPPER=sccache"; echo "SCCACHE_SERVER_PORT=4231"; } >> "$GITHUB_ENV"
+            fi
           else
-            dir="$GITHUB_WORKSPACE/target"
+            dir=target
           fi
+          # Relative to the workspace on both runner kinds; use $GITHUB_WORKSPACE/$CARGO_TARGET_DIR for absolute paths.
           echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
       - if: runner.environment == 'github-hosted'
         uses: dtolnay/rust-toolchain@stable
@@ -226,11 +262,13 @@ jobs:
         if: env.SPECS != ''
         timeout-minutes: 30
         env:
-          GROK_BOT_SERVER_BIN: ${{ env.CARGO_TARGET_DIR }}/debug/grok-bot
+          GROK_BOT_SERVER_BIN: ${{ github.workspace }}/${{ env.CARGO_TARGET_DIR }}/debug/grok-bot
         run: node scripts/ci-run.mjs npx playwright test $SPECS
       - name: Final disk usage
         if: always()
-        run: df -h / . /tmp && df -i / . /tmp && du -sh -- "${CARGO_TARGET_DIR:-target}" 2>/dev/null || true
+        run: |
+          df -h / . /tmp && df -i / . /tmp && du -sh -- "${CARGO_TARGET_DIR:-target}/" 2>/dev/null || true
+          if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --show-stats 2>/dev/null | grep -E '^(Compile requests|Cache (hits|misses)|Cache size|Max cache size)' || true; fi
       - name: Upload Playwright results
         if: failure() && env.SPECS != ''
         uses: actions/upload-artifact@v4
@@ -253,16 +291,33 @@ jobs:
       - name: Cargo target dir (persistent on self-hosted)
         run: |
           if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
-            # Match the existing per-runner cache and cap policy used by lint/test.
-            dir="$HOME/.cache/grok-bot-ci/$RUNNER_NAME/target"
-            real=$(readlink -f "$dir" || true)
-            if [ -d "$real" ] && [ "$(du -s --block-size=1G "$real" | cut -f1)" -gt "$SELF_HOSTED_TARGET_CAP_GB" ]; then
-              echo "Clearing $real (over ${SELF_HOSTED_TARGET_CAP_GB}G)"; rm -rf "$real"; rm -f "$dir"
+            # One target dir per runner so parallel jobs don't wait on each other's cargo lock.
+            persist="$HOME/.cache/grok-bot-ci/$RUNNER_NAME/target"
+            # Each dir grows with every branch built; clear it past the cap (next build reuses sccache).
+            if [ -d "$persist" ] && [ "$(du -s --block-size=1G "$persist" | cut -f1)" -gt "$SELF_HOSTED_TARGET_CAP_GB" ]; then
+              echo "Clearing $persist (over ${SELF_HOSTED_TARGET_CAP_GB}G)"; rm -rf "$persist"
             fi
+            mkdir -p "$persist"
+            # sccache hashes every CARGO_* variable into its keys, so CARGO_TARGET_DIR must be the same string
+            # on both runners: a relative `ci-target` symlink in the workspace to this runner's own dir.
+            ln -sfn "$persist" ci-target
+            dir=ci-target
             echo "RUSTUP_TOOLCHAIN=$SELF_HOSTED_RUST" >> "$GITHUB_ENV"
+            # Compiler cache shared by both runners (systemd unit sccache-grok-bot, port 4231), so a new or
+            # cleared per-runner target dir reuses dependency builds. It runs outside the job: a job-started
+            # server would be killed by the runner's orphan cleanup mid-way through the other runner's build.
+            # Each integration-test binary embeds the engine; its link takes ~1.5G. cargo's default -j8 ran 7
+            # links at once per runner and exhausted the host. 3 jobs per runner keeps both runners' links
+            # (and compiles: 2 x 3 of 8 cores) under the grok-bot-ci.slice memory cap. Same value on both
+            # runners: it is a CARGO_* variable, so it is part of the sccache key.
+            echo "CARGO_BUILD_JOBS=3" >> "$GITHUB_ENV"
+            if systemctl is-active --quiet sccache-grok-bot; then
+              { echo "RUSTC_WRAPPER=sccache"; echo "SCCACHE_SERVER_PORT=4231"; } >> "$GITHUB_ENV"
+            fi
           else
-            dir="$GITHUB_WORKSPACE/target"
+            dir=target
           fi
+          # Relative to the workspace on both runner kinds; use $GITHUB_WORKSPACE/$CARGO_TARGET_DIR for absolute paths.
           echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
       - if: runner.environment == 'github-hosted'
         uses: dtolnay/rust-toolchain@stable
@@ -292,4 +347,6 @@ jobs:
         run: node scripts/ci-run.mjs node scripts/verify-release.mjs "$CARGO_TARGET_DIR/release/grok-bot"
       - name: Final disk usage
         if: always()
-        run: df -h / . /tmp && df -i / . /tmp && du -sh -- "${CARGO_TARGET_DIR:-target}" 2>/dev/null || true
+        run: |
+          df -h / . /tmp && df -i / . /tmp && du -sh -- "${CARGO_TARGET_DIR:-target}/" 2>/dev/null || true
+          if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --show-stats 2>/dev/null | grep -E '^(Compile requests|Cache (hits|misses)|Cache size|Max cache size)' || true; fi

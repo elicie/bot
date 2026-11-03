@@ -205,6 +205,7 @@ mod tests {
             mcp_servers: Vec::new(),
             main_bot_id: None,
             worker_batches: Vec::new(),
+            link_previews_enabled: false,
         }
     }
 
