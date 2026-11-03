@@ -12,3 +12,4 @@ engine/target/
 target/
 crates/desktop/gen/
 .claude/worktrees/
+ci-target

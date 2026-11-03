@@ -35,6 +35,7 @@ pub struct HttpContext {
     pub runtime: Arc<Runtime>,
     pub scheduler: Arc<RoutineScheduler>,
     pub queue: CommandQueue,
+    pub(crate) link_previews: Arc<crate::link_preview::LinkPreviewService>,
     pub allowed_hosts: HashSet<String>,
     /// Bound port, set once the listener is open; Host must name this port.
     pub port: AtomicU16,
@@ -61,6 +62,7 @@ impl HttpContext {
         web_root: Option<PathBuf>,
     ) -> Self {
         Self {
+            link_previews: Arc::new(crate::link_preview::LinkPreviewService::new(store.clone())),
             store,
             runtime,
             scheduler,
@@ -288,6 +290,7 @@ pub fn router(ctx: Ctx) -> Router {
         .merge(crate::permission_rules::routes())
         .merge(crate::webhooks::api_routes())
         .merge(crate::chat_features::routes())
+        .merge(crate::link_preview::routes())
         .merge(crate::canvas_http::routes())
         .merge(crate::groups_http::routes())
         .merge(crate::computer_http::routes())

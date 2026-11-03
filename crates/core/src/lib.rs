@@ -12,6 +12,7 @@ pub mod desktop_auth;
 mod groups_http;
 pub mod http;
 mod http_bots;
+mod link_preview;
 mod main_bot;
 mod mcp_apps_http;
 mod mcp_probe;

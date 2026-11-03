@@ -13,7 +13,7 @@ export class ApiError extends Error {
 
 export async function request<T>(
   path: string,
-  options: { method?: string; body?: unknown; signal?: AbortSignal } = {},
+  options: { method?: string; body?: unknown; signal?: AbortSignal; headers?: Record<string, string> } = {},
 ): Promise<T> {
   const method = options.method ?? 'GET';
   let response: Response;
@@ -21,14 +21,16 @@ export async function request<T>(
     response = await apiFetch(path, {
       method,
       credentials: 'same-origin',
-      headers:
-        method === 'GET'
+      headers: {
+        ...(method === 'GET'
           ? { Accept: 'application/json' }
           : {
               Accept: 'application/json',
               'Content-Type': 'application/json',
               'X-Grok-Bot': '1',
-            },
+            }),
+        ...options.headers,
+      },
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       signal: options.signal,
     });
