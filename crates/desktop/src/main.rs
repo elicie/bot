@@ -62,8 +62,11 @@ impl Drop for CoreHost {
 }
 
 fn main() -> anyhow::Result<()> {
-    let options = options()?;
+    let mut options = options()?;
     let paths = AppPaths::resolve(options.data.as_deref())?;
+    if let Some(source) = &mut options.import {
+        *source = paths.import_source(source)?;
+    }
     grok_bot_files::private_directory(&paths.data)?;
     grok_bot_files::private_directory(&paths.engine)?;
     grok_bot_files::private_directory(&paths.webview)?;

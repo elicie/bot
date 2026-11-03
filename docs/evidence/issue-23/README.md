@@ -3,7 +3,7 @@
 ## 비교 조건과 출처
 
 - **Before baseline:** P4 병합 `e7de2f2d4f10539e0e25ee39752dd47e205c06ba`의 별도 소스 snapshot에서 빌드한 실제 Rust 서버 + 기존 React bundle, 시스템 Chrome.
-- **After implementation:** native navigation/link 보완이 포함된 `daefd99fea71ac564358502a73ea20b593db794f`의 실제 Tauri 바이너리, Linux WebKitGTK. 이후 테스트 전용 FIFO fixture 수정은 시각 동작을 바꾸지 않습니다.
+- **After implementation:** native navigation/link 보완이 포함된 `daefd99fea71ac564358502a73ea20b593db794f`의 실제 Tauri 바이너리, Linux WebKitGTK. 이후 테스트 전용 FIFO fixture·의존성 feature·쓰기 전 import 경로 preflight 수정은 이 비교 시나리오의 시각 동작을 바꾸지 않습니다.
 - **같은 데이터/상태:** baseline 서버에서 모의 공급자와 완료한 한국어 1턴을 정상 저장한 뒤, 같은 `state.json` 사본을 Tauri `--import-web`으로 가져왔습니다. 새 랜덤 Bot ID로 아바타가 달라지는 비교를 피했습니다. Bot/대화/아바타/본문이 같습니다. 원본 사본 SHA-256은 [baseline.json](<baseline.json>)에 기록했습니다. 실제 API 키/개인 데이터가 아닌 일회용 fixture입니다.
 - **같은 시나리오:** 저장된 대화 화면, 이어서 설정 → 업데이트. 1040×760 콘텐츠 viewport, 다크 테마, 동일 호스트의 OS 글꼴. Chrome과 WebKitGTK의 렌더링 차이는 숨기지 않습니다.
 - Before는 Playwright의 실제 웹 페이지 캡처, After는 tauri-driver → WebKitWebDriver가 실제 Tauri WebKit 창에서 얻은 screenshot입니다. After를 일반 Chromium 브라우저나 목업으로 대체하지 않았습니다.
