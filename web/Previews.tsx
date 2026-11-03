@@ -10,6 +10,7 @@ import { useState, type KeyboardEvent, type ReactNode, type WheelEvent } from 'r
 import { createPortal } from 'react-dom';
 import { Download, Maximize2, Minus, Plus, Scan, X } from 'lucide-react';
 import { IconButton, Modal } from './ui';
+import { useMediaUrl } from './use-media-url';
 import './previews.css';
 
 export function PreviewModal({ title, closeLabel, heading, className = '', toolbar, onClose, onKeyDown, children }: {
@@ -99,20 +100,21 @@ export function MediaPreview({ src, name, download, onClose }: { src: string; na
  * (shown on hover and focus, always on touch screens) does the same from the keyboard. The image
  * keeps its own role and name.
  */
-export function PreviewTrigger({ label, className = '', onOpen, children }: { label: string; className?: string; onOpen: () => void; children: ReactNode }) {
-  return <span className={`preview-trigger ${className}`} onClick={(event) => { if ((event.target as Element).closest('button') === null) onOpen(); }}>
+export function PreviewTrigger({ label, className = '', onOpen, children, disabled = false }: { label: string; className?: string; onOpen: () => void; children: ReactNode; disabled?: boolean }) {
+  return <span className={`preview-trigger ${className}`} onClick={(event) => { if (!disabled && (event.target as Element).closest('button') === null) onOpen(); }}>
     {children}
-    <IconButton label={label} className="preview-open" aria-haspopup="dialog" onClick={onOpen}><Maximize2 size={13} /></IconButton>
+    <IconButton label={label} className="preview-open" aria-haspopup="dialog" disabled={disabled} onClick={onOpen}><Maximize2 size={13} /></IconButton>
   </span>;
 }
 
 /** An image that opens "미디어 미리보기" ("이미지 전체 화면으로 열기"). */
 export function PreviewableImage({ src, alt, className = '', download, loading }: { src: string; alt: string; className?: string; download?: string; loading?: 'lazy' }) {
   const [open, setOpen] = useState(false);
+  const media = useMediaUrl(src);
   return <>
-    <PreviewTrigger label="이미지 전체 화면으로 열기" className={`previewable-image ${className}`} onOpen={() => setOpen(true)}>
-      <img src={src} alt={alt} loading={loading} />
+    <PreviewTrigger label="이미지 전체 화면으로 열기" className={`previewable-image ${className}`} disabled={!media.url} onOpen={() => setOpen(true)}>
+      {media.url ? <img src={media.url} alt={alt} loading={loading} /> : <span role={media.error ? 'alert' : 'status'}>{media.error ?? '이미지 불러오는 중…'}</span>}
     </PreviewTrigger>
-    {open && <MediaPreview src={src} name={alt} download={download} onClose={() => setOpen(false)} />}
+    {open && media.url && <MediaPreview src={media.url} name={alt} download={download} onClose={() => setOpen(false)} />}
   </>;
 }

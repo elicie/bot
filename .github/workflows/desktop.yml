@@ -1,0 +1,122 @@
+name: Desktop native builds
+
+on:
+  pull_request:
+    paths: ['crates/**', 'engine/**', 'web/**', 'shared/**', 'Cargo.*', 'package*.json', 'index.html', 'scripts/desktop.mjs', '.github/workflows/desktop.yml']
+  workflow_dispatch:
+    inputs:
+      signed:
+        description: 'Sign distribution artifacts using protected repository secrets'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            bundle: appimage
+          - os: macos-14
+            bundle: dmg
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux native build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev protobuf-compiler ripgrep
+      - name: macOS native build dependencies
+        if: runner.os == 'macOS'
+        run: brew install protobuf ripgrep
+      - run: npm ci
+      - name: Prepare platform build environment
+        shell: bash
+        run: |
+          echo "PROTOC=$(command -v protoc)" >> "$GITHUB_ENV"
+      - name: Native import/path tests
+        run: node scripts/cargo.mjs test --locked -p grok-bot-desktop --lib
+      - name: Require distribution signing configuration
+        if: github.event_name == 'workflow_dispatch' && inputs.signed
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            test -n "$APPLE_CERTIFICATE" && test -n "$APPLE_CERTIFICATE_PASSWORD" && test -n "$APPLE_SIGNING_IDENTITY"
+          else
+            test -n "$LINUX_SIGNING_KEY"
+          fi
+      - name: Import Apple signing certificate into temporary keychain
+        if: runner.os == 'macOS' && github.event_name == 'workflow_dispatch' && inputs.signed
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/desktop-signing.keychain-db"
+          password=$(openssl rand -hex 32)
+          echo "::add-mask::$password"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/signing.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+      - name: Build native app and package
+        shell: bash
+        env:
+          SIGNED: ${{ github.event_name == 'workflow_dispatch' && inputs.signed }}
+          APPLE_SIGNING_IDENTITY: ${{ github.event_name == 'workflow_dispatch' && inputs.signed && secrets.APPLE_SIGNING_IDENTITY || '' }}
+        run: |
+          if [ "$SIGNED" = true ]; then
+            npm run build:desktop -- --ci --bundles ${{ matrix.bundle }}
+          else
+            npm run build:desktop -- --ci --bundles ${{ matrix.bundle }} --no-sign
+          fi
+      - name: Verify macOS distribution signature
+        if: runner.os == 'macOS' && github.event_name == 'workflow_dispatch' && inputs.signed
+        shell: bash
+        run: codesign --verify --deep --strict --verbose=2 "target/release/bundle/macos/Grok Bot.app"
+      - name: Sign Linux AppImage checksums
+        if: runner.os == 'Linux' && github.event_name == 'workflow_dispatch' && inputs.signed
+        shell: bash
+        env:
+          LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+        run: |
+          export GNUPGHOME="$RUNNER_TEMP/desktop-gpg"
+          mkdir -m 700 "$GNUPGHOME"
+          printf '%s' "$LINUX_SIGNING_KEY" | gpg --batch --import
+          cd target/release/bundle/appimage
+          sha256sum -- *.AppImage > SHA256SUMS
+          gpg --batch --armor --detach-sign SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.bundle }}-${{ github.sha }}-${{ github.event_name == 'workflow_dispatch' && inputs.signed && 'signed' || 'unsigned-test-only' }}
+          path: |
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/appimage/SHA256SUMS*
+            target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+      - name: Delete temporary Apple keychain
+        if: always() && runner.os == 'macOS' && github.event_name == 'workflow_dispatch' && inputs.signed
+        shell: bash
+        run: security delete-keychain "$RUNNER_TEMP/desktop-signing.keychain-db" || true

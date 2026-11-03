@@ -35,6 +35,10 @@ npm run build:release
 
 [release 프로필](<Cargo.toml>)은 `opt-level = 3`, `debug = 0`, `strip = "debuginfo"`, `panic = "unwind"`를 사용합니다. 함수 심볼 이름은 보존하고 디버그 정보만 제거합니다. 엔진 스레드의 panic이 프로세스 전체를 즉시 종료하지 않고 unwind할 수 있어야 하므로 `panic = "abort"`로 바꾸지 않습니다. 외부 화면 파일을 쓰려면 `GROK_BOT_WEB_ROOT`를 명시하며 지정한 폴더에는 `index.html`이 있어야 합니다. Release는 내장 화면을 기본으로 사용합니다. Debug 빌드는 화면을 내장하지 않고 현재 작업 디렉터리의 [dist/](<dist/>)를 사용하며, 화면이 없어도 API 전용 검사를 실행할 수 있습니다. 자세한 구조와 이전 P4 결과·리뷰 수정 후 재검증 상태는 [Rust 전환 문서](<docs/rust-migration.md>)에 있습니다.
 
+### Tauri 데스크톱 (P5 검증 중)
+
+같은 코어와 HTTP/SSE 화면을 사용하는 네이티브 호스트는 [데스크톱 문서](<docs/desktop.md>)를 참고하세요. `npm run dev:desktop`은 실제 Tauri 창을 실행하고, `npm run build:desktop`은 해당 OS용 패키지를 만듭니다. 웹 서버의 실행·배포 명령은 그대로입니다. 서명된 macOS/Linux 배포와 실제 창 검증이 끝나기 전에는 출시 완료로 간주하지 않습니다.
+
 ## 모델과 작업 폴더 연결
 
 1. 왼쪽 아래 **설정**을 엽니다.

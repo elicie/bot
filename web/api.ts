@@ -1,4 +1,5 @@
 import type { AppState, FileDocument, FileListing } from '../shared/types';
+import { apiFetch } from './desktop-transport';
 
 export class ApiError extends Error {
   constructor(
@@ -17,7 +18,7 @@ export async function request<T>(
   const method = options.method ?? 'GET';
   let response: Response;
   try {
-    response = await fetch(path, {
+    response = await apiFetch(path, {
       method,
       credentials: 'same-origin',
       headers:

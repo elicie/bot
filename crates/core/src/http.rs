@@ -42,6 +42,7 @@ pub struct HttpContext {
     /// Explicit frontend directory override, or the debug build's `dist/` fallback.
     pub web_root: Option<PathBuf>,
     pub embedded_web: Option<crate::web::EmbeddedWeb>,
+    pub(crate) desktop_token: Option<crate::desktop_auth::DesktopToken>,
     /// Bounded disposable probes, tracked independently of the app command queue for shutdown.
     pub(crate) mcp_tests: crate::mcp_probe::Probes,
     /// Flips to `true` after final state flush; open SSE streams can then finish.
@@ -69,6 +70,7 @@ impl HttpContext {
             closing: AtomicBool::new(false),
             web_root,
             embedded_web: None,
+            desktop_token: None,
             mcp_tests: crate::mcp_probe::Probes::default(),
             stopping: tokio::sync::watch::Sender::new(false),
         }
@@ -204,7 +206,14 @@ async fn guard(State(ctx): State<Ctx>, request: Request, next: Next) -> Response
     if let Some(error) = host_error(&ctx, request.headers()) {
         return (StatusCode::FORBIDDEN, Json(json!({ "error": error }))).into_response();
     }
-    let api = request.uri().path().starts_with("/api");
+    let path = request.uri().path();
+    let api = path == "/api" || path.starts_with("/api/");
+    if api && let Some(token) = &ctx.desktop_token {
+        let allowed = request.headers().get("x-grok-desktop-token").is_some_and(|value| token.matches(value.as_bytes()));
+        if !allowed {
+            return secure((StatusCode::UNAUTHORIZED, Json(json!({ "error": "This API requires the desktop session token." }))).into_response(), true);
+        }
+    }
     if api && !matches!(*request.method(), Method::GET | Method::HEAD) {
         let headers = request.headers();
         let json_type = headers

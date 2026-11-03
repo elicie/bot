@@ -38,6 +38,16 @@ pub struct Backend {
 
 impl Backend {
     pub async fn new(options: BackendOptions) -> anyhow::Result<Self> {
+        Self::compose(options, None).await
+    }
+
+    /// Desktop-only API authentication. Internal engine/webhook capabilities keep their own tokens.
+    /// The web adapter's existing `new` and HTTP contracts are unchanged.
+    pub async fn for_desktop(options: BackendOptions, token: crate::desktop_auth::DesktopToken) -> anyhow::Result<Self> {
+        Self::compose(options, Some(token)).await
+    }
+
+    async fn compose(options: BackendOptions, token: Option<crate::desktop_auth::DesktopToken>) -> anyhow::Result<Self> {
         let now = options.now.unwrap_or_else(grok_bot_model::system_clock);
         let store = Store::open(&options.data_dir, now.clone()).await?;
         let queue = CommandQueue::new();
@@ -58,6 +68,7 @@ impl Backend {
         let mut context =
             HttpContext::new(store.clone(), runtime.clone(), scheduler.clone(), queue.clone(), default_allowed_hosts(&options.allowed_hosts), options.web_root);
         context.embedded_web = options.embedded_web;
+        context.desktop_token = token;
         let context = Arc::new(context);
         Ok(Self { store, runtime, scheduler, queue, context })
     }
@@ -65,7 +76,11 @@ impl Backend {
     /// Bind, start the scheduler, and serve until `shutdown` resolves; then close in Node order
     /// (stop scheduling, drain commands, cancel runs, flush state).
     pub async fn serve(self, listener: tokio::net::TcpListener, shutdown: impl Future<Output = ()> + Send + 'static) -> anyhow::Result<()> {
-        let port = listener.local_addr()?.port();
+        let bound = listener.local_addr()?;
+        if self.context.desktop_token.is_some() && bound.ip() != std::net::Ipv4Addr::LOCALHOST {
+            anyhow::bail!("The desktop backend must bind to 127.0.0.1");
+        }
+        let port = bound.port();
         self.context.port.store(port, Ordering::SeqCst);
         self.runtime.set_origin(format!("http://127.0.0.1:{port}"));
         self.scheduler.start();

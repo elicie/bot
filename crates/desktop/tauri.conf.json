@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Grok Bot",
+  "version": "0.1.0",
+  "identifier": "com.grok-bot.desktop",
+  "build": { "frontendDist": "../../dist" },
+  "app": {
+    "windows": [],
+    "security": { "capabilities": [], "csp": null },
+    "withGlobalTauri": false
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["appimage", "dmg"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns"],
+    "category": "Productivity",
+    "shortDescription": "Local bots using the shared Grok Bot core",
+    "createUpdaterArtifacts": false,
+    "resources": ["../../engine/NOTICE", "../../engine/licenses/*"],
+    "macOS": { "minimumSystemVersion": "12.0" }
+  }
+}

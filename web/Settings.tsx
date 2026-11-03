@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import type { AppState, ProviderCheck, SettingsInput } from '../shared/types';
 import { errorText, request } from './api';
+import { desktopContext } from './desktop-transport';
 import type { SettingsTab } from './state';
 import { ErrorNotice, IconButton, Modal, Spinner } from './ui';
 import { PermissionRules } from './PermissionRules';
@@ -502,6 +503,10 @@ export function Settings({
                   <RuntimeDetails runtime={data.runtime} />
                 </section>
                 <section className="settings-section">
+                  {desktopContext() ? <>
+                    <h3>데스크톱 앱 업데이트</h3>
+                    <p className="settings-note">자동 업데이트는 사용하지 않습니다. 앱을 종료하고 서명을 확인한 새 설치 파일로 교체해 주세요. 대화와 설정은 앱 데이터 폴더에 유지됩니다.</p>
+                  </> : <>
                   <h3>소스에서 업데이트</h3>
                   <p className="settings-note">
                     이 앱은 업데이트를 자동으로 다운로드하거나 설치하지 않습니다. 서버 컴퓨터에서
@@ -535,6 +540,7 @@ export function Settings({
                     <li>완성된 바이너리에는 엔진과 웹 화면이 포함되어 Node.js 없이 실행할 수 있습니다.</li>
                     <li>설정을 다시 열어 엔진의 버전과 사용 가능 상태를 확인합니다.</li>
                   </ol>
+                  </>}
                 </section>
               </>
             )}

@@ -10,4 +10,5 @@ test-results/
 engine/target/
 .engine/
 target/
+crates/desktop/gen/
 .claude/worktrees/

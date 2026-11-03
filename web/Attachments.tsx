@@ -6,6 +6,8 @@ import { FileText, Paperclip, X } from 'lucide-react';
 import type { Attachment, AttachmentUpload } from '../shared/types';
 import { IconButton } from './ui';
 import { PreviewableImage } from './Previews';
+import { useMediaUrl } from './use-media-url';
+import { desktopContext } from './desktop-transport';
 import './chat-features.css';
 
 export const MAX_ATTACHMENTS = 8;
@@ -153,6 +155,17 @@ export function DropOverlay({ show }: { show: boolean }): ReactNode {
   return show ? <div className="attachment-drop" aria-hidden="true"><Paperclip size={18} />놓아서 첨부</div> : null;
 }
 
+function TextAttachment({ src, attachment }: { src: string; attachment: Attachment }) {
+  const media = useMediaUrl(src);
+  return <>
+    <a className="attachment-chip is-text" href={media.url ?? undefined} target={desktopContext() ? undefined : '_blank'} download={desktopContext() ? attachment.name : undefined} rel="noopener noreferrer" title={attachment.name} aria-disabled={!media.url || undefined} aria-busy={!media.url && !media.error || undefined}>
+      <span className="attachment-thumb"><FileText size={15} /></span>
+      <span className="attachment-name">{attachment.name}<small>{sizeLabel(attachment.size)}</small></span>
+    </a>
+    {media.error && <span role="alert">{media.error}</span>}
+  </>;
+}
+
 /** "사용자 첨부 파일" in a sent user message. Images open "미디어 미리보기". */
 export function MessageAttachments({ conversationId, attachments }: { conversationId: string; attachments: Attachment[] }) {
   const url = (attachment: Attachment) => `/api/conversations/${encodeURIComponent(conversationId)}/attachments/${encodeURIComponent(attachment.id)}`;
@@ -160,10 +173,7 @@ export function MessageAttachments({ conversationId, attachments }: { conversati
     {attachments.map((attachment) => <li key={attachment.id}>
       {attachment.kind === 'image'
         ? <PreviewableImage className="message-attachment-image" src={url(attachment)} alt={attachment.name} download={attachment.name} loading="lazy" />
-        : <a className="attachment-chip is-text" href={url(attachment)} target="_blank" rel="noopener noreferrer" title={attachment.name}>
-            <span className="attachment-thumb"><FileText size={15} /></span>
-            <span className="attachment-name">{attachment.name}<small>{sizeLabel(attachment.size)}</small></span>
-          </a>}
+        : <TextAttachment src={url(attachment)} attachment={attachment} />}
     </li>)}
   </ul>;
 }

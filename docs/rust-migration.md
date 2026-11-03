@@ -67,7 +67,7 @@ OpenAI 호환 서버
 
 ## 데스크톱 (Tauri)
 
-P5의 향후 계획입니다. 현재 웹 release 실행 파일과 별개로 Tauri 앱은 아직 구현·검증하지 않았습니다. 웹 서버와 데스크톱 앱이 같은 코어 라이브러리를 쓰도록 설계합니다.
+P4는 [PR #28](https://github.com/elicie/bot/pull/28)로 main에 병합됐습니다. P5는 [crates/desktop](<../crates/desktop/>)에서 같은 코어를 연결하는 Tauri 호스트를 구현·검증 중입니다. 경로·인증·가져오기·수동 업데이트 결정과 미완료 검증은 [데스크톱 문서](<desktop.md>)를 따릅니다. 서명과 실제 앱 검증 전에는 P5 완료를 주장하지 않습니다.
 
 - 코어(`crates/core`)는 axum 라우터와 엔진 호스트를 라이브러리로 제공합니다. 라우터를 만들고 수명 주기를 관리하는 API를 공개합니다.
 - [crates/server](<../crates/server/>)는 웹 버전입니다. 지정한 주소에 바인딩하고 내장한 프론트엔드를 서빙합니다. LAN 접근은 기존 정책을 따릅니다.
@@ -89,6 +89,7 @@ crates/
   core/                  axum HTTP/SSE, 실행 수명 주기, MCP 브로커,
                          루틴·FIFO 복구, 관리형 Chrome, 공급자 중계기
   server/                grok-bot bin: 바인딩, CLI, 프론트엔드 내장
+  desktop/               Tauri host: loopback 인증, OS 경로, 웹 데이터 가져오기
 ```
 
 [engine/Cargo.toml](<../engine/Cargo.toml>)은 독립 루트가 아니라 workspace 멤버입니다. 루트 [Cargo.toml](<../Cargo.toml>)에 `async-openai` 패치를 두며 루트 [Cargo.lock](<../Cargo.lock>) 하나로 엔진을 포함한 Rust 그래프를 고정합니다. 별도 엔진 바이너리·lockfile·설치 단계는 없습니다.
