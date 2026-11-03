@@ -5,7 +5,7 @@
 ## 리비전과 동일 조건
 
 - **Before UI:** `e7de2f2d4f10539e0e25ee39752dd47e205c06ba`, `web` tree `1f77c3ee7dde90763ea4f2ffa3739843f8311e9a`. 별도 detached checkout에서 실제 원래 프론트엔드를 빌드했습니다. Core PR 1은 화면 코드를 바꾸지 않으므로 이 tree가 UI PR의 변경 전 화면입니다.
-- **After UI:** `92ef3d9184b4e05406346f381cdb12f905322dc5`, `web` tree `62db3e9058c91520d8c50df1c1dc08469e7f0067`. 캡처 당시 프론트엔드 실행 소스는 clean 상태였고, 이후 test-only 병합/문서 추가는 이 화면 tree를 바꾸지 않습니다.
+- **After UI:** `92ef3d9184b4e05406346f381cdb12f905322dc5`, `web` tree `62db3e9058c91520d8c50df1c1dc08469e7f0067`. 캡처 당시 프론트엔드 실행 소스는 clean 상태였습니다. 후속 커밋은 테스트/문서와 그룹 설정의 멤버 변경 보호를 보완합니다. 그룹 설정 보호는 이 비교에서 열지 않은 별도 대화상자의 동작이며, 캡처한 일반 채팅·대기열·사이드바 렌더링은 바꾸지 않습니다.
 - **동일 backend binary:** Core `1cad678decf1187eda69fc37a2be8bc8a04de4dc`의 실제 빌드. SHA-256 `0bdb016272a900d0c811e7f52c40df1e30b741ec7090f98db80a58ea79f204ee`. After 시점의 core checkout `aa81ed0c711cfbad496784cbe85d03cf33c8c41e`는 테스트 통합/fixture import만 바뀌었으며 production core/model/store/engine tree가 동일함을 검사했습니다. 이 테스트 전용 이동 때문에 backend를 새로 만들었다고 주장하지 않습니다.
 - **브라우저:** 실제 Google Chrome `150.0.7871.181`, scale factor 1, 한국어 `ko-KR`, `Asia/Seoul`, reduced motion.
 - **Desktop:** 1280 × 900, dark theme, 기본 280px 펼친 사이드바.
