@@ -44,7 +44,8 @@ impl Fixture {
                 assistant.id = message_id.clone();
                 assistant.speaker_bot_id = speaker.clone();
                 conversation.messages.extend([user, assistant]);
-                conversation.run = RunState { id: run_id.clone(), status: RunStatus::Running, started_at: Some(now), ..RunState::idle() };
+                conversation.run =
+                    RunState { id: run_id.clone(), bot_id: Some(bot.id.clone()), status: RunStatus::Running, started_at: Some(now), ..RunState::idle() };
                 Ok(speaker)
             })
             .await
@@ -154,11 +155,20 @@ async fn ordinary_parent_advertises_worker_once_with_conditional_helpful_only_gu
         "Answer ordinary questions and small tasks directly",
         "do not delegate merely because the tool exists",
         "Each new worker needs explicit one-use approval",
+        "Each Bot executes one run at a time, including its workers",
+        "different Bots may work concurrently within the app's configured run limit",
     ] {
         assert!(rules.contains(policy), "missing policy {policy:?}: {rules}");
     }
     let description = tools.iter().find(|tool| tool["name"] == "spawn_worker").unwrap()["description"].as_str().unwrap();
-    for policy in ["Optionally delegate", "only when splitting the user's task would materially help", "Answer ordinary questions directly"] {
+    assert!(!rules.contains("only one run executes globally"));
+    for policy in [
+        "Optionally delegate",
+        "only when splitting the user's task would materially help",
+        "Answer ordinary questions directly",
+        "Runs of the same Bot, including workers, are serial",
+        "different Bots may run concurrently within the app's configured limit",
+    ] {
         assert!(description.contains(policy), "missing policy {policy:?}: {description}");
     }
     // This is guidance, not a task-content classifier that prevents useful complex delegation.

@@ -182,7 +182,7 @@ fn entries(state: &State, messages: &[Message], speaker: &str) -> Vec<(String, S
 
 /// Plan the next turn of `conversation_id`. `user_text` is the new user message; `None` asks for
 /// the next queued member turn of a group round. Validates only; [`apply`] mutates.
-pub(crate) fn plan(state: &State, conversation_id: &str, user_text: Option<&str>) -> HttpResult<TurnPlan> {
+pub(crate) fn plan(state: &State, conversation_id: &str, user_text: Option<&str>, accepted_speakers: Option<&[String]>) -> HttpResult<TurnPlan> {
     let conversation = state.conversation(conversation_id)?;
     let key = state.redaction_keys();
     let Some(group_id) = conversation.group_id.as_deref() else {
@@ -213,7 +213,7 @@ pub(crate) fn plan(state: &State, conversation_id: &str, user_text: Option<&str>
             if conversation.group_round.is_some() {
                 return Err(HttpError::conflict(GROUP_BUSY));
             }
-            let speakers = group_speakers(&members, text);
+            let speakers = accepted_speakers.map_or_else(|| group_speakers(&members, text), <[String]>::to_vec);
             let Some((first, rest)) = speakers.split_first() else {
                 return Err(HttpError::bad_request("This group has no member bots. Add members before sending a message."));
             };
@@ -278,10 +278,15 @@ pub(crate) struct ReportTurn {
 }
 
 /// Plan the report turn of `conversation_id` from its queued reports.
-pub(crate) fn report(state: &State, conversation_id: &str) -> HttpResult<ReportTurn> {
+pub(crate) fn report(state: &State, conversation_id: &str, anchor: &str) -> HttpResult<ReportTurn> {
     let disk = state.disk();
     let mut queued = grok_bot_store::bot_messages::queued_reports(&disk.bot_deliveries, conversation_id);
-    let chain_id = queued.first().ok_or_else(|| HttpError::conflict("No bot reply is waiting for a follow-up in this conversation."))?.chain_id.clone();
+    let chain_id = queued
+        .iter()
+        .find(|delivery| delivery.id == anchor)
+        .ok_or_else(|| HttpError::conflict("No bot reply is waiting for a follow-up in this conversation."))?
+        .chain_id
+        .clone();
     // One turn belongs to one chain: Stop, deadline, and outbound lineage must never couple
     // unrelated requests merely because their answers arrived in the same conversation.
     queued.retain(|delivery| delivery.chain_id == chain_id);

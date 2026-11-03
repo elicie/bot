@@ -309,6 +309,7 @@ pub(super) async fn worker_workspace_authorization(f: &Fixture) {
                 workspace: later.to_string_lossy().into_owned(),
                 api_key: None,
                 clear_api_key: None,
+                max_concurrent_runs: None,
             })
         })
         .await

@@ -1,12 +1,14 @@
 //! Agent runtime on the in-process engine host (`grok_bot_engine::host::EngineHost`), called by the
 //! HTTP layer and scheduler.
 //!
-//! One shared engine serves every conversation. It starts on the first run and restarts when the
-//! provider settings change while no run is active. Each turn uses its own broker URL and bearer
-//! token, so its session is closed when the turn ends and loaded from disk on the next turn.
+//! One shared engine serves concurrent sessions, with one live turn per Bot and a global cap.
+//! It starts on the first run and restarts when provider settings change while all runs are idle.
+//! Each turn uses its own broker URL and bearer token, so its session is closed when the turn ends
+//! and loaded from disk on the next turn.
 //! There is no engine process to kill. Cancellation and inactivity send `session/cancel`; when the
 //! prompt does not return within `cancel_deadline`, its session is abandoned (see [`Runtime::execute`]).
 
+mod admission;
 pub mod attachments;
 mod broker;
 mod custom_mcp;
@@ -102,6 +104,8 @@ struct Approval {
 #[derive(Default)]
 struct RunFlags {
     stopped: bool,
+    /// Server shutdown interrupts this turn without discarding its conversation's accepted work.
+    interrupted: bool,
     /// A chain-wide deadline stops the engine like Stop, but is recorded as a failure.
     stop_error: Option<String>,
     /// Chains stopped before engine cancellation; finish settles their remaining active receipts.
@@ -232,6 +236,8 @@ pub struct Runtime {
     closing: AtomicBool,
     maintenance: AtomicBool,
     runs: Mutex<Vec<Arc<Run>>>,
+    /// Serializes durable dequeue and run registration, not engine execution.
+    admission: tokio::sync::Mutex<()>,
     engine: EngineManager,
     mcp_app_requests: Mutex<mcp_apps::Requests>,
     /// A bounded app call owns the engine admission slot, without starting an LLM turn.
@@ -246,7 +252,7 @@ pub struct Runtime {
     relay: std::sync::OnceLock<crate::provider_relay::RelayEndpoint>,
 }
 
-/// 409 when a turn is requested while another reply is running (one active run at a time).
+/// Aggregate busy error for exclusive maintenance and isolated MCP app calls, not queued prompts.
 pub const RUN_BUSY: &str = "Another reply is still running. Wait for it to finish or stop it, then send again.";
 
 pub(crate) fn random_token() -> String {
@@ -362,6 +368,7 @@ impl Runtime {
             closing: AtomicBool::new(false),
             maintenance: AtomicBool::new(false),
             runs: Mutex::new(Vec::new()),
+            admission: tokio::sync::Mutex::new(()),
             engine: EngineManager::default(),
             mcp_app_requests: Mutex::new(mcp_apps::Requests::default()),
             mcp_app_busy: AtomicBool::new(false),
@@ -456,49 +463,89 @@ impl Runtime {
         self.settled.notified().await;
     }
 
-    /// Append the user prompt and an empty assistant message, then run the turn in the background.
-    /// Errors match the Node runtime (409 when busy, 503 engine unavailable, 400 no provider).
-    /// In a group conversation the first answering member takes this turn and the others are queued.
+    /// Accept a durable user turn and dispatch eligible Bot FIFO heads in the background.
+    /// Occupied Bot/capacity slots wait in the queue instead of returning RUN_BUSY.
+    /// A group's initial turn belongs to its first speaking member, not to the whole group.
     pub async fn start(&self, conversation_id: &str, prompt: &str) -> HttpResult<()> {
         self.start_with_attachments(conversation_id, prompt, Vec::new()).await
     }
 
-    /// [`Runtime::start`] with user attachments whose blobs the caller already stored. The prompt
-    /// may be empty when files are attached.
+    /// [`Runtime::start`] with validated uploads. Blobs are stored before the queue claim so
+    /// pending attachments survive a restart; the prompt may be empty when files are attached.
     pub async fn start_with_attachments(&self, conversation_id: &str, prompt: &str, attachments: Vec<PreparedAttachment>) -> HttpResult<()> {
-        self.start_turn(conversation_id, Turn::Prompt(prompt.to_owned()), attachments).await
+        self.accept_prompt(conversation_id, prompt, attachments).await
     }
 
     /// Start the next queued member turn of a group conversation's round.
     pub async fn start_group_turn(&self, conversation_id: &str) -> HttpResult<()> {
-        self.start_turn(conversation_id, Turn::Group, Vec::new()).await
+        self.dispatch_conversation(conversation_id, true).await
     }
 
     /// Start the automatic follow-up ("report") turn of a conversation whose sent bot messages
     /// finished: one turn of its bot with queued reports of the oldest chain as data. The
     /// hidden user input is marked with `reportDeliveryIds`; the reports become `running`.
     pub async fn start_report(&self, conversation_id: &str) -> HttpResult<()> {
-        self.start_turn(conversation_id, Turn::Report, Vec::new()).await
+        self.dispatch_conversation(conversation_id, false).await
     }
 
-    /// Dispatch one queued worker under the ordinary single global execution slot.
+    /// Dispatch an already accepted worker through its Bot's FIFO, never around older work.
     pub async fn start_worker(&self, conversation_id: &str) -> HttpResult<()> {
         let worker_id = self.store.read(|state| {
-            state
-                .worker_for_conversation(conversation_id)
-                .map(|(_, worker)| worker.id.clone())
-                .ok_or_else(|| HttpError::not_found("Worker conversation does not exist."))
+            let (batch, worker) = state.worker_for_conversation(conversation_id).ok_or_else(|| HttpError::not_found("Worker conversation does not exist."))?;
+            if batch.cancelled
+                || batch.released_at.is_none()
+                || worker.status != DeliveryStatus::Queued
+                || worker.execution_run_id.is_some()
+                || !state.can_start(&batch.bot_id, conversation_id)
+                || self.runs().iter().any(|run| run.bot.id == batch.bot_id || run.conversation_id == conversation_id)
+                || !state.disk().work_queue.iter().any(|work| {
+                    work.conversation_id == conversation_id
+                        && work.bot_id == batch.bot_id
+                        && matches!(&work.kind, grok_bot_model::WorkKind::Worker { worker_id } if worker_id == &worker.id)
+                })
+            {
+                return Err(HttpError::conflict("This worker is not ready for execution."));
+            }
+            Ok(worker.id.clone())
         })?;
-        self.start_turn(conversation_id, Turn::Worker(worker_id), Vec::new()).await
+        self.dispatch_available().await?;
+        self.store.read(|state| {
+            if state.worker_for_conversation(conversation_id).is_some_and(|(_, worker)| worker.id == worker_id && worker.execution_run_id.is_some()) {
+                Ok(())
+            } else {
+                Err(HttpError::conflict("This worker is waiting behind earlier work."))
+            }
+        })
     }
 
-    /// Dispatch the one automatic parent synthesis turn for a released worker batch.
+    /// Dispatch the one grouped synthesis through the same FIFO as user and worker turns.
     pub async fn start_worker_report(&self, batch_id: &str) -> HttpResult<()> {
-        let conversation_id = self.store.read(|state| state.worker_batch(batch_id).map(|batch| batch.parent_conversation_id.clone()))?;
-        self.start_turn(&conversation_id, Turn::WorkerReport(batch_id.to_owned()), Vec::new()).await
+        self.store.read(|state| {
+            let batch = state.worker_batch(batch_id)?;
+            workers::report_prompt(state, batch_id, &batch.parent_conversation_id)?;
+            if !state.can_start(&batch.bot_id, &batch.parent_conversation_id)
+                || self.runs().iter().any(|run| run.bot.id == batch.bot_id || run.conversation_id == batch.parent_conversation_id)
+                || !state.disk().work_queue.iter().any(|work| {
+                    work.conversation_id == batch.parent_conversation_id
+                        && work.bot_id == batch.bot_id
+                        && matches!(&work.kind, grok_bot_model::WorkKind::WorkerReport { batch_id: id } if id == batch_id)
+                })
+            {
+                return Err(HttpError::conflict("This worker batch is not ready for a follow-up."));
+            }
+            Ok(())
+        })?;
+        self.dispatch_available().await?;
+        self.store.read(|state| {
+            if state.worker_batch(batch_id)?.report.as_ref().is_some_and(|report| report.run_id.is_some()) {
+                Ok(())
+            } else {
+                Err(HttpError::conflict("This worker follow-up is waiting behind earlier work."))
+            }
+        })
     }
 
-    async fn start_turn(&self, conversation_id: &str, turn: Turn, attachments: Vec<PreparedAttachment>) -> HttpResult<()> {
+    async fn start_turn(&self, conversation_id: &str, turn: Turn, attachments: Vec<PreparedAttachment>, work_id: &str) -> HttpResult<()> {
         if self.mcp_app_busy.load(Ordering::SeqCst) {
             return Err(HttpError::conflict("An MCP app call is still running. Wait for it to finish."));
         }
@@ -513,11 +560,26 @@ impl Runtime {
         let (run_id, message_id, settings, plan, extras, prompt, report_deliveries, worker_id, worker_report) = self
             .store
             .mutate(move |state| {
-                if state.active().is_some() || self.mcp_app_busy.load(Ordering::SeqCst) {
-                    state.assert_writable()?;
-                    return Err(HttpError::conflict(RUN_BUSY));
+                state.assert_writable()?;
+                let work = state
+                    .disk()
+                    .work_queue
+                    .iter()
+                    .find(|work| work.id == work_id && work.conversation_id == id)
+                    .cloned()
+                    .ok_or_else(|| HttpError::conflict("This queued turn is no longer waiting."))?;
+                use grok_bot_model::WorkKind;
+                let expected = match (&turn, &work.kind) {
+                    (Turn::Prompt(_), WorkKind::User { .. } | WorkKind::Routine { .. } | WorkKind::Delivery { .. })
+                    | (Turn::Group, WorkKind::Group { .. })
+                    | (Turn::Report, WorkKind::Report { .. }) => true,
+                    (Turn::Worker(requested), WorkKind::Worker { worker_id }) => requested == worker_id,
+                    (Turn::WorkerReport(requested), WorkKind::WorkerReport { batch_id }) => requested == batch_id,
+                    _ => false,
+                };
+                if !expected {
+                    return Err(HttpError::conflict("This queued turn does not match its execution receipt."));
                 }
-                state.assert_idle()?;
                 if self.closing.load(Ordering::SeqCst) {
                     return Err(HttpError::unavailable("The server is shutting down."));
                 }
@@ -551,7 +613,19 @@ impl Runtime {
                     }
                 }
                 let report = match &turn {
-                    Turn::Report => Some(turns::report(state, &id)?),
+                    Turn::Report => {
+                        let anchor = state
+                            .disk()
+                            .work_queue
+                            .iter()
+                            .find(|work| work.id == work_id)
+                            .and_then(|work| match &work.kind {
+                                grok_bot_model::WorkKind::Report { delivery_id } => Some(delivery_id.as_str()),
+                                _ => None,
+                            })
+                            .ok_or_else(|| HttpError::conflict("No bot reply is waiting for a follow-up in this conversation."))?;
+                        Some(turns::report(state, &id, anchor)?)
+                    }
                     _ => None,
                 };
                 let (worker_id, worker_prompt) = match state.worker_for_conversation(&id) {
@@ -561,6 +635,12 @@ impl Runtime {
                             || batch.released_at.is_none()
                             || worker.status != DeliveryStatus::Queued
                             || worker.execution_run_id.is_some()
+                            || worker.started_at.is_some()
+                            || work.bot_id != batch.bot_id
+                            || state.conversation(&id)?.bot_id != batch.bot_id
+                            || !state.conversation(&id)?.run.id.is_empty()
+                            || state.conversation(&id)?.run.status != RunStatus::Idle
+                            || !state.conversation(&id)?.messages.is_empty()
                         {
                             return Err(HttpError::conflict("This worker is not queued for execution."));
                         }
@@ -577,7 +657,13 @@ impl Runtime {
                     }
                 };
                 let worker_report = match &turn {
-                    Turn::WorkerReport(batch_id) => Some(batch_id.clone()),
+                    Turn::WorkerReport(batch_id) => {
+                        let batch = state.worker_batch(batch_id)?;
+                        if batch.bot_id != work.bot_id || state.conversation(&id)?.bot_id != batch.bot_id {
+                            return Err(HttpError::conflict("This worker follow-up does not belong to its queued Bot."));
+                        }
+                        Some(batch_id.clone())
+                    }
                     _ => None,
                 };
                 if let Some(report) = report.as_ref() {
@@ -590,7 +676,13 @@ impl Runtime {
                     Turn::Worker(_) => worker_prompt,
                     Turn::WorkerReport(batch_id) => Some(workers::report_prompt(state, batch_id, &id)?),
                 };
-                let plan = turns::plan(state, &id, requested.as_deref())?;
+                let plan = turns::plan(state, &id, requested.as_deref(), work.speaker_bot_ids.as_deref())?;
+                if plan.bot.id != work.bot_id {
+                    return Err(HttpError::conflict("This queued turn does not belong to its speaking Bot."));
+                }
+                if !state.can_start(&plan.bot.id, &id) {
+                    return Err(HttpError::conflict("This Bot is still running or all execution slots are occupied."));
+                }
                 let delivery = state
                     .disk()
                     .bot_deliveries
@@ -599,6 +691,8 @@ impl Runtime {
                     .map(|d| (d.id.clone(), d.from_bot_id.clone()));
                 let now = iso(state.now());
                 let (run_id, message_id, user_message_id) = (new_id(), new_id(), new_id());
+                // Dequeue and Starting are one durable mutation: a crash cannot replay a claimed turn.
+                state.remove_queued_work(work_id);
                 turns::apply(state, &id, &plan, &user_message_id)?;
                 let conversation = state.conversation_mut(&id)?;
                 if let Some(text) = &plan.user_text {
@@ -636,7 +730,8 @@ impl Runtime {
                     };
                 }
                 conversation.updated_at = now.clone();
-                conversation.run = RunState { id: run_id.clone(), status: RunStatus::Starting, started_at: Some(now), ..RunState::idle() };
+                conversation.run =
+                    RunState { id: run_id.clone(), bot_id: Some(plan.bot.id.clone()), status: RunStatus::Starting, started_at: Some(now), ..RunState::idle() };
                 if let Some((delivery_id, _)) = delivery
                     && let Some(delivery) = state.disk_mut().bot_deliveries.iter_mut().find(|d| d.id == delivery_id)
                 {
@@ -1036,9 +1131,9 @@ impl Runtime {
             });
             let _ = tokio::time::timeout(ENGINE_SETTLE_LIMIT, close).await;
         }
-        let (stopped, stop_error, stop_chains) = {
+        let (stopped, interrupted, stop_error, stop_chains) = {
             let flags = run.flags();
-            (flags.stopped, flags.stop_error.clone(), flags.stop_chains.clone())
+            (flags.stopped, flags.interrupted, flags.stop_error.clone(), flags.stop_chains.clone())
         };
         let Outcome { error, abandoned, .. } = outcome;
         let error = if stopped { stop_error } else { error };
@@ -1060,13 +1155,15 @@ impl Runtime {
                 conversation.run.permission = None;
                 conversation.run.status = if error.is_some() {
                     RunStatus::Error
+                } else if interrupted {
+                    RunStatus::Interrupted
                 } else if stopped {
                     RunStatus::Cancelled
                 } else {
                     RunStatus::Completed
                 };
                 conversation.run.finished_at = Some(now);
-                turns::settle(conversation, run.speaker.as_deref(), stopped || error.is_some());
+                turns::settle(conversation, run.speaker.as_deref(), (stopped && !interrupted) || error.is_some());
                 if let Some(error) = error.as_ref() {
                     conversation.run.error = Some(error.clone());
                 }
@@ -1377,7 +1474,7 @@ impl Runtime {
 
     /// Resolve live turn ownership without requiring a writable store. Snapshot the run list first
     /// so its mutex is never held while reading the store or signaling a run. Worker ownership is
-    /// durable even if its receipt is stale or its parent has already released the global slot.
+    /// durable even if its receipt is stale or its parent has already released its Bot's slot.
     fn cancellation_runs(&self, conversation_id: &str) -> Vec<Arc<Run>> {
         let runs = self.runs().clone();
         self.store.read(|state| {
@@ -1390,17 +1487,10 @@ impl Runtime {
         })
     }
 
-    /// Resolve chain authority without requiring a writable store. Keeping the selected run as a
-    /// fallback prevents its fast settlement from turning a scoped Stop into idle cancel-all.
-    fn cancellation_bot_chains(&self, conversation_id: &str, own: Option<&Run>) -> HashSet<String> {
-        self.store.read(|state| {
-            state.bot_chain_ids_for_cancel(conversation_id, own.map(|run| run.message_id.as_str()), own.map_or(&[][..], |run| run.report_deliveries.as_slice()))
-        })
-    }
-
-    fn signal_cancellation(&self, conversation_id: &str, chain_ids: &HashSet<String>, runs: &mut Vec<Arc<Run>>) {
-        // Chain stops must latch their cause before the generic own/worker stop marks them stopped.
-        for run in self.stop_bot_chain_runs(chain_ids, None).into_iter().chain(self.cancellation_runs(conversation_id)) {
+    fn signal_cancellation(&self, conversation_id: &str, runs: &mut Vec<Arc<Run>>) {
+        // Internal worker ownership extends the selected conversation, not its Bot-message chain.
+        // Keep the first snapshot too: a fast finish must not drop its cleanup barrier.
+        for run in self.cancellation_runs(conversation_id) {
             self.request_stop(&run);
             if !runs.iter().any(|stopped| Arc::ptr_eq(stopped, &run)) {
                 runs.push(run);
@@ -1474,42 +1564,47 @@ impl Runtime {
         persisted
     }
 
-    /// Stop owned live turns before queue admission or a fallible save, including chain descendants
-    /// and workers of waiting parents. Durable chain, worker, and ordinary queued-work cancellation
-    /// share the dispatch queue; cleanup always runs outside it and preserves the original error.
+    /// Stop this conversation and its internal worker children before queue admission or a
+    /// fallible save. Ordinary Bot-message descendants and other conversations remain independent.
+    /// Cleanup and finish barriers always run outside the queue, including on persistence errors.
     pub async fn cancel(&self, conversation_id: &str) -> HttpResult<()> {
         self.mcp_app_requests.lock().unwrap_or_else(|p| p.into_inner()).cancel(conversation_id);
-        let own = self.run_for_conversation(conversation_id);
-        let mut chain_ids = self.cancellation_bot_chains(conversation_id, own.as_deref());
         let mut runs = Vec::new();
-        self.signal_cancellation(conversation_id, &chain_ids, &mut runs);
+        self.signal_cancellation(conversation_id, &mut runs);
         for run in &runs {
             self.stop_run_computer(run).await;
         }
         let persisted = self
             .queue
             .run(async {
-                // Dispatch may have admitted a child/report while Stop waited. Resolve authority
-                // again, retaining the selected turn's scope if it has already finished.
-                let current = self.run_for_conversation(conversation_id);
-                chain_ids.extend(self.cancellation_bot_chains(conversation_id, current.as_deref().or(own.as_deref())));
-                self.signal_cancellation(conversation_id, &chain_ids, &mut runs);
+                let _admission = self.admission.lock().await;
+                // Dispatch may have registered a child/report while Stop waited. Signal again
+                // under admission, but retain already finishing runs for the outside-queue barrier.
+                self.signal_cancellation(conversation_id, &mut runs);
                 self.store
                     .mutate(|state| {
-                        // Group rounds/routines, worker batches, and Bot chains can coexist. Never
-                        // choose only one category or leave queued siblings/reports dispatchable.
-                        state.cancel_queued_work(conversation_id)?;
+                        let attachments = state
+                            .disk()
+                            .work_queue
+                            .iter()
+                            .filter(|work| work.conversation_id == conversation_id)
+                            .flat_map(|work| match &work.kind {
+                                grok_bot_model::WorkKind::User { attachments, .. } => attachments.clone(),
+                                _ => Vec::new(),
+                            })
+                            .collect::<Vec<_>>();
+                        state.cancel_conversation_work(conversation_id)?;
                         state.cancel_worker_batches(conversation_id)?;
-                        if !chain_ids.is_empty() {
-                            state.terminate_bot_chains(&chain_ids, RunStatus::Cancelled, None, state.now())?;
-                        }
-                        Ok(())
+                        Ok(attachments)
                     })
                     .await
             })
             .await;
-        // In-flight broker calls may themselves need the queue to settle. This cleanup must also
-        // run after a failed cascade, for both the initial snapshot and runs admitted while waiting.
+        // Do not delete blobs after an unsuccessful save: recovery still owns their durable queue
+        // entries. Engine/browser cleanup must nevertheless finish before returning the first error.
+        if let Ok(attachments) = &persisted {
+            grok_bot_store::attachments::discard_attachments(self.store.data_dir(), conversation_id, attachments);
+        }
         for run in &runs {
             self.stop_run_computer(run).await;
         }
@@ -1517,9 +1612,24 @@ impl Runtime {
             let mut done = run.done.subscribe();
             let _ = done.wait_for(|done| *done).await;
         }
+        self.settled.notify_one();
         persisted?;
-        // finish() can make the store unwritable even when the cascade was a successful no-op.
+        // finish() can make the store unwritable even when cancelling pending work was a no-op.
         self.store.read(|state| state.assert_writable())
+    }
+
+    /// A queued-message button removes exactly the selected accepted request. A request that
+    /// already started is never mistaken for a newer queued turn in the same conversation.
+    pub async fn cancel_queued_turn(&self, conversation_id: &str, id: &str) -> HttpResult<()> {
+        let work = {
+            let _admission = self.admission.lock().await;
+            self.store.mutate(|state| state.cancel_user_turn(conversation_id, id)).await?
+        };
+        if let grok_bot_model::WorkKind::User { attachments, .. } = work.kind {
+            grok_bot_store::attachments::discard_attachments(self.store.data_dir(), conversation_id, &attachments);
+        }
+        self.settled.notify_one();
+        Ok(())
     }
 
     pub async fn shutdown(&self) {
@@ -1527,6 +1637,12 @@ impl Runtime {
         self.mcp_app_requests.lock().unwrap_or_else(|p| p.into_inner()).clear();
         let runs: Vec<Arc<Run>> = self.runs().clone();
         for run in &runs {
+            {
+                let mut flags = run.flags();
+                if !flags.stopped {
+                    flags.interrupted = true;
+                }
+            }
             self.request_stop(run);
         }
         for run in &runs {

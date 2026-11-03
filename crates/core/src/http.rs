@@ -273,6 +273,7 @@ pub fn router(ctx: Ctx) -> Router {
         .route("/conversations", post(add_conversation))
         .route("/conversations/{id}/messages", post(send_message))
         .route("/conversations/{id}/cancel", post(cancel))
+        .route("/conversations/{id}/queued-turns/{turn_id}/cancel", post(cancel_queued_turn))
         .route("/conversations/{id}/bot-reports/cancel", post(cancel_bot_reports))
         .route("/conversations/{id}/permissions/{permission_id}", post(resolve_permission))
         .route("/files", get(list_files))
@@ -566,9 +567,19 @@ async fn send_message(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(
 }
 
 async fn cancel(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(id): Path<String>, JsonBody(_): JsonBody<Empty>) -> ApiResult {
-    // Signal owned live turns before queue contention or a fallible save. Runtime follows durable
-    // Bot-chain and worker ownership, persists every queued-work cascade, then settles outside the queue.
+    // Runtime signals this conversation and its internal worker children before queue contention
+    // or a fallible save. Other conversations and Bot-message descendants keep their own slots.
     ctx.runtime.cancel(&id).await?;
+    Ok(state_reply(&ctx, StatusCode::OK, &remote))
+}
+
+async fn cancel_queued_turn(
+    State(ctx): State<Ctx>,
+    ConnectInfo(remote): Remote,
+    Path((id, turn_id)): Path<(String, String)>,
+    JsonBody(_): JsonBody<Empty>,
+) -> ApiResult {
+    ctx.queue.run(ctx.runtime.cancel_queued_turn(&id, &turn_id)).await?;
     Ok(state_reply(&ctx, StatusCode::OK, &remote))
 }
 

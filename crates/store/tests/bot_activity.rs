@@ -92,12 +92,12 @@ async fn deleting_a_bot_is_refused_for_the_last_bot_active_runs_and_queued_work(
     assert_eq!(f.store.mutate(|s| s.delete_bot(&missing)).await.unwrap_err().status, 404);
 
     let second = add_bot(&f, "Second").await;
-    // Any active run blocks bot changes, including on another bot.
-    let other = add_conversation(&f, &first).await;
-    f.start(&other).await;
+    // Only this bot's active run blocks deletion; a different bot keeps running independently.
+    let own = add_conversation(&f, &second).await;
+    f.start(&own).await;
     let error = f.store.mutate(|s| s.delete_bot(&second)).await.unwrap_err();
-    assert_eq!((error.status, error.message.as_str()), (409, "Stop the active run before changing settings, bots, or files."));
-    f.finish(&other).await;
+    assert_eq!(error.status, 409);
+    f.finish(&own).await;
 
     // A queued routine run of the bot.
     let input = RoutineInput {
@@ -128,9 +128,11 @@ async fn deleting_a_bot_is_refused_for_the_last_bot_active_runs_and_queued_work(
     assert_eq!((error.status, error.message.as_str()), (409, "Wait for or cancel the queued bot messages of this bot before deleting it."));
     f.store.mutate(|s| s.cancel_queued_work(&delivery.recipient_conversation_id)).await.unwrap();
     assert_eq!(f.store.read(|s| s.disk().bot_deliveries[0].status), DeliveryStatus::Cancelled);
+    // Cancelling the recipient still queues its outcome report back to the sender.
+    f.store.mutate(|s| s.cancel_bot_reports(&x.source, std::slice::from_ref(&delivery.id))).await.unwrap();
 
     let removed = f.store.mutate(|s| s.delete_bot(&second)).await.unwrap();
-    assert_eq!(removed.len(), 2, "the routine conversation and the cancelled recipient conversation: {removed:?}");
+    assert_eq!(removed.len(), 3, "the completed private conversation, routine conversation, and cancelled recipient conversation: {removed:?}");
     let reopened = f.reopen().await.unwrap();
     reopened.read(|s| {
         let disk = s.disk();
@@ -235,6 +237,8 @@ async fn deleting_a_middle_bot_removes_its_history_and_the_chains_through_it() {
     let skill = SkillInput { name: "b-skill".into(), description: "B only".into(), instructions: "Do B things.".into() };
     f.store.mutate(|s| s.add_skill(&b, skill, false)).await.unwrap();
 
+    // Accepted report work is cancelled explicitly before its delivery graph is removed.
+    f.store.mutate(|s| s.cancel_bot_reports(&first.source_conversation_id, std::slice::from_ref(&first.id))).await.unwrap();
     let mut removed = f.store.mutate(|s| s.delete_bot(&b)).await.unwrap();
     let mut expected = [b_conversations.clone(), vec![second.recipient_conversation_id.clone()]].concat();
     expected.sort();
@@ -266,6 +270,7 @@ async fn deleting_the_first_sender_removes_descendant_deliveries_and_keeps_unrel
     f.finish(&z.source).await;
     receive(&f, &unrelated, true).await;
 
+    f.store.mutate(|s| s.cancel_bot_reports(&first.source_conversation_id, std::slice::from_ref(&first.id))).await.unwrap();
     let removed = f.store.mutate(|s| s.delete_bot(&a)).await.unwrap();
     assert!(removed.contains(&first.recipient_conversation_id) && removed.contains(&second.recipient_conversation_id), "{removed:?}");
     assert!(removed.contains(&first.source_conversation_id));
@@ -279,6 +284,7 @@ async fn deleting_the_first_sender_removes_descendant_deliveries_and_keeps_unrel
         assert!(s.bot(&b).is_ok() && s.bot(&c).is_ok() && s.bot(&a).is_err());
     });
     // Deleting the last two bots in turn: the final one is kept.
+    f.store.mutate(|s| s.cancel_bot_reports(&unrelated.source_conversation_id, std::slice::from_ref(&unrelated.id))).await.unwrap();
     f.store.mutate(|s| s.delete_bot(&b)).await.unwrap();
     assert_eq!(f.store.mutate(|s| s.delete_bot(&c)).await.unwrap_err().status, 409);
     f.reopen().await.unwrap();
@@ -398,6 +404,33 @@ async fn attachment_blobs_are_private_and_metadata_persists_with_the_message() {
         state = original.clone();
     }
     write_json(&f.state_file(), &original);
+    f.reopen().await.unwrap();
+}
+
+#[tokio::test]
+async fn bot_deletion_waits_for_affected_running_reports_not_unrelated_active_runs() {
+    let f = Fixture::new().await;
+    let a = f.bot_id();
+    let b = add_bot(&f, "B").await;
+    let c = add_bot(&f, "C").await;
+    let source = sending(&f, &a).await;
+    let delivery = send(&f, &source, &b, "Report back").await;
+    f.finish(&source.source).await;
+    receive(&f, &delivery, true).await;
+    start_report(&f, &source.source).await;
+
+    let before = f.disk_text();
+    let error = f.store.mutate(|s| s.delete_bot(&b)).await.unwrap_err();
+    assert_eq!((error.status, error.message.as_str()), (409, "Wait for or cancel the queued bot messages of this bot before deleting it."));
+    assert_eq!(f.disk_text(), before, "the foreign Bot's running report retains its delivery and message markers");
+    f.finish(&source.source).await;
+
+    let unrelated = add_conversation(&f, &c).await;
+    f.start(&unrelated).await;
+    let removed = f.store.mutate(|s| s.delete_bot(&b)).await.unwrap();
+    assert!(removed.contains(&delivery.recipient_conversation_id));
+    assert_eq!(f.conversation(&unrelated).run.status, RunStatus::Running);
+    f.finish(&unrelated).await;
     f.reopen().await.unwrap();
 }
 
@@ -925,13 +958,13 @@ async fn forged_report_state_is_rejected_on_load() {
 }
 
 #[tokio::test]
-async fn deleting_bots_drops_their_pending_reports_and_report_children() {
+async fn deleting_bots_requires_cancelling_pending_reports_and_removes_report_children() {
     let f = Fixture::new().await;
     let a = f.bot_id();
     let b = add_bot(&f, "B").await;
     let c = add_bot(&f, "C").await;
 
-    // A queued report, dropped later with its delivery.
+    // A queued report must be cancelled explicitly before its delivery can be removed.
     let x = sending(&f, &a).await;
     let queued = send(&f, &x, &c, "To C").await;
     f.finish(&x.source).await;
@@ -950,6 +983,10 @@ async fn deleting_bots_drops_their_pending_reports_and_report_children() {
     f.finish(&y.source).await;
     receive(&f, &child, true).await;
 
+    let before = f.disk_text();
+    assert_eq!(f.store.mutate(|s| s.delete_bot(&b)).await.unwrap_err().status, 409, "the report child is accepted work on a surviving source Bot");
+    assert_eq!(f.disk_text(), before);
+    f.store.mutate(|s| s.cancel_bot_reports(&y.source, std::slice::from_ref(&child.id))).await.unwrap();
     let removed = f.store.mutate(|s| s.delete_bot(&b)).await.unwrap();
     assert!(removed.contains(&first.recipient_conversation_id) && removed.contains(&child.recipient_conversation_id), "{removed:?}");
     let reopened = f.reopen().await.expect("the cascade stays loadable");
@@ -962,8 +999,10 @@ async fn deleting_bots_drops_their_pending_reports_and_report_children() {
         assert!(source.messages.iter().all(|m| m.bot_exchange_ids.is_none()));
     });
     drop(reopened);
+    assert_eq!(f.store.mutate(|s| s.delete_bot(&c)).await.unwrap_err().status, 409);
+    f.store.mutate(|s| s.cancel_bot_reports(&x.source, std::slice::from_ref(&queued.id))).await.unwrap();
     f.store.mutate(|s| s.delete_bot(&c)).await.unwrap();
-    assert!(f.store.read(|s| s.disk().bot_deliveries.is_empty()), "the queued report went with C's delivery");
+    assert!(f.store.read(|s| s.disk().bot_deliveries.is_empty()), "the cancelled report went with C's delivery");
     f.reopen().await.unwrap();
 }
 

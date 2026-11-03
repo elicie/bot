@@ -237,12 +237,25 @@ pub(crate) fn references_valid(disk: &DiskState) -> bool {
         .chain(disk.bot_exchanges.iter().map(|exchange| exchange.id.as_str()))
         .chain(disk.groups.iter().map(|group| group.id.as_str()))
         .chain(disk.permission_rules.iter().map(|rule| rule.id.as_str()))
+        .chain(disk.work_queue.iter().map(|work| work.id.as_str()))
         .collect();
     let mut sources = HashSet::new();
     let mut source_runs = HashSet::new();
     let mut children = HashSet::new();
     let mut reports = HashSet::new();
-    let mut running = 0;
+    let mut running_bots = HashSet::new();
+    let mut active_by_bot: HashMap<&str, usize> = HashMap::new();
+    for conversation in disk.conversations.iter().filter(|conversation| conversation.run.status.is_active()) {
+        let bot_id = conversation
+            .run
+            .bot_id
+            .as_deref()
+            .or_else(|| {
+                conversation.messages.iter().rev().find(|message| message.role == Role::Assistant).and_then(|message| message.speaker_bot_id.as_deref())
+            })
+            .unwrap_or(&conversation.bot_id);
+        *active_by_bot.entry(bot_id).or_default() += 1;
+    }
     for batch in &disk.worker_batches {
         let Some(parent) = conversations.get(batch.parent_conversation_id.as_str()) else { return false };
         let Some(source) = parent.messages.iter().find(|message| message.id == batch.source_message_id) else { return false };
@@ -272,6 +285,7 @@ pub(crate) fn references_valid(disk: &DiskState) -> bool {
                 || !children.insert(&worker.conversation_id)
                 || !tasks.insert(&worker.task)
                 || child.bot_id != batch.bot_id
+                || child.run.bot_id.as_deref().is_some_and(|bot_id| bot_id != batch.bot_id)
                 || child.group_id.is_some()
                 || child.thread.is_some()
                 || child.group_round.is_some()
@@ -306,8 +320,11 @@ pub(crate) fn references_valid(disk: &DiskState) -> bool {
                     return false;
                 }
             } else if worker.status == DeliveryStatus::Running {
-                running += 1;
-                if !child.run.status.is_active() || batch.released_at.is_none() {
+                if !running_bots.insert(batch.bot_id.as_str())
+                    || active_by_bot.get(batch.bot_id.as_str()) != Some(&1)
+                    || !child.run.status.is_active()
+                    || batch.released_at.is_none()
+                {
                     return false;
                 }
             } else if worker_status(child.run.status) != Some(worker.status) || child.run.finished_at != worker.finished_at {
@@ -337,7 +354,12 @@ pub(crate) fn references_valid(disk: &DiskState) -> bool {
                     || parent.messages.get(index + 1).is_none_or(|message| message.id != *answer_id || message.role != Role::Assistant)
                     || message_counts.get(input_id.as_str()) != Some(&1)
                     || message_counts.get(answer_id.as_str()) != Some(&1)
-                    || (report.status == ReportStatus::Running && (parent.run.id != *run_id || !parent.run.status.is_active()))
+                    || (report.status == ReportStatus::Running
+                        && (parent.run.id != *run_id
+                            || !parent.run.status.is_active()
+                            || parent.run.bot_id.as_deref().is_some_and(|bot_id| bot_id != batch.bot_id)
+                            || !running_bots.insert(batch.bot_id.as_str())
+                            || active_by_bot.get(batch.bot_id.as_str()) != Some(&1)))
                     || (parent.run.id == *run_id && report.status != ReportStatus::Running && report_status(parent.run.status) != Some(report.status))
                 {
                     return false;
@@ -352,7 +374,7 @@ pub(crate) fn references_valid(disk: &DiskState) -> bool {
             return false;
         }
     }
-    running <= 1 && hidden.len() == children.len()
+    hidden.len() == children.len()
 }
 
 /// Only settled batches are disposable. In particular, `report: None` is not terminal unless
@@ -502,6 +524,7 @@ impl State {
                 .and_then(|index| index.checked_sub(1))
                 .is_some_and(|index| parent.messages[index].report_delivery_ids.is_some())
             && parent.run.id == source_run_id
+            && parent.run.bot_id.as_deref().is_none_or(|bot_id| bot_id == parent.bot_id)
             && parent.run.status.is_active()
             && parent.messages.iter().rfind(|message| message.role == Role::Assistant).is_some_and(|message| message.id == source_message_id)
     }
@@ -622,6 +645,8 @@ impl State {
         Ok((batch, worker))
     }
 
+    /// Bind an already-created Starting run in the same mutation as dequeue and turn creation.
+    /// Preflight `can_start` before creating that run; this guard excludes the new run itself.
     pub fn bind_worker_execution(&mut self, worker_id: &str, run_id: &str) -> HttpResult<()> {
         self.assert_writable()?;
         let (batch_index, worker_index) = self
@@ -637,9 +662,14 @@ impl State {
         if batch.cancelled
             || batch.released_at.is_none()
             || worker.status != DeliveryStatus::Queued
+            || worker.execution_run_id.is_some()
+            || worker.started_at.is_some()
             || child.run.id != run_id
+            || child.run.bot_id.as_deref() != Some(batch.bot_id.as_str())
+            || child.run.started_at.is_none()
             || !child.run.status.is_active()
-            || self.disk.worker_batches.iter().flat_map(|batch| &batch.workers).any(|other| other.id != worker_id && other.status == DeliveryStatus::Running)
+            || self.active_count() > self.settings().max_concurrent_runs()
+            || self.disk.conversations.iter().any(|other| other.id != child.id && other.run.status.is_active() && self.run_bot_id(other) == batch.bot_id)
         {
             return Err(HttpError::conflict("The worker is no longer ready to start."));
         }
@@ -648,14 +678,23 @@ impl State {
         Ok(())
     }
 
+    /// Claim the existing grouped-report receipt atomically with dequeue and parent turn creation.
+    /// A failed preflight should instead call `fail_worker_report`, without starting a parent run.
     pub fn bind_worker_report(&mut self, batch_id: &str, run_id: &str, input_id: &str, assistant_id: &str) -> HttpResult<()> {
         self.assert_writable()?;
         let batch = self.worker_batch(batch_id)?;
         let parent = self.conversation(&batch.parent_conversation_id)?;
         if batch.cancelled
-            || batch.report.as_ref().is_none_or(|report| report.status != ReportStatus::Queued)
+            || batch.released_at.is_none()
+            || !batch.workers.iter().all(|worker| worker_terminal(worker.status))
+            || batch.report.as_ref().is_none_or(|report| report.status != ReportStatus::Queued || report.run_id.is_some())
+            || parent.bot_id != batch.bot_id
             || parent.run.id != run_id
+            || parent.run.bot_id.as_deref() != Some(batch.bot_id.as_str())
+            || parent.run.started_at.is_none()
             || !parent.run.status.is_active()
+            || self.active_count() > self.settings().max_concurrent_runs()
+            || self.disk.conversations.iter().any(|other| other.id != parent.id && other.run.status.is_active() && self.run_bot_id(other) == batch.bot_id)
             || parent.messages.len() < 2
             || parent.messages[parent.messages.len() - 2].id != input_id
             || parent.messages[parent.messages.len() - 2].role != Role::User
@@ -697,6 +736,8 @@ impl State {
         Ok(active)
     }
 
+    /// Settle a nonterminal hidden child without creating a run or appending messages. For a stale
+    /// scheduler start failure, the caller must first confirm this receipt is still unclaimed.
     pub fn fail_worker(&mut self, worker_id: &str, error: &str) -> HttpResult<()> {
         self.assert_writable()?;
         let worker = self
@@ -721,9 +762,10 @@ impl State {
         Ok(())
     }
 
+    /// Consume a queued, unclaimed report after preflight failure; never alter a started parent turn.
     pub fn fail_worker_report(&mut self, batch_id: &str, error: &str) -> HttpResult<()> {
         self.assert_writable()?;
-        if self.worker_batch(batch_id)?.report.as_ref().is_none_or(|report| report.status != ReportStatus::Queued) {
+        if self.worker_batch(batch_id)?.report.as_ref().is_none_or(|report| report.status != ReportStatus::Queued || report.run_id.is_some()) {
             return Ok(());
         }
         let error = js_slice(&self.redact(error), 1000).to_owned();

@@ -18,7 +18,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use grok_bot_core::queue::CommandQueue;
 use grok_bot_core::runtime::{Runtime, RuntimeOptions};
-use grok_bot_model::{AppState, BotInput, Conversation, DeliveryStatus, Role, RunStatus, SettingsInput, SkillInput, SkillPatch, system_clock};
+use grok_bot_model::{AppState, BotInput, Conversation, DeliveryStatus, Role, RunStatus, SettingsInput, SkillInput, SkillPatch, WorkKind, system_clock};
 use grok_bot_store::Store;
 use serde_json::{Value, json};
 
@@ -326,6 +326,7 @@ impl Fixture {
             workspace: if files { self.workspace.to_string_lossy().into_owned() } else { String::new() },
             api_key: (!api_key.is_empty()).then(|| api_key.to_owned()),
             clear_api_key: api_key.is_empty().then_some(true),
+            max_concurrent_runs: None,
         };
         self.store.mutate(move |state| state.update_settings(input)).await.unwrap();
     }
@@ -438,9 +439,35 @@ async fn file_approvals_and_sessions(f: &Fixture) {
         text("The approved write succeeded."),
     ]);
     f.runtime.start(&id, "Write notes.txt using the workspace broker.").await.unwrap();
-    let busy = f.runtime.start(&id, "second simultaneous run").await.unwrap_err();
-    assert_eq!((busy.status, busy.message.as_str()), (409, "Another reply is still running. Wait for it to finish or stop it, then send again."));
     let pending = f.pending(&id).await;
+    // Issue #20: a busy Bot accepts durable FIFO work without replacing its live approval.
+    f.runtime.start(&id, "second simultaneous run").await.unwrap();
+    let queued = f.public().work_queue.into_iter().find(|work| work.conversation_id == id).expect("the second user turn is queued");
+    assert_eq!(queued.bot_id, pending.bot_id);
+    assert!(matches!(&queued.kind, WorkKind::User { text, attachments } if text == "second simultaneous run" && attachments.is_empty()));
+    let assert_same_turn = |current: Conversation| {
+        assert_eq!(current.run, pending.run, "queue mutations must not replace the live approval run");
+        assert_eq!(
+            current.messages.iter().map(|message| (&message.id, message.role, &message.text)).collect::<Vec<_>>(),
+            pending.messages.iter().map(|message| (&message.id, message.role, &message.text)).collect::<Vec<_>>(),
+            "queue mutations must not append or replace transcript messages"
+        );
+        for existing in pending.messages.iter().flat_map(|message| &message.tools) {
+            assert!(
+                current.messages.iter().flat_map(|message| &message.tools).any(|tool| tool.id == existing.id),
+                "queue mutations must not remove existing tool identities"
+            );
+        }
+        let proposed = pending.messages.last().unwrap().tools.iter().find(|tool| tool.title == "Write notes.txt").unwrap();
+        assert_eq!(current.messages.last().unwrap().tools.iter().find(|tool| tool.id == proposed.id), Some(proposed));
+        // Search/use_tool notifications may arrive or finish while the broker's write approval
+        // waits; those belong to this same live turn, not to the unstarted queued request.
+    };
+    assert_same_turn(f.get(&id));
+    assert_eq!(f.store.read(|state| state.active_count()), 1, "same-Bot requests never overlap");
+    f.runtime.cancel_queued_turn(&id, &queued.id).await.unwrap();
+    assert!(!f.public().work_queue.iter().any(|work| work.id == queued.id));
+    assert_same_turn(f.get(&id));
     assert_eq!(f.notes(), "original\n");
     let permission = pending.run.permission.clone().unwrap();
     assert_eq!(permission.paths, ["notes.txt"]);
@@ -1104,6 +1131,12 @@ async fn bot_messages(f: &Fixture) {
     assert_eq!(delivered.execution_run_id.as_deref(), Some(answered.run.id.as_str()));
     assert_eq!(delivered.status, DeliveryStatus::Completed);
 
+    // Issue #20 dispatch honors older canonical report work, even from another conversation of
+    // this Bot. This delivery-only scenario explicitly stops its queued follow-up before denial.
+    f.runtime.cancel(&source).await.unwrap();
+    assert_eq!(f.get(&source), completed, "stopping only a queued report adds no hidden input");
+    assert_eq!(f.store.read(|state| state.disk().bot_deliveries[0].report.as_ref().unwrap().status), grok_bot_model::ReportStatus::Cancelled);
+
     // Denial records nothing.
     let source = f.conversation(&sender).await;
     f.provider.plan(vec![use_tool("send_message", json!({"toBotId": recipient.id, "text": "Needs approval."})), text("Denied.")]);
@@ -1268,6 +1301,9 @@ async fn permission_rules(f: &Fixture) {
     assert!(card.description.contains("Recipient reply must ask."));
     let answered = f.completed(&delivery.recipient_conversation_id).await;
     assert!(answered.messages.iter().flat_map(|m| &m.tools).all(|t| t.approved_by_rule.is_none()));
+    // The next safety-floor case must not bypass this Bot's older queued follow-up under issue #20.
+    f.runtime.cancel(&source).await.unwrap();
+    assert_eq!(f.store.read(|state| state.disk().bot_deliveries.last().unwrap().report.as_ref().unwrap().status), grok_bot_model::ReportStatus::Cancelled);
 
     // Safety floor: a webhook-triggered routine run always asks, even with an allow rule.
     let routine = f

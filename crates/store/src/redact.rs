@@ -11,7 +11,7 @@
 
 use std::sync::LazyLock;
 
-use grok_bot_model::{AppState, BotDelivery, BotExchange, Conversation, McpApp, Routine, RoutineRun, RoutineSchedule, WorkerBatch};
+use grok_bot_model::{AppState, BotDelivery, BotExchange, Conversation, McpApp, QueuedWork, Routine, RoutineRun, RoutineSchedule, WorkKind, WorkerBatch};
 use regex::Regex;
 
 static IDENTIFIER: LazyLock<Regex> =
@@ -145,6 +145,7 @@ impl Redactor<'_> {
         self.optional_id(&mut conversation.session_fingerprint);
         let run = &mut conversation.run;
         self.id(&mut run.id);
+        self.optional_id(&mut run.bot_id);
         self.optional(&mut run.error);
         for todo in run.todos.iter_mut().flatten() {
             self.text(&mut todo.content);
@@ -275,6 +276,29 @@ impl Redactor<'_> {
         }
     }
 
+    fn queued_work(&self, work: &mut QueuedWork) {
+        self.id(&mut work.id);
+        self.id(&mut work.bot_id);
+        work.speaker_bot_ids.iter_mut().flatten().for_each(|id| self.id(id));
+        self.id(&mut work.conversation_id);
+        self.text(&mut work.created_at);
+        match &mut work.kind {
+            WorkKind::User { text, attachments } => {
+                self.text(text);
+                for attachment in attachments {
+                    self.id(&mut attachment.id);
+                    self.text(&mut attachment.name);
+                    self.text(&mut attachment.mime_type);
+                }
+            }
+            WorkKind::Routine { run_id } => self.id(run_id),
+            WorkKind::Delivery { delivery_id } | WorkKind::Report { delivery_id } => self.id(delivery_id),
+            WorkKind::Group { round_id } => self.id(round_id),
+            WorkKind::Worker { worker_id } => self.id(worker_id),
+            WorkKind::WorkerReport { batch_id } => self.id(batch_id),
+        }
+    }
+
     fn state(&self, state: &mut AppState) {
         for bot in &mut state.bots {
             self.id(&mut bot.id);
@@ -306,6 +330,7 @@ impl Redactor<'_> {
         state.bot_exchanges.iter_mut().for_each(|exchange| self.exchange(exchange));
         state.bot_deliveries.iter_mut().for_each(|delivery| self.delivery(delivery));
         state.worker_batches.iter_mut().for_each(|batch| self.worker_batch(batch));
+        state.work_queue.iter_mut().for_each(|work| self.queued_work(work));
         for group in &mut state.groups {
             self.id(&mut group.id);
             self.text(&mut group.name);

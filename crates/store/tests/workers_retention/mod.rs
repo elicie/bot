@@ -300,6 +300,7 @@ async fn workspace_authorization_is_pinned_optional_and_checked_lexically_withou
                 workspace: f.workspace.to_string_lossy().into(),
                 api_key: None,
                 clear_api_key: None,
+                max_concurrent_runs: None,
             })
         })
         .await
@@ -317,6 +318,7 @@ async fn workspace_authorization_is_pinned_optional_and_checked_lexically_withou
                 workspace: String::new(),
                 api_key: None,
                 clear_api_key: None,
+                max_concurrent_runs: None,
             })
         })
         .await

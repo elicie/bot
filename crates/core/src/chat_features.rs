@@ -17,10 +17,9 @@ use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use grok_bot_model::{Attachment, AttachmentKind, AttachmentUpload, HttpError};
+use grok_bot_model::{AttachmentKind, AttachmentUpload, HttpError};
 use grok_bot_store::attachments::{
-    MAX_ATTACHMENT_REQUEST_BYTES, MAX_ATTACHMENTS_TOTAL_BYTES, discard_attachments, prepare_attachments, read_attachment, remove_conversation_files,
-    size_label, write_attachments,
+    MAX_ATTACHMENT_REQUEST_BYTES, MAX_ATTACHMENTS_TOTAL_BYTES, prepare_attachments, read_attachment, remove_conversation_files, size_label,
 };
 use serde::Deserialize;
 
@@ -154,26 +153,9 @@ async fn send_with_attachments(State(ctx): State<Ctx>, ConnectInfo(remote): Remo
             if store.read(|s| s.is_reserved_conversation(&id)) {
                 return Err(HttpError::conflict("This conversation is reserved for queued work or a read-only bot delivery."));
             }
-            let metas: Vec<Attachment> = prepared.iter().map(|a| a.meta.clone()).collect();
-            let data_dir = store.data_dir().to_path_buf();
-            let (written, blobs) = {
-                let (data_dir, id) = (data_dir.clone(), id.clone());
-                tokio::task::spawn_blocking(move || {
-                    let result = write_attachments(&data_dir, &id, &prepared);
-                    (result, prepared)
-                })
-                .await
-                .map_err(|_| HttpError::new(500, "Attachments could not be stored."))?
-            };
-            if let Err(error) = written {
-                discard_attachments(&data_dir, &id, &metas);
-                return Err(error);
-            }
-            let started = runtime.start_with_attachments(&id, &text, blobs).await;
-            if started.is_err() {
-                discard_attachments(&data_dir, &id, &metas);
-            }
-            started
+            // Runtime persists the private blobs before durably accepting their queue record.
+            // Once accepted, cancellation or dispatch owns them, not this transient HTTP request.
+            runtime.start_with_attachments(&id, &text, prepared).await
         })
         .await?;
     Ok(state_reply(&ctx, StatusCode::ACCEPTED, &remote))

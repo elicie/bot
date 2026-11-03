@@ -617,6 +617,7 @@ impl State {
         if let Some(bot_id) = input.bot_id.as_deref() {
             self.bot(bot_id)?;
         }
+        self.assert_secret_scope_idle(input.bot_id.as_deref())?;
         if self.disk.secrets.len() >= MAX_SECRETS {
             return Err(HttpError::conflict(format!("보관함이 가득 찼어요. 시크릿은 {MAX_SECRETS}개까지 저장할 수 있어요.")));
         }
@@ -636,6 +637,7 @@ impl State {
         self.assert_writable()?;
         require_local(local, VAULT_REQUIRES_LOOPBACK)?;
         let index = self.secret_index(id)?;
+        self.assert_secret_scope_idle(self.disk.secrets[index].bot_id.as_deref())?;
         let now = iso(self.now());
         let secret = &mut self.disk_mut().secrets[index];
         secret.value = value;
@@ -648,8 +650,18 @@ impl State {
         self.assert_writable()?;
         require_local(local, VAULT_REQUIRES_LOOPBACK)?;
         let index = self.secret_index(id)?;
+        self.assert_secret_scope_idle(self.disk.secrets[index].bot_id.as_deref())?;
         self.disk_mut().secrets.remove(index);
         Ok(())
+    }
+
+    // Global credentials may change every bot's next session; private credentials affect only
+    // their owner. Resolve the existing scope for replacement/deletion, never the caller's target.
+    fn assert_secret_scope_idle(&self, bot_id: Option<&str>) -> HttpResult<()> {
+        match bot_id {
+            Some(bot_id) => self.assert_bot_idle(bot_id),
+            None => self.assert_idle(),
+        }
     }
 
     fn secret_index(&self, id: &str) -> HttpResult<usize> {
@@ -663,12 +675,12 @@ impl State {
         Ok(mcp_json(self.mcp_servers_for(bot_id)))
     }
 
-    /// Replace the bot's server set with an "MCP 서버 JSON" document. Loopback only, idle only.
+    /// Replace the bot's server set with an "MCP 서버 JSON" document. Loopback only, this bot idle.
     /// A server whose name and configuration are unchanged keeps its ID and enabled state; a
     /// changed or new server is disabled until it is enabled again.
     pub fn set_mcp_servers(&mut self, bot_id: &str, json: &str, local: bool) -> HttpResult<()> {
         let parsed = parse_mcp_json(json)?;
-        self.assert_idle()?;
+        self.assert_bot_idle(bot_id)?;
         require_local(local, MCP_REQUIRES_LOOPBACK)?;
         self.bot(bot_id)?;
         let now = iso(self.now());
@@ -709,7 +721,7 @@ impl State {
             return self.set_mcp_servers(bot_id, json, local);
         }
         require_local(local, MCP_REQUIRES_LOOPBACK)?;
-        self.assert_idle()?;
+        self.assert_bot_idle(bot_id)?;
         self.bot(bot_id)?;
         let mut field = McpField::Json;
         let parsed = parse_mcp_json_field(json, &mut field).map_err(|error| HttpError::new(error.status, field.message()))?;
@@ -740,10 +752,10 @@ impl State {
         result
     }
 
-    /// Turn one server on or off. Enabling needs a loopback client; disabling is allowed from any
-    /// client (it only removes capability).
+    /// Turn one server on or off while this bot is idle. Enabling needs a loopback client;
+    /// disabling is allowed from any client (it only removes capability).
     pub fn set_mcp_server_enabled(&mut self, bot_id: &str, name: &str, enabled: bool, local: bool) -> HttpResult<()> {
-        self.assert_writable()?;
+        self.assert_bot_idle(bot_id)?;
         if enabled {
             require_local(local, MCP_REQUIRES_LOOPBACK)?;
         }
@@ -781,7 +793,7 @@ impl State {
     /// an existing target-scoped secret. Nothing is written, enabled, or broadcast.
     pub fn resolve_mcp_draft(&self, bot_id: &str, json: &str, secrets: &[SecretInput], local: bool) -> HttpResult<ResolvedMcpServer> {
         require_local(local, MCP_REQUIRES_LOOPBACK)?;
-        self.assert_idle()?;
+        self.assert_bot_idle(bot_id)?;
         self.bot(bot_id)?;
         // Parser diagnostics may contain literal credentials from the draft (e.g. unknown keys).
         let mut field = McpField::Json;

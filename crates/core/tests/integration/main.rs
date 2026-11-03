@@ -14,9 +14,13 @@ mod maintenance;
 mod mcp_apps_http;
 mod mcp_initial_search;
 mod mcp_probe_shutdown;
+mod per_bot_concurrency;
 mod permissions_webhooks;
 mod provider_relay;
 mod runtime;
 mod scheduler;
+#[path = "per_bot_concurrency/scripted_provider.rs"]
+mod scripted_provider;
 mod vault_mcp;
 mod web;
+mod worker_fifo;

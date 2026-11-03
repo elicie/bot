@@ -138,6 +138,8 @@ export type TodoStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled';
 export interface TodoItem { content: string; status: TodoStatus }
 export interface RunState {
   id: string;
+  /** Actual executing Bot, including the current speaker in a group. */
+  botId?: string;
   status: RunStatus;
   error?: string;
   permission?: PendingPermission;
@@ -228,12 +230,15 @@ export interface Bot {
   knowledge?: import('./bot-data').KnowledgeFile[];
 }
 export interface PublicSettings {
+  /** Maximum live Bot turns; older snapshots default to 3. */
+  maxConcurrentRuns?: number;
   baseUrl: string;
   model: string;
   hasApiKey: boolean;
   workspace: string;
 }
 export interface SettingsInput {
+  maxConcurrentRuns?: number;
   baseUrl: string;
   model: string;
   workspace: string;
@@ -304,12 +309,30 @@ export interface RoutineRunResult {
   run: RoutineRun;
   state: AppState;
 }
+export type QueuedWork = {
+  id: string;
+  botId: string;
+  conversationId: string;
+  createdAt: string;
+  /** Group membership selected at acceptance; renaming a Bot cannot retarget queued work. */
+  speakerBotIds?: string[];
+} & (
+  | { kind: 'user'; text: string; attachments: Attachment[] }
+  | { kind: 'routine'; runId: string }
+  | { kind: 'delivery'; deliveryId: string }
+  | { kind: 'group'; roundId: string }
+  | { kind: 'report'; deliveryId: string }
+  | { kind: 'worker'; workerId: string }
+  | { kind: 'worker_report'; batchId: string }
+);
 export interface AppState {
   revision: number;
   bots: Bot[];
   conversations: Conversation[];
   routines: Routine[];
   routineRuns: RoutineRun[];
+  /** Accepted order, shared across every work source; optional on older snapshots. */
+  workQueue?: QueuedWork[];
   botExchanges?: BotExchange[];
   botDeliveries?: BotDelivery[];
   workerBatches?: WorkerBatch[];

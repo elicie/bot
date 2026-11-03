@@ -1,5 +1,5 @@
-//! Enqueue-only same-bot delegation. The current run never waits for workers while holding the
-//! global execution slot; the dispatcher starts approved tasks only after their parent completes.
+//! Enqueue-only same-bot delegation. The current run never waits for workers while holding its
+//! Bot's execution slot; the dispatcher starts approved tasks only after their parent completes.
 
 use std::sync::Arc;
 
@@ -10,7 +10,7 @@ use super::{BrokerResult, approval_options, conflict_finished};
 use crate::runtime::{Run, Runtime, workers::receipt};
 
 pub(super) fn tool() -> Value {
-    json!({ "name": "spawn_worker", "description": "Optionally delegate a self-contained read-only subtask to this same bot only when splitting the user's task would materially help. Answer ordinary questions directly. Each new task requires explicit one-use browser approval. At most three distinct tasks per ordinary 1:1 turn, depth one, and one globally active run. Exact task retries return the original receipt without approval. Workers run after this turn ends; all siblings are reported together in one automatic follow-up. Never wait or poll. Workers cannot write, message bots, use computers/custom MCP servers, or spawn more workers.", "inputSchema": { "type": "object", "properties": { "task": { "type": "string", "minLength": 1, "maxLength": 4000 } }, "required": ["task"], "additionalProperties": false } })
+    json!({ "name": "spawn_worker", "description": "Optionally delegate a self-contained read-only subtask to this same bot only when splitting the user's task would materially help. Answer ordinary questions directly. Each new task requires explicit one-use browser approval. At most three distinct tasks per ordinary 1:1 turn and depth one. Runs of the same Bot, including workers, are serial; different Bots may run concurrently within the app's configured limit. Exact task retries return the original receipt without approval. Workers run after this turn ends; all siblings are reported together in one automatic follow-up. Never wait or poll. Workers cannot write, message bots, use computers/custom MCP servers, or spawn more workers.", "inputSchema": { "type": "object", "properties": { "task": { "type": "string", "minLength": 1, "maxLength": 4000 } }, "required": ["task"], "additionalProperties": false } })
 }
 
 impl Runtime {

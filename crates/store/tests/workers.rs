@@ -1,6 +1,8 @@
 //! Same-bot worker admission, lifecycle, public-state hiding, recovery, and persistence integrity.
 
 mod common;
+#[path = "workers_queue/mod.rs"]
+mod queue;
 #[path = "workers_retention/mod.rs"]
 mod retention;
 
@@ -32,7 +34,11 @@ fn message(role: Role, text: &str, now: &str) -> Message {
 }
 
 async fn parent(f: &Fixture) -> Parent {
-    let id = f.store.mutate(|state| state.add_conversation(&f.bot)).await.unwrap().id;
+    parent_for_bot(f, &f.bot).await
+}
+
+async fn parent_for_bot(f: &Fixture, bot_id: &str) -> Parent {
+    let id = f.store.mutate(|state| state.add_conversation(bot_id)).await.unwrap().id;
     let now = f.iso_now();
     let (run, assistant) = (new_id(), message(Role::Assistant, "I will delegate the independent checks.", &now));
     let message_id = assistant.id.clone();
@@ -40,7 +46,8 @@ async fn parent(f: &Fixture) -> Parent {
         .mutate(|state| {
             let conversation = state.conversation_mut(&id)?;
             conversation.messages = vec![message(Role::User, "Check two independent facts.", &now), assistant];
-            conversation.run = RunState { id: run.clone(), status: RunStatus::Running, started_at: Some(now), ..RunState::idle() };
+            conversation.run =
+                RunState { id: run.clone(), status: RunStatus::Running, bot_id: Some(bot_id.to_owned()), started_at: Some(now), ..RunState::idle() };
             Ok(())
         })
         .await
@@ -61,9 +68,14 @@ async fn begin_worker(f: &Fixture, worker: &WorkerTask) -> String {
     let now = f.iso_now();
     f.store
         .mutate(|state| {
+            let bot_id = state.conversation(&worker.conversation_id)?.bot_id.clone();
+            assert!(state.can_start(&bot_id, &worker.conversation_id));
+            let pointer = state.disk().work_queue.iter().find(|work| matches!(&work.kind, WorkKind::Worker { worker_id } if worker_id == &worker.id)).unwrap();
+            let pointer_id = pointer.id.clone();
+            state.remove_queued_work(&pointer_id).unwrap();
             let conversation = state.conversation_mut(&worker.conversation_id)?;
             conversation.messages = vec![message(Role::User, &worker.task, &now), message(Role::Assistant, "", &now)];
-            conversation.run = RunState { id: run.clone(), status: RunStatus::Running, started_at: Some(now), ..RunState::idle() };
+            conversation.run = RunState { id: run.clone(), status: RunStatus::Running, bot_id: Some(bot_id), started_at: Some(now), ..RunState::idle() };
             state.bind_worker_execution(&worker.id, &run)
         })
         .await
@@ -94,9 +106,14 @@ async fn begin_report(f: &Fixture, id: &str) -> (String, String, String) {
     let ids = (run.clone(), input.id.clone(), assistant.id.clone());
     f.store
         .mutate(|state| {
+            let bot_id = state.conversation(&parent)?.bot_id.clone();
+            assert!(state.can_start(&bot_id, &parent));
+            let pointer = state.disk().work_queue.iter().find(|work| matches!(&work.kind, WorkKind::WorkerReport { batch_id } if batch_id == id)).unwrap();
+            let pointer_id = pointer.id.clone();
+            state.remove_queued_work(&pointer_id).unwrap();
             let conversation = state.conversation_mut(&parent)?;
             conversation.messages.extend([input, assistant]);
-            conversation.run = RunState { id: run.clone(), status: RunStatus::Running, started_at: Some(now), ..RunState::idle() };
+            conversation.run = RunState { id: run.clone(), status: RunStatus::Running, bot_id: Some(bot_id), started_at: Some(now), ..RunState::idle() };
             state.bind_worker_report(id, &ids.0, &ids.1, &ids.2)
         })
         .await
@@ -141,7 +158,7 @@ async fn admission_is_idempotent_bounded_and_rejects_nested_or_stale_sources_wit
     f.store.read(|state| {
         assert_eq!(state.find_existing_worker(&p.conversation, &p.message, &p.run, " Check alpha ").unwrap().1.id, first.id);
         assert!(state.is_reserved_conversation(&first.conversation_id));
-        assert!(state.is_reserved_conversation(&p.conversation));
+        assert!(!state.is_reserved_conversation(&p.conversation), "pending workers do not reserve an ordinary parent conversation");
     });
     spawn(&f, &p, "Check beta").await;
     spawn(&f, &p, "Check gamma").await;
@@ -272,6 +289,7 @@ async fn failure_paths_are_terminal_and_final_answers_are_bounded_and_credential
                 workspace: String::new(),
                 api_key: Some(key.into()),
                 clear_api_key: None,
+                max_concurrent_runs: None,
             })
         })
         .await
@@ -318,6 +336,11 @@ async fn invalid_worker_links_statuses_and_hidden_message_forgery_are_rejected_w
         |s| s["workerBatches"][0]["workers"][0]["answer"] = "not the actual answer".into(),
         |s| s["workerBatches"][0]["workers"][0]["status"] = "queued".into(),
         |s| s["workerBatches"][0]["workers"][0]["executionRunId"] = new_id().into(),
+        |s| {
+            let child_id = s["workerBatches"][0]["workers"][0]["conversationId"].clone();
+            let child = s["conversations"].as_array_mut().unwrap().iter_mut().find(|conversation| conversation["id"] == child_id).unwrap();
+            child["run"]["botId"] = new_id().into();
+        },
         |s| s["workerBatches"][0]["workers"][0]["error"] = "x".repeat(1001).into(),
         |s| s["workerBatches"][0]["report"]["error"] = "x".repeat(1001).into(),
         |s| s["workerBatches"][0]["reportInputId"] = s["workerBatches"][0]["sourceMessageId"].clone(),
@@ -404,11 +427,16 @@ async fn completion_winning_a_running_report_stop_race_remains_valid_and_is_neve
 async fn capacity_refusal_reserves_full_private_transcripts_and_grouped_results_without_partial_mutation() {
     let f = Fixture::new().await;
     let p = parent(&f).await;
-    // Leave less than the conservative worker/reply reservation in the 64 MiB state budget.
+    // Enough room for the pre-sourceRequest worker/reply reserve, but not the new original-request
+    // anchor. This boundary must reject even though ordinary per-worker growth alone would fit.
+    let reply_characters = grok_bot_store::bot_messages::MAX_BOT_REPLY_CHARACTERS;
+    let previous_growth = 4096 + reply_characters * 12 + MAX_WORKER_ANSWER_BYTES * 6 + 8192 + MAX_WORKER_ANSWER_BYTES * 12 + reply_characters * 6 + 8192;
+    let source_request_growth = 12 * 1024 * 12 + 512;
+    let available = previous_growth + source_request_growth / 2;
     let current_bytes = f.disk_text().len();
     f.store
         .mutate(|state| {
-            state.conversation_mut(&p.conversation)?.messages[0].text = "x".repeat(grok_bot_store::MAX_STATE_BYTES - current_bytes - 2_000_000);
+            state.conversation_mut(&p.conversation)?.messages[0].text = "x".repeat(grok_bot_store::MAX_STATE_BYTES - current_bytes - available);
             Ok(())
         })
         .await

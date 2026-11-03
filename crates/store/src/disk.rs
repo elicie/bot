@@ -49,6 +49,10 @@ pub(crate) fn schema_valid(disk: &mut DiskState) -> bool {
         || disk.routine_runs.len() > MAX_ROUTINE_RUNS
         || disk.bot_exchanges.len() > MAX_BOT_DELIVERIES
         || disk.bot_deliveries.len() > MAX_BOT_DELIVERIES
+        || disk
+            .settings
+            .max_concurrent_runs
+            .is_some_and(|limit| !(grok_bot_model::MIN_MAX_CONCURRENT_RUNS..=grok_bot_model::MAX_MAX_CONCURRENT_RUNS).contains(&limit))
     {
         return false;
     }
@@ -65,6 +69,7 @@ pub(crate) fn schema_valid(disk: &mut DiskState) -> bool {
     let conversations = disk.conversations.iter().all(|conversation| {
         is_uuid(&conversation.id)
             && is_uuid(&conversation.bot_id)
+            && conversation.run.bot_id.as_deref().is_none_or(is_uuid)
             && crate::mcp_apps::conversation_mcp_apps_valid(conversation)
             && conversation.canvas.as_ref().is_none_or(crate::canvas::persisted_canvas_valid)
             && conversation.messages.iter().all(|message| {
@@ -84,6 +89,7 @@ pub(crate) fn schema_valid(disk: &mut DiskState) -> bool {
         && crate::permissions::rules_valid(&disk.permission_rules)
         && crate::vault::schema_valid(disk)
         && crate::workers::schema_valid(disk)
+        && crate::queue::schema_valid(disk)
 }
 
 fn truthy(value: &Option<String>) -> bool {
@@ -112,6 +118,7 @@ pub(crate) fn references_valid(disk: &DiskState) -> Result<(), String> {
         .chain(disk.bot_exchanges.iter().map(|exchange| exchange.id.as_str()))
         .chain(disk.bot_deliveries.iter().map(|delivery| delivery.id.as_str()))
         .chain(disk.permission_rules.iter().map(|rule| rule.id.as_str()))
+        .chain(disk.work_queue.iter().map(|work| work.id.as_str()))
         .collect();
     let unique_ids: HashSet<&str> = entity_ids.iter().copied().collect();
     let mut linked_conversations: HashSet<&str> = HashSet::new();
@@ -153,6 +160,7 @@ pub(crate) fn references_valid(disk: &DiskState) -> Result<(), String> {
         || !crate::groups::references_valid(disk)
         || !crate::vault::references_valid(disk)
         || !crate::workers::references_valid(disk)
+        || !crate::queue::references_valid(disk)
         || disk.routines.iter().any(|routine| {
             !bot_ids.contains(routine.bot_id.as_str())
                 || (routine.enabled && !truthy(&routine.next_run_at))

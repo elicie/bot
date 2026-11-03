@@ -513,6 +513,7 @@ impl Runtime {
         impl Drop for Busy {
             fn drop(&mut self) {
                 self.0.mcp_app_busy.store(false, Ordering::SeqCst);
+                self.0.settled.notify_one();
             }
         }
         let busy = Busy(self.arc());

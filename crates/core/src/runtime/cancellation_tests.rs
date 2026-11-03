@@ -90,7 +90,13 @@ impl Fixture {
                 let mut user = message(new_id(), Role::User, task);
                 user.source_bot_id = inbound.map(|(id, _)| id);
                 conversation.messages.extend([user, message(message_id.clone(), Role::Assistant, String::new())]);
-                conversation.run = RunState { id: run_id.clone(), status: RunStatus::Running, started_at: Some(now.clone()), ..RunState::idle() };
+                conversation.run = RunState {
+                    id: run_id.clone(),
+                    bot_id: Some(bot.id.clone()),
+                    status: RunStatus::Running,
+                    started_at: Some(now.clone()),
+                    ..RunState::idle()
+                };
                 if let Some(worker_id) = worker_id {
                     state.bind_worker_execution(worker_id, &run_id)?;
                 }
@@ -366,8 +372,10 @@ async fn failed_cascade_still_stops_active_child_and_waits_out_a_queued_broker_w
     let f = Fixture::new().await;
     let parent = f.run(None).await;
     let batch = f.batch(&parent).await;
+    let delivery = f.delivery(&parent).await;
     f.runtime.finish(&parent, Outcome::default()).await;
     let child = f.run(Some((&batch.workers[0].conversation_id, &batch.workers[0].id))).await;
+    let recipient = f.run_in(&delivery.recipient_conversation_id, None).await;
     let blocked = BlockedWriter::new(&f.store);
     let (entered, held) = oneshot::channel();
     let (runtime, run) = (Arc::clone(&f.runtime), Arc::clone(&child));
@@ -390,7 +398,13 @@ async fn failed_cascade_still_stops_active_child_and_waits_out_a_queued_broker_w
     stopped(&child).await;
     settled(broker).await;
     settled(finish).await;
-    assert!(*child.done.borrow() && f.runtime.runs().is_empty());
+    assert!(*child.done.borrow());
+    assert_eq!(f.runtime.runs().len(), 1);
+    assert!(!*recipient.stop.borrow() && !recipient.inactive(), "failed worker cancellation must not spill into the Bot-message chain");
+    f.store.read(|state| {
+        assert!(state.disk().bot_deliveries.iter().find(|item| item.id == delivery.id).unwrap().chain_termination.is_none());
+    });
+    f.runtime.finish(&recipient, Outcome::default()).await;
     let batch = f.store.read(|state| state.worker_batch(&batch.id).unwrap().clone());
     assert!(batch.cancelled && batch.workers[1].status == DeliveryStatus::Cancelled && batch.report.is_none());
     let before = (f.get(&child).messages, f.store.snapshot().revision);
@@ -470,17 +484,28 @@ async fn stop_resolves_a_child_admitted_under_the_queue_and_durable_cancellation
 }
 
 #[tokio::test]
-async fn root_stop_cancels_bot_chain_and_worker_batch_together_before_queue_admission() {
+async fn parent_stop_cancels_internal_workers_not_other_normal_conversations_or_bot_chains() {
     for active_worker in [false, true] {
         let f = Fixture::new().await;
         let parent = f.run(None).await;
         let batch = f.batch(&parent).await;
         let delivery = f.delivery(&parent).await;
         f.runtime.finish(&parent, Outcome::default()).await;
-        let active = if active_worker {
-            f.run(Some((&batch.workers[0].conversation_id, &batch.workers[0].id))).await
+        let recipient = f.run_in(&delivery.recipient_conversation_id, None).await;
+        let worker = if active_worker { Some(f.run(Some((&batch.workers[0].conversation_id, &batch.workers[0].id))).await) } else { None };
+        let normal = if active_worker {
+            let conversation = f
+                .store
+                .mutate(|state| {
+                    let bot = state.add_bot_from_run(BotInput { name: "Unrelated bot".into(), instructions: None, color: None, shape: None, pinned: None })?;
+                    state.add_conversation(&bot.id)
+                })
+                .await
+                .unwrap();
+            f.run_in(&conversation.id, None).await
         } else {
-            f.run_in(&delivery.recipient_conversation_id, None).await
+            // A pending worker batch does not own another normal conversation of even the same Bot.
+            f.run(None).await
         };
         let (entered, held) = oneshot::channel();
         let (release, wait) = oneshot::channel();
@@ -494,73 +519,47 @@ async fn root_stop_cancels_bot_chain_and_worker_batch_together_before_queue_admi
                 .await
         });
         held.await.unwrap();
-        let finish = f.finish_when_stopped(&active);
+        let finish = worker.as_ref().map(|worker| f.finish_when_stopped(worker));
         let cancel = f.runtime.cancel(&parent.conversation_id);
         tokio::pin!(cancel);
         assert!(futures::poll!(&mut cancel).is_pending());
-        stopped(&active).await;
-        assert!(!active_worker || active.flags().stop_chains.is_empty(), "worker ownership does not invent chain membership");
-        if !active_worker {
-            assert!(active.flags().stop_chains.contains(&delivery.chain_id));
+        if let Some(worker) = &worker {
+            stopped(worker).await;
+            assert!(worker.flags().stop_chains.is_empty(), "worker ownership must not invent chain membership");
+        }
+        for unrelated in [&recipient, &normal] {
+            assert!(!*unrelated.stop.borrow() && !unrelated.inactive(), "Stop must not leak beyond the parent and its hidden workers");
         }
         release.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(2), &mut cancel).await.unwrap().unwrap();
         settled(holder).await;
-        settled(finish).await;
-        assert!(*active.done.borrow());
-        let recovered = Store::open(f.store.data_dir(), system_clock()).await.unwrap();
-        recovered.read(|state| {
+        if let Some(finish) = finish {
+            settled(finish).await;
+        }
+        for unrelated in [&recipient, &normal] {
+            assert!(!*unrelated.stop.borrow() && !unrelated.inactive());
+            assert!(unrelated.flags().stop_chains.is_empty());
+        }
+        f.store.read(|state| {
             let batch = state.worker_batch(&batch.id).unwrap();
             assert!(batch.cancelled && batch.workers.iter().all(|worker| worker.status == DeliveryStatus::Cancelled));
             assert!(batch.report.as_ref().is_none_or(|report| report.status.is_terminal()));
+            assert!(
+                !state
+                    .disk()
+                    .work_queue
+                    .iter()
+                    .any(|work| matches!(work.kind, grok_bot_model::WorkKind::Worker { .. } | grok_bot_model::WorkKind::WorkerReport { .. }))
+            );
             let delivery = state.disk().bot_deliveries.iter().find(|item| item.id == delivery.id).unwrap();
-            assert_eq!(delivery.chain_termination.as_ref().unwrap().status, RunStatus::Cancelled);
-            assert_eq!(delivery.status, DeliveryStatus::Cancelled);
-            assert!(delivery.report.as_ref().is_none_or(|report| report.status.is_terminal()));
-            assert!(state.active().is_none());
+            assert!(delivery.chain_termination.is_none(), "ordinary Stop is not a chain-wide deadline");
+            assert_eq!(delivery.status, DeliveryStatus::Running);
         });
+        f.runtime.finish(&recipient, Outcome::default()).await;
+        f.runtime.finish(&normal, Outcome::default()).await;
+        let recovered = Store::open(f.store.data_dir(), system_clock()).await.unwrap();
+        assert!(recovered.read(|state| state.worker_batch(&batch.id).unwrap().cancelled));
     }
-}
-
-#[tokio::test]
-async fn failed_chain_cascade_still_settles_the_recipient_and_cancels_queued_workers() {
-    let f = Fixture::new().await;
-    let parent = f.run(None).await;
-    let batch = f.batch(&parent).await;
-    let delivery = f.delivery(&parent).await;
-    f.runtime.finish(&parent, Outcome::default()).await;
-    let recipient = f.run_in(&delivery.recipient_conversation_id, None).await;
-    let blocked = BlockedWriter::new(&f.store);
-    let (entered, held) = oneshot::channel();
-    let (runtime, run) = (Arc::clone(&f.runtime), Arc::clone(&recipient));
-    let broker = tokio::spawn(async move {
-        let _call = run.broker.lock().await;
-        entered.send(()).unwrap();
-        run.stopped().await;
-        runtime.queue.run(async { assert!(run.inactive()) }).await;
-    });
-    held.await.unwrap();
-    let finish = f.finish_when_stopped(&recipient);
-    let error = tokio::time::timeout(Duration::from_secs(2), f.runtime.cancel(&parent.conversation_id)).await.unwrap().unwrap_err();
-    assert_eq!(error.status, 500, "return the original failed cascade, not finish's later 503");
-    assert!(*recipient.done.borrow());
-    stopped(&recipient).await;
-    settled(broker).await;
-    settled(finish).await;
-    f.store.read(|state| {
-        let batch = state.worker_batch(&batch.id).unwrap();
-        assert!(batch.cancelled && batch.workers.iter().all(|worker| worker.status == DeliveryStatus::Cancelled));
-        let root = state.disk().bot_deliveries.iter().find(|item| item.id == delivery.id).unwrap();
-        assert_eq!(root.chain_termination.as_ref().unwrap().status, RunStatus::Cancelled);
-    });
-    drop(blocked);
-    let recovered = Store::open(f.store.data_dir(), system_clock()).await.unwrap();
-    recovered.read(|state| {
-        assert!(!state.worker_batch(&batch.id).unwrap().cancelled, "failed cancellation is not claimed durable");
-        let root = state.disk().bot_deliveries.iter().find(|item| item.id == delivery.id).unwrap();
-        assert!(root.chain_termination.is_none());
-        assert_eq!(root.status, DeliveryStatus::Interrupted, "an unsaved Stop still cannot replay a started recipient");
-    });
 }
 
 #[tokio::test]
@@ -664,4 +663,112 @@ async fn cancellation_does_not_report_success_when_only_the_final_run_save_fails
     assert!(*run.done.borrow());
     assert_eq!(f.runtime.cancel(&new_id()).await.unwrap_err().status, 503, "preserve failed-store semantics");
     drop(blocked);
+}
+
+#[tokio::test]
+async fn worker_admission_rejects_ordinary_prompts_and_mismatched_queue_receipts_without_mutation() {
+    let f = Fixture::new().await;
+    let parent = f.run(None).await;
+    let batch = f.batch(&parent).await;
+    f.runtime.finish(&parent, Outcome::default()).await;
+    f.store
+        .mutate(|state| {
+            state.disk_mut().settings.base_url = "http://127.0.0.1:1/v1".into();
+            state.disk_mut().settings.model = "worker-fixture".into();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    f.runtime.set_origin("http://127.0.0.1:3000".into());
+    let child = &batch.workers[0];
+    let work = f.store.read(|state| state.disk().work_queue.iter().find(|work| work.conversation_id == child.conversation_id).unwrap().clone());
+    assert!(matches!(&work.kind, grok_bot_model::WorkKind::Worker { worker_id } if worker_id == &child.id));
+    let before = f.store.read(|state| state.disk().clone());
+    assert_eq!(f.runtime.start(&child.conversation_id, "An injected user prompt").await.unwrap_err().status, 409);
+    assert_eq!(f.store.read(|state| state.disk().clone()), before);
+    for (turn, work_id) in [
+        (Turn::Prompt("Not the approved task".into()), work.id.clone()),
+        (Turn::Worker(batch.workers[1].id.clone()), work.id.clone()),
+        (Turn::Worker(child.id.clone()), new_id()),
+    ] {
+        assert_eq!(f.runtime.start_turn(&child.conversation_id, turn, Vec::new(), &work_id).await.unwrap_err().status, 409);
+        assert_eq!(f.store.read(|state| state.disk().clone()), before, "validate queue kind, exact task and durable owner before any writes");
+    }
+    assert_eq!(f.runtime.start_worker_report(&batch.id).await.unwrap_err().status, 409);
+    assert_eq!(f.store.read(|state| state.disk().clone()), before);
+    assert!(f.runtime.runs().is_empty() && f.runtime.engine.current().await.is_none());
+}
+
+#[tokio::test]
+async fn worker_report_quotes_original_request_not_an_intervening_parent_user_turn() {
+    let f = Fixture::new().await;
+    let parent = f.run(None).await;
+    let source_user_id = f.get(&parent).messages[0].id.clone();
+    // The secret crosses the truncation boundary: redacting only after truncation would leak its
+    // prefix. Both the original request and worker answers must be redacted before taking a head.
+    let original = format!("{}secret-that-must-not-leak original question", "x".repeat(12 * 1024 - 3));
+    f.store
+        .mutate(|state| {
+            state.disk_mut().settings.api_key = "secret-that-must-not-leak".into();
+            state.conversation_mut(&parent.conversation_id)?.messages[0].text = original.clone();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let batch = f.batch(&parent).await;
+    f.runtime.finish(&parent, Outcome::default()).await;
+    let later = f.run_in(&parent.conversation_id, None).await;
+    f.store
+        .mutate(|state| {
+            state.conversation_mut(&parent.conversation_id)?.messages[2].text = "A newer unrelated request".into();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    f.runtime.finish(&later, Outcome::default()).await;
+    let worker = f.run(Some((&batch.workers[0].conversation_id, &batch.workers[0].id))).await;
+    f.store
+        .mutate(|state| {
+            message_mut(state, &worker)?.text = original.clone();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    f.runtime.finish(&worker, Outcome::default()).await;
+    f.store.mutate(|state| state.fail_worker(&batch.workers[1].id, "Not available")).await.unwrap();
+    let prompt = f.store.read(|state| workers::report_prompt(state, &batch.id, &parent.conversation_id)).unwrap();
+    let quoted: Value = serde_json::from_str(prompt.rsplit_once('\n').unwrap().1).unwrap();
+    assert_eq!(quoted["sourceRequest"]["sourceUserId"], source_user_id);
+    let expected = format!("{}[re", "x".repeat(12 * 1024 - 3));
+    assert_eq!(quoted["sourceRequest"]["text"], expected);
+    assert_eq!(quoted["workerResults"][0]["answer"], expected);
+    assert!(!prompt.contains("sec"), "a truncated secret prefix must not appear in report data");
+    assert!(!prompt.contains("A newer unrelated request"));
+    assert!(prompt.contains("not for any newer user message"));
+}
+
+#[tokio::test]
+async fn failed_worker_queue_admission_settles_children_and_one_nonretried_report_without_a_parent_turn() {
+    let f = Fixture::new().await;
+    let parent = f.run(None).await;
+    let batch = f.batch(&parent).await;
+    f.runtime.finish(&parent, Outcome::default()).await;
+    let before_parent = f.get(&parent);
+    // Missing runtime origin is an admission error, not an engine startup. Both worker kinds must
+    // settle their own durable receipts and remove their pointers in the same mutation.
+    f.runtime.dispatch_available().await.unwrap();
+    f.store.read(|state| {
+        let batch = state.worker_batch(&batch.id).unwrap();
+        assert!(!batch.cancelled);
+        assert!(batch.workers.iter().all(|worker| worker.status == DeliveryStatus::Error && worker.execution_run_id.is_none()));
+        let report = batch.report.as_ref().unwrap();
+        assert_eq!(report.status, ReportStatus::Error);
+        assert!(report.run_id.is_none() && batch.report_input_id.is_none() && batch.report_message_id.is_none());
+        assert!(state.disk().work_queue.is_empty());
+    });
+    assert_eq!(f.get(&parent), before_parent, "a failed queued report must not append a hidden input or change the parent's last run");
+    let before = f.store.read(|state| state.disk().clone());
+    f.runtime.dispatch_available().await.unwrap();
+    assert_eq!(f.store.read(|state| state.disk().clone()), before, "terminal child/report admissions are never retried");
+    assert!(f.runtime.runs().is_empty() && f.runtime.engine.current().await.is_none());
 }

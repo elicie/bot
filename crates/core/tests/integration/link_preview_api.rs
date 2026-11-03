@@ -2,9 +2,7 @@
 //! isolated injected fixtures in the service's unit tests; this integration test makes no outbound
 //! requests and requires no test-origin environment override.
 
-use crate::common;
-
-use common::{TestApp, run};
+use crate::common::{TestApp, run};
 use serde_json::{Value, json};
 
 #[test]

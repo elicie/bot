@@ -4,7 +4,7 @@
 
 use crate::common;
 #[path = "scheduler/provider.rs"]
-mod provider;
+pub(super) mod provider;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -78,6 +78,9 @@ impl Fixture {
                     workspace: workspace.to_string_lossy().into_owned(),
                     api_key: None,
                     clear_api_key: Some(true),
+                    // These legacy scheduler scenarios exercise an intentionally single-slot cap.
+                    // Cross-Bot overlap/default-three are covered by per_bot_concurrency.rs.
+                    max_concurrent_runs: Some(1),
                 })
             })
             .await
@@ -234,7 +237,7 @@ fn scheduler_regressions() {
     });
 }
 
-/// routines.test.ts: overlapping ticks, global contention, recurring phase, FIFO and tie-breaking.
+/// Single-slot configuration: overlapping ticks, capacity contention, recurring phase and FIFO.
 async fn global_serialization_and_fifo(root: &Path) {
     let f = Fixture::new(root, "fifo", false, false).await;
     let other_bot =
@@ -351,7 +354,7 @@ async fn manual_scheduled_races(root: &Path) {
     }
 }
 
-/// routines-api.test.ts: duplicate HTTP admission; Runtime starts are globally exclusive too.
+/// Duplicate routine claims still conflict; distinct user requests share a durable Bot FIFO.
 async fn duplicate_requests_and_completed_claim(root: &Path) {
     let f = Fixture::new(root, "duplicates", false, false).await;
     let routine = f.routine("duplicate routine", RoutineSchedule::Interval { minutes: 5 }).await;
@@ -374,15 +377,20 @@ async fn duplicate_requests_and_completed_claim(root: &Path) {
         tokio::join!(f.api("POST", &a_route, Some(json!({"text": "duplicate start A"}))), f.api("POST", &b_route, Some(json!({"text": "duplicate start B"}))),);
     let mut statuses = [a_result.0, b_result.0];
     statuses.sort();
-    assert_eq!(statuses, [202, 409]);
+    assert_eq!(statuses, [202, 202], "distinct accepted user requests are never rejected for a busy Bot");
     f.provider.wait_for(2).await;
-    let (winner, loser) = if a_result.0 == 202 { (&a, &b) } else { (&b, &a) };
+    let (winner, loser) = if !f.get(&a).messages.is_empty() { (&a, &b) } else { (&b, &a) };
     assert!(f.get(loser).messages.is_empty());
-    assert_eq!(f.api("POST", &format!("/api/conversations/{winner}/messages"), Some(json!({"text": "same conversation duplicate"}))).await.0, 409);
+    let queued = f.store.snapshot().work_queue.into_iter().find(|work| &work.conversation_id == loser).unwrap();
+    assert_eq!(f.api("POST", &format!("/api/conversations/{winner}/messages"), Some(json!({"text": "same conversation duplicate"}))).await.0, 202);
+    let route = |conversation: &str, id: &str| format!("/api/conversations/{conversation}/queued-turns/{id}/cancel");
+    assert_eq!(f.api("POST", &route(loser, &queued.id), Some(json!({}))).await.0, 200);
+    let pending = f.store.snapshot().work_queue.into_iter().find(|work| &work.conversation_id == winner).unwrap();
+    assert_eq!(f.api("POST", &route(winner, &pending.id), Some(json!({}))).await.0, 200);
     f.provider.release(1);
     f.terminal(winner, RunStatus::Completed).await;
     f.scheduler.tick().await.unwrap();
-    assert_eq!(f.provider.requests().len(), 2);
+    assert_eq!(f.provider.requests().len(), 2, "cancelled queued inputs never reach inference");
     assert_eq!(f.get(winner).messages.len(), 2);
     assert_result(&f.persisted().await, &run, RoutineResultStatus::Completed);
     assert_provider_claims(&f.provider);
@@ -485,7 +493,7 @@ async fn shutdown_preserves_queue_and_rejects_waiting_commands(root: &Path) {
     let disk = f.persisted().await;
     assert_eq!(f.provider.prompts(), ["shutdown in flight"], "shutdown cancels active inference without dispatching the queue");
     assert_eq!(disk.routine_runs.len(), 2, "waiting manual claim was never admitted");
-    assert_result(&disk, &active, RoutineResultStatus::Cancelled);
+    assert_result(&disk, &active, RoutineResultStatus::Interrupted);
     assert_queued(&disk, &queued);
     f.set_time("2026-01-02T00:00:00Z");
     f.scheduler.start();
@@ -504,7 +512,7 @@ async fn shutdown_preserves_queue_and_rejects_waiting_commands(root: &Path) {
     restarted.scheduler.tick().await.unwrap();
     let disk = restarted.persisted().await;
     assert_eq!(disk.routine_runs.len(), 2);
-    assert_result(&disk, &active, RoutineResultStatus::Cancelled);
+    assert_result(&disk, &active, RoutineResultStatus::Interrupted);
     assert_result(&disk, &queued, RoutineResultStatus::Completed);
     assert_provider_claims(&restarted.provider);
     restarted.close().await;

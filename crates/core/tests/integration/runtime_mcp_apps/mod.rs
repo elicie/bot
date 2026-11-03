@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use grok_bot_model::{PermissionAction, PermissionCategory, PermissionRuleInput, SecretInput};
+use grok_bot_model::{BotInput, PermissionAction, PermissionCategory, PermissionRuleInput, SecretInput, WorkKind};
 use serde_json::{Value, json};
 
 use super::{Fixture, Reply, discover, serve, text};
@@ -161,6 +161,12 @@ pub(super) async fn mcp_apps(f: &Fixture) {
 
     // Two slow resources used to stall the single event router past its five-second drain and
     // lose the final assistant text. Captures are concurrent tracked work, not router awaits.
+    // Issue #20 protects the active Bot's settings; another idle Bot can still rotate its secrets.
+    let idle_bot = f
+        .store
+        .mutate(|state| state.add_bot(BotInput { name: "Idle secret owner".into(), instructions: None, color: None, shape: None, pinned: None }))
+        .await
+        .unwrap();
     recorded.lock().unwrap().slow_reads = true;
     f.provider.plan(vec![
         Reply::Tool("use_tool", json!({"tool_name": "apps__render", "tool_input": {"delta": 0, "quoted": "late-vault-token-123456"}})),
@@ -174,9 +180,17 @@ pub(super) async fn mcp_apps(f: &Fixture) {
         })
         .await;
     assert!(!streamed.run.status.is_terminal(), "normal text projects before slow resource work completes");
-    let late_secret = f
+    let busy_secret = f
         .store
         .mutate(|state| state.add_secret(SecretInput { name: "LATE_TOKEN".into(), value: "late-vault-token-123456".into(), bot_id: Some(bot.clone()) }, true))
+        .await
+        .unwrap_err();
+    assert_eq!(busy_secret.status, 409, "slow capture still owns the active Bot's configuration slot");
+    let late_secret = f
+        .store
+        .mutate(|state| {
+            state.add_secret(SecretInput { name: "LATE_TOKEN".into(), value: "late-vault-token-123456".into(), bot_id: Some(idle_bot.id.clone()) }, true)
+        })
         .await
         .unwrap();
     let slow = f.completed(&id).await;
@@ -221,8 +235,8 @@ async fn maintenance_admission(f: &Fixture, recorded: &Arc<Mutex<Recorded>>, con
     assert_eq!(f.store.snapshot(), before, "paused app admission changed durable state");
     f.runtime.resume().unwrap();
 
-    // An isolated app session leaves Conversation.run terminal. Its private busy owner must still
-    // block both direct maintenance preparation and a reply until the bounded session closes.
+    // An isolated app session leaves Conversation.run terminal. Its private busy owner still
+    // blocks maintenance and live reply dispatch, but issue #20 accepts replies into the durable queue.
     let gate = Arc::new(CallGate::default());
     recorded.lock().unwrap().call_gate = Some(gate.clone());
     let approved = f.runtime.request_mcp_app_call(conversation, activity, "refresh", json!({})).unwrap();
@@ -232,15 +246,26 @@ async fn maintenance_admission(f: &Fixture, recorded: &Arc<Mutex<Recorded>>, con
     assert!(f.get(conversation).run.status.is_terminal());
     assert_eq!(f.runtime.pause_if_idle().unwrap_err().status, 409);
     assert!(!f.runtime.is_paused(), "busy maintenance did not latch");
-    assert_eq!(f.runtime.start(conversation, "Must not overlap an MCP app session").await.unwrap_err().status, 409);
-    assert_eq!(f.store.snapshot(), before, "busy maintenance or turn admission changed durable state");
+    assert_eq!(f.store.snapshot(), before, "busy maintenance changed durable state");
+    f.runtime.start(conversation, "Must not overlap an MCP app session").await.unwrap();
+    let queued = f.public().work_queue.into_iter().find(|work| work.conversation_id == conversation).expect("reply waits for the isolated app session");
+    assert!(matches!(&queued.kind, WorkKind::User { text, attachments } if text == "Must not overlap an MCP app session" && attachments.is_empty()));
+    assert_eq!(f.store.snapshot().conversations, before.conversations, "queue acceptance does not replace any conversation run or history");
+    assert_eq!(f.store.read(|state| state.active_count()), 0, "the queued reply cannot overlap the isolated app call");
+    assert_eq!(f.provider.inference_len(), model_calls, "durable acceptance does not prompt the model while the app call is live");
+    // Cancel only this accepted request before releasing the app so the remaining app scenarios stay isolated.
+    f.runtime.cancel_queued_turn(conversation, &queued.id).await.unwrap();
+    let after_cancel = f.store.snapshot();
+    let mut unchanged = after_cancel.clone();
+    unchanged.revision = before.revision;
+    assert_eq!(unchanged, before, "queue acceptance/removal changes no unrelated durable state");
     gate.release.notify_one();
     let result = running.await.unwrap().unwrap();
     recorded.lock().unwrap().call_gate = None;
     assert_eq!(result["content"][0]["text"], "counter: 1 [redacted]");
     assert_eq!(recorded.lock().unwrap().calls.len(), calls + 1);
     assert_eq!(f.provider.inference_len(), model_calls, "maintenance checks and isolated app calls never prompt the model");
-    assert_eq!(f.store.snapshot(), before, "isolated app call replaced persisted conversation state");
+    assert_eq!(f.store.snapshot(), after_cancel, "isolated app call replaced persisted conversation state");
     f.runtime.pause_if_idle().unwrap();
     f.runtime.resume().unwrap();
 }

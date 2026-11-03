@@ -84,7 +84,7 @@ impl State {
 
     /// The checks `insert_knowledge` repeats, run before contents are written.
     fn knowledge_admissible(&self, bot_id: &str, name: &str, bytes: u64) -> HttpResult<usize> {
-        self.assert_idle()?;
+        self.assert_bot_idle(bot_id)?;
         let index = self.bot_index(bot_id)?;
         let files = self.knowledge(bot_id)?;
         if files.len() >= MAX_KNOWLEDGE_FILES_PER_BOT {
@@ -113,7 +113,7 @@ impl State {
     }
 
     fn remove_knowledge(&mut self, bot_id: &str, id: &str) -> HttpResult<KnowledgeFile> {
-        self.assert_idle()?;
+        self.assert_bot_idle(bot_id)?;
         let index = self.bot_index(bot_id)?;
         let file = self.knowledge_file(bot_id, id)?.clone();
         let bot = &mut self.disk_mut().bots[index];

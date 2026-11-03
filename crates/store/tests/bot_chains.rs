@@ -873,6 +873,7 @@ async fn root_termination_error_is_redacted_in_public_snapshot_and_durable_recei
                 workspace: String::new(),
                 api_key: Some(key.into()),
                 clear_api_key: None,
+                max_concurrent_runs: None,
             })
         })
         .await
