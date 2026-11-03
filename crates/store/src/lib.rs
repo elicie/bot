@@ -29,6 +29,7 @@ pub mod main_bot;
 pub mod mcp_apps;
 pub mod memory;
 pub mod permissions;
+pub mod queue;
 mod redact;
 pub mod schedule;
 pub mod skills;
@@ -112,6 +113,8 @@ enum Job {
         bot_chains: bool,
         /// Older report-aware binaries require a run ID on cancelled reports.
         unstarted_report_cancellations: bool,
+        /// Queue entries, explicit run owners, and configured concurrency are new persisted fields.
+        work_queue: bool,
         done: Option<oneshot::Sender<bool>>,
     },
     Flush(oneshot::Sender<()>),
@@ -124,6 +127,14 @@ pub const PRE_BOT_CHAINS_BACKUP: &str = "state.json.pre-bot-chains.bak";
 /// One-time copy before a cancelled report without a run ID is first persisted. Report-aware older
 /// binaries cannot load that shape; the pre-reports backup may not exist on an upgraded install.
 pub const PRE_UNSTARTED_REPORT_CANCELLATION_BACKUP: &str = "state.json.pre-unstarted-report-cancellation.bak";
+/// Required private rollback point before durable FIFO/concurrency fields are first written.
+pub const PRE_WORK_QUEUE_BACKUP: &str = "state.json.pre-work-queue.bak";
+
+fn uses_work_queue(disk: &DiskState) -> bool {
+    !disk.work_queue.is_empty()
+        || disk.settings.max_concurrent_runs.is_some()
+        || disk.conversations.iter().any(|conversation| conversation.run.bot_id.is_some())
+}
 
 fn uses_bot_chains(disk: &DiskState) -> bool {
     if disk.bot_deliveries.iter().any(|delivery| delivery.status == DeliveryStatus::WaitingChildren || delivery.chain_termination.is_some()) {
@@ -219,6 +230,7 @@ fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_err
         routine_runs,
         bot_exchanges,
         bot_deliveries,
+        work_queue,
         permission_rules,
         groups,
         main_bot_id,
@@ -226,6 +238,7 @@ fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_err
         ..
     } = disk;
     webhooks::strip_webhook_secrets(&mut routines);
+    let max_concurrent_runs = Some(settings.max_concurrent_runs() as u32);
     let mut state = AppState {
         revision,
         bots,
@@ -234,6 +247,7 @@ fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_err
         routine_runs,
         bot_exchanges,
         bot_deliveries,
+        work_queue,
         permission_rules,
         groups,
         routine_scheduling_error: routine_scheduling_error.filter(|value| !value.is_empty()),
@@ -242,6 +256,7 @@ fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_err
             model: settings.model,
             has_api_key: !settings.api_key.is_empty(),
             workspace: settings.workspace,
+            max_concurrent_runs,
         },
         runtime,
         secrets,
@@ -275,12 +290,13 @@ fn writer_loop(shared: Arc<Shared>, path: PathBuf, jobs: mpsc::Receiver<Job>) {
     let mut reports_backed_up = false;
     let mut bot_chains_backed_up = false;
     let mut unstarted_cancellations_backed_up = false;
+    let mut work_queue_backed_up = false;
     for job in jobs {
         match job {
             Job::Flush(done) => {
                 let _ = done.send(());
             }
-            Job::Write { bytes, runtime, routine_scheduling_error, reports, bot_chains, unstarted_report_cancellations, done } => {
+            Job::Write { bytes, runtime, routine_scheduling_error, reports, bot_chains, unstarted_report_cancellations, work_queue, done } => {
                 if reports && !reports_backed_up {
                     if let Err(error) = backup_before_shape(&path, PRE_REPORTS_BACKUP, uses_reports) {
                         // Preserve the original pre-reports backup's best-effort behavior.
@@ -310,6 +326,10 @@ fn writer_loop(shared: Arc<Shared>, path: PathBuf, jobs: mpsc::Receiver<Job>) {
                         if unstarted_report_cancellations && !unstarted_cancellations_backed_up {
                             backup_before_shape(&path, PRE_UNSTARTED_REPORT_CANCELLATION_BACKUP, uses_unstarted_report_cancellations)?;
                             unstarted_cancellations_backed_up = true;
+                        }
+                        if work_queue && !work_queue_backed_up {
+                            backup_before_shape(&path, PRE_WORK_QUEUE_BACKUP, uses_work_queue)?;
+                            work_queue_backed_up = true;
                         }
                         grok_bot_files::atomic_private_file(&path, &bytes)
                     })()
@@ -372,6 +392,7 @@ fn default_state(now: DateTime<Utc>) -> DiskState {
         routine_runs: Vec::new(),
         bot_exchanges: Vec::new(),
         bot_deliveries: Vec::new(),
+        work_queue: Vec::new(),
         permission_rules: Vec::new(),
         groups: Vec::new(),
         secrets: Vec::new(),
@@ -570,6 +591,8 @@ struct Prospect<'a> {
     bot_exchanges: Vec<&'a BotExchange>,
     bot_deliveries: Vec<&'a BotDelivery>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    work_queue: Vec<&'a QueuedWork>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     permission_rules: &'a Vec<PermissionRule>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     groups: &'a Vec<Group>,
@@ -626,6 +649,7 @@ impl State {
             routine_runs: self.disk.routine_runs.iter().collect(),
             bot_exchanges: self.disk.bot_exchanges.iter().collect(),
             bot_deliveries: self.disk.bot_deliveries.iter().collect(),
+            work_queue: self.disk.work_queue.iter().collect(),
             permission_rules: &self.disk.permission_rules,
             groups: &self.disk.groups,
             secrets: &self.disk.secrets,
@@ -680,7 +704,21 @@ impl State {
                 }
             })
             .sum();
-        if json_bytes(prospect).saturating_add(runs).saturating_add(deliveries) > MAX_STATE_BYTES {
+        let user_turns = prospect.work_queue.iter().filter(|work| matches!(work.kind, WorkKind::User { .. })).count().saturating_mul(4096);
+        // Missing specialized pointers are appended by the commit projection. Include their small
+        // metadata tail in admission rather than accepting an immediately oversized state file.
+        let pointer_reserve = prospect
+            .routine_runs
+            .iter()
+            .filter(|run| run.result.is_none() && !truthy(&run.execution_run_id))
+            .count()
+            .saturating_add(prospect.bot_deliveries.iter().filter(|delivery| delivery.status == DeliveryStatus::Queued).count())
+            .saturating_add(
+                prospect.bot_deliveries.iter().filter(|delivery| delivery.report.as_ref().is_some_and(|report| report.status == ReportStatus::Queued)).count(),
+            )
+            .saturating_add(prospect.conversations.iter().filter(|conversation| conversation.group_round.is_some()).count())
+            .saturating_mul(512);
+        if json_bytes(prospect).saturating_add(runs).saturating_add(deliveries).saturating_add(user_turns).saturating_add(pointer_reserve) > MAX_STATE_BYTES {
             return Err(HttpError::too_large(
                 "Application state and reserved queued work would exceed the 64 MiB limit. Existing history and conversations are retained.",
             ));
@@ -781,6 +819,7 @@ impl State {
         }
         let routine_conversations: HashSet<&str> = routine_runs.iter().map(|run| run.conversation_id.as_str()).collect();
         reconcile_bot_deliveries(bot_deliveries, bot_exchanges, conversations, &routine_conversations, now);
+        self.sync_work_queue();
         self.disk.revision += 1;
         let bytes = serde_json::to_vec(&self.disk).unwrap_or_default();
         Job::Write {
@@ -790,6 +829,7 @@ impl State {
             reports: uses_reports(&self.disk),
             bot_chains: uses_bot_chains(&self.disk),
             unstarted_report_cancellations: uses_unstarted_report_cancellations(&self.disk),
+            work_queue: uses_work_queue(&self.disk),
             done: None,
         }
     }
@@ -906,6 +946,9 @@ impl State {
         input.model = js_trim(&input.model).to_owned();
         issues.length("model", &input.model, 1, 256);
         issues.max_length("workspace", &input.workspace, 4096);
+        if let Some(limit) = input.max_concurrent_runs {
+            issues.number("maxConcurrentRuns", u64::from(limit), u64::from(MIN_MAX_CONCURRENT_RUNS), u64::from(MAX_MAX_CONCURRENT_RUNS));
+        }
         if let Some(api_key) = input.api_key.as_deref() {
             issues.max_length("apiKey", api_key, 16384);
             if api_key.contains(['\r', '\n', '\0']) {
@@ -941,8 +984,9 @@ impl State {
             return Err(HttpError::bad_request("An API key is required for non-loopback providers."));
         }
         let model = model.to_owned();
+        let max_concurrent_runs = input.max_concurrent_runs.or(self.disk.settings.max_concurrent_runs);
         let disk = self.disk_mut();
-        disk.settings = PrivateSettings { base_url: canonical_url, model, workspace, api_key };
+        disk.settings = PrivateSettings { base_url: canonical_url, model, workspace, api_key, max_concurrent_runs };
         disk.conversations.iter_mut().for_each(clear_session);
         Ok(())
     }
@@ -960,11 +1004,9 @@ impl State {
         let mut issues = Issues::new();
         bot_field_issues(&mut issues, Some(&mut input.name), input.color.as_deref(), input.instructions.as_deref());
         issues.finish()?;
-        if within_run {
-            self.assert_writable()?;
-        } else {
-            self.assert_idle()?;
-        }
+        // Creating a new bot does not mutate any existing bot's executing configuration.
+        let _ = within_run;
+        self.assert_writable()?;
         let bot = Bot {
             id: new_id(),
             name: input.name,
@@ -991,7 +1033,7 @@ impl State {
         if input == BotPatch::default() {
             return Err(HttpError::bad_request("Provide a bot field to update."));
         }
-        self.assert_idle()?;
+        self.assert_bot_idle(id)?;
         let index = self.bot_index(id)?;
         let disk = self.disk_mut();
         let bot = &mut disk.bots[index];
@@ -1065,7 +1107,7 @@ impl State {
         if within_run {
             self.assert_writable()?
         } else {
-            self.assert_idle()?
+            self.assert_bot_idle(bot_id)?
         }
         let index = self.bot_index(bot_id)?;
         let skill = new_skill(input, &iso(self.now()))?;
@@ -1077,7 +1119,7 @@ impl State {
 
     pub fn update_skill(&mut self, bot_id: &str, id: &str, input: SkillPatch) -> HttpResult<()> {
         let input = skills::validate_skill_patch(input)?;
-        self.assert_idle()?;
+        self.assert_bot_idle(bot_id)?;
         let index = self.bot_index(bot_id)?;
         let next = next_skill(self.skill(bot_id, id)?, input, &iso(self.now()))?;
         let skills =
@@ -1089,7 +1131,7 @@ impl State {
         let mut issues = Issues::new();
         issues.number("revision", revision, 1, u64::MAX);
         issues.finish()?;
-        self.assert_idle()?;
+        self.assert_bot_idle(bot_id)?;
         if self.skill(bot_id, id)?.revision != revision {
             return Err(HttpError::conflict("The skill changed since it was opened. Reload before deleting."));
         }
@@ -1279,6 +1321,7 @@ impl State {
         disk.routines[index] = updated;
         disk.routine_runs.push(run.clone());
         disk.conversations.push(conversation);
+        self.sync_work_queue();
         Ok(run)
     }
 
@@ -1345,6 +1388,7 @@ impl State {
         }
         disk.routine_runs.extend(runs);
         disk.conversations.extend(conversations);
+        self.sync_work_queue();
         Ok(())
     }
 
@@ -1392,6 +1436,7 @@ impl State {
         conversation.run = RunState {
             id: if conversation.run.id.is_empty() { run_id } else { conversation.run.id.clone() },
             status: RunStatus::Error,
+            bot_id: conversation.run.bot_id.clone(),
             error: Some(error),
             permission: None,
             todos: conversation.run.todos.clone(),
@@ -1511,6 +1556,7 @@ impl State {
         disk.conversations.push(recipient_conversation);
         disk.bot_exchanges.push(exchange);
         disk.bot_deliveries.push(delivery.clone());
+        self.sync_work_queue();
         Ok(delivery)
     }
     pub fn fail_bot_delivery(&mut self, delivery_id: &str, error: &str, now: DateTime<Utc>) -> HttpResult<()> {
@@ -1529,6 +1575,7 @@ impl State {
         conversation.run = RunState {
             id: conversation.run.id.clone(),
             status: RunStatus::Error,
+            bot_id: conversation.run.bot_id.clone(),
             error: Some(error),
             permission: None,
             todos: conversation.run.todos.clone(),

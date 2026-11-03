@@ -52,6 +52,9 @@ export async function request<T>(
 }
 
 export const getState = (signal?: AbortSignal) => request<AppState>('/api/state', { signal });
+/** Cancel exactly one accepted, unstarted turn; never the conversation's live run. */
+export const cancelQueuedTurn = (conversationId: string, turnId: string) =>
+  request<AppState>(`/api/conversations/${encodeURIComponent(conversationId)}/queued-turns/${encodeURIComponent(turnId)}/cancel`, { method: 'POST', body: {} });
 export const listFiles = (path: string, signal?: AbortSignal) =>
   request<FileListing>(`/api/files?path=${encodeURIComponent(path)}`, { signal });
 export const readDocument = (path: string, signal?: AbortSignal) =>

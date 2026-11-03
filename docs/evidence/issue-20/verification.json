@@ -1,0 +1,51 @@
+{
+  "issue": "https://github.com/elicie/bot/issues/20",
+  "before": {
+    "uiRevision": "e7de2f2d4f10539e0e25ee39752dd47e205c06ba",
+    "webTree": "1f77c3ee7dde90763ea4f2ffa3739843f8311e9a",
+    "aActualInferenceHeld": true,
+    "bSameDraftPresent": true,
+    "bSendDisabled": true
+  },
+  "after": {
+    "uiRevision": "92ef3d9184b4e05406346f381cdb12f905322dc5",
+    "webTree": "62db3e9058c91520d8c50df1c1dc08469e7f0067",
+    "productionSourceCleanAtCapture": true,
+    "sourceManifestSha256": "d360af0cfa129efe3cb1e89b2111dea1fc5cca3b35eb624a194777bd5cb6b186",
+    "aActualInferenceHeld": true,
+    "bSameDraftPresent": true,
+    "bSendEnabled": true,
+    "globalBlockingBannerAbsent": true,
+    "actualConcurrentInferences": 2,
+    "queuedBCount": 1,
+    "individualQueueCancelKeptBothRunIdsRunning": true,
+    "cancelledTextNeverReachedProvider": true,
+    "bCompletedWhileARemainedRunning": true,
+    "defaultMaxConcurrentRuns": 3,
+    "pageErrors": [],
+    "browserErrors": [],
+    "noHorizontalOverflow": true
+  },
+  "sameBackend": {
+    "builtRevision": "1cad678decf1187eda69fc37a2be8bc8a04de4dc",
+    "sha256": "0bdb016272a900d0c811e7f52c40df1e30b741ec7090f98db80a58ea79f204ee",
+    "equivalentProductionCheckoutAtAfter": "aa81ed0c711cfbad496784cbe85d03cf33c8c41e",
+    "productionSourceDiffEmpty": true
+  },
+  "matchedScenario": {
+    "browserVersion": "150.0.7871.181",
+    "theme": "dark",
+    "locale": "ko-KR",
+    "timezone": "Asia/Seoul",
+    "deviceScaleFactor": 1,
+    "desktopViewport": { "width": 1280, "height": 900 },
+    "mobileViewport": { "width": 390, "height": 844 },
+    "sameDraft": "Bot A가 답변하는 동안, 오늘 할 일 세 가지를 정리해 주세요.",
+    "apiInterceptionOrMockup": false
+  },
+  "cleanup": {
+    "beforeAppProviderBrowserStopped": true,
+    "afterAppProviderBrowserStopped": true,
+    "temporaryPortsClosed": true
+  }
+}

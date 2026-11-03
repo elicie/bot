@@ -155,8 +155,13 @@ pub(super) async fn checklist_updates(base: &Path, engine: &Path) {
     while let Ok(snapshot) = next_updates.try_recv() {
         let snapshot = serde_json::to_value(&*snapshot).unwrap();
         let current = conversation(&snapshot, &id);
-        if let Some(todos) = current["run"].get("todos") {
-            assert_eq!(todos, &unfinished, "neither old tasks nor cosmetic completion may be broadcast");
+        if current["run"]["id"] == completed["run"]["id"] {
+            // Durable acceptance publishes the previous run unchanged before the queued turn
+            // starts. Do not confuse that queue-only snapshot with a replay into the new run.
+            assert_eq!(current["run"]["todos"], latest);
+            assert!(snapshot["workQueue"].as_array().is_some_and(|work| work.iter().any(|item| item["conversationId"] == id)));
+        } else if let Some(todos) = current["run"].get("todos") {
+            assert_eq!(todos, &unfinished, "neither old tasks nor cosmetic completion may be broadcast in the new run");
         }
     }
     let persisted: Value = serde_json::from_str(&std::fs::read_to_string(data.join("state.json")).unwrap()).unwrap();

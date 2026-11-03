@@ -23,7 +23,7 @@ import type {
   RoutineRun,
   ToolActivity,
 } from '../shared/types';
-import { activeRun, pendingBotWork, runLabels } from './state';
+import { activeRun, actualBotId, pendingBotWork, runningConversations, runLabels } from './state';
 import { Avatar, ErrorNotice, IconButton } from './ui';
 import { BotMessageLinks, BotReportMarker, BotRequestBanner } from './BotChat';
 import { RichMarkdown } from './RichMarkdown';
@@ -420,6 +420,31 @@ export function Transcript({
   );
 }
 
+/** Keep every off-screen execution and approval reachable, not only the first active run. */
+export function OtherRuns({ data, shownIds, onOpen }: {
+  data: AppState;
+  shownIds: (string | null | undefined)[];
+  onOpen: (conversation: Conversation) => void;
+}) {
+  const others = runningConversations(data).filter(conversation => !shownIds.includes(conversation.id));
+  if (!others.length) return null;
+  return <section className="other-runs" aria-label="다른 대화의 실행 상태">
+    <ul>{others.map(conversation => {
+      const owner = data.bots.find(bot => bot.id === actualBotId(conversation));
+      const group = data.groups?.find(group => group.id === conversation.groupId);
+      const approval = conversation.run.status === 'awaiting_permission';
+      return <li className="other-run" key={conversation.id} data-conversation-id={conversation.id}>
+        {approval ? <ShieldQuestion size={14} aria-hidden="true" /> : <LoaderCircle size={14} aria-hidden="true" />}
+        <span className="other-run-copy">
+          <span>{owner?.name ?? '삭제된 Bot'}{group ? ` · ${group.name}` : ''}{conversation.thread ? ' · 스레드' : ''} · {conversation.title || '새 대화'}</span>
+          <small role="status">{runLabels[conversation.run.status]}</small>
+        </span>
+        <button type="button" onClick={() => onOpen(conversation)}>실행 중인 대화 보기</button>
+      </li>;
+    })}</ul>
+  </section>;
+}
+
 export function Composer({
   botName,
   value,
@@ -428,7 +453,7 @@ export function Composer({
   onFiles,
   onCancel,
   running,
-  pendingBotWork = false,
+  pendingWork = false,
   disabled,
   busy,
   model,
@@ -445,8 +470,8 @@ export function Composer({
   onFiles?: () => void;
   onCancel: () => void;
   running: boolean;
-  /** Logical Bot work may be stopped without disabling a new user message. */
-  pendingBotWork?: boolean;
+  /** Accepted work owned by this conversation; Stop never cancels another conversation. */
+  pendingWork?: boolean;
   disabled: boolean;
   busy: boolean;
   model: string;
@@ -458,9 +483,10 @@ export function Composer({
   readOnly?: boolean;
 }) {
   const textarea = useRef<HTMLTextAreaElement>(null);
-  const attachable = !!attachments && !disabled && !readOnly && !busy && !running;
+  const attachable = !!attachments && !disabled && !readOnly && !busy;
   const drop = useFileDrop(attachable, (files) => attachments?.add(files));
   const hasFiles = !!attachments?.items.length;
+  const hasDraft = !!value.trim() || hasFiles;
   useLayoutEffect(() => {
     if (!textarea.current) return;
     textarea.current.style.height = '0px';
@@ -468,7 +494,7 @@ export function Composer({
   }, [value]);
   const submit = (event?: FormEvent) => {
     event?.preventDefault();
-    if (!disabled && (value.trim() || hasFiles) && !busy && !running) onSend();
+    if (!disabled && !readOnly && hasDraft && !busy) onSend();
   };
   return (
     <div className="composer-dock" {...drop.handlers}>
@@ -509,30 +535,27 @@ export function Composer({
             }
           }}
         />
-        {running ? (
+        {(running || pendingWork) && (
           <IconButton
             label="작업 중단"
+            title="이 대화의 실행과 대기 중인 작업만 중단"
             className="send-button stop-button"
             onClick={onCancel}
             disabled={busy}
           >
             <Square size={14} fill="currentColor" />
           </IconButton>
-        ) : (
-          <>
-            {pendingBotWork && <IconButton label="Bot 체인 중단" className="send-button stop-button" onClick={onCancel} disabled={busy}>
-              <Square size={14} fill="currentColor" />
-            </IconButton>}
-            <button
-              type="submit"
-              className="send-button"
-              aria-label="메시지 보내기"
-              title="메시지 보내기"
-              disabled={disabled || busy || (!value.trim() && !hasFiles)}
-            >
-              <ArrowUp size={19} />
-            </button>
-          </>
+        )}
+        {(!running || hasDraft) && (
+          <button
+            type="submit"
+            className="send-button"
+            aria-label="메시지 보내기"
+            title={running || pendingWork ? '메시지 보내기 · 대기열에 추가' : '메시지 보내기'}
+            disabled={disabled || readOnly || busy || !hasDraft}
+          >
+            <ArrowUp size={19} />
+          </button>
         )}
       </form>
       <div className="composer-meta">

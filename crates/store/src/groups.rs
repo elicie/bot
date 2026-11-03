@@ -3,7 +3,7 @@
 //! A group lists 2–12 member bots in speaking order. A group conversation stores the group ID in
 //! both `bot_id` and `group_id`, so code that resolves `bot_id` as a bot (routines, deliveries,
 //! plain 1:1 runs) never mistakes it for one. Each user message opens a *round*: the members that
-//! answer it, one turn at a time, through the single active-run slot.
+//! answer it, one turn at a time, through the speaking member bot's active-run slot.
 //!
 //! Speaker order: when the message mentions members as `@Name`, only those members answer;
 //! otherwise every member answers. Either way they answer in member order, once per user message,
@@ -107,14 +107,15 @@ pub(crate) fn schema_valid(disk: &DiskState) -> bool {
 }
 
 /// Load-time repair: drop members whose bot no longer exists (a bot deleted by an older build or
-/// another feature keeps the group loadable) and rounds a crashed run cannot continue.
+/// another feature keeps the group loadable). A crashed current turn is not replayed, but its
+/// accepted pending members remain recoverable; only explicit Stop/failure discards the round.
 pub(crate) fn normalize(disk: &mut DiskState) {
     let bots: HashSet<String> = disk.bots.iter().map(|bot| bot.id.clone()).collect();
     for group in &mut disk.groups {
         group.member_bot_ids.retain(|id| bots.contains(id));
     }
     for conversation in &mut disk.conversations {
-        if conversation.run.status.is_active() || matches!(conversation.run.status, RunStatus::Error | RunStatus::Cancelled | RunStatus::Interrupted) {
+        if matches!(conversation.run.status, RunStatus::Error | RunStatus::Cancelled) {
             conversation.group_round = None;
         }
         if let Some(round) = conversation.group_round.as_mut() {
@@ -184,8 +185,32 @@ impl State {
         self.conversation(conversation_id).is_ok_and(|conversation| conversation.group_round.as_ref().is_some_and(|round| !round.pending_bot_ids.is_empty()))
     }
 
+    /// Accepted group work includes later member turns, not only the next member in the queue.
+    /// Used by bot deletion; ordinary bot edits only need to wait for its live turn.
+    pub(crate) fn queued_group_work_for_bot(&self, bot_id: &str) -> bool {
+        self.disk
+            .conversations
+            .iter()
+            .any(|conversation| conversation.group_round.as_ref().is_some_and(|round| round.pending_bot_ids.iter().any(|pending| pending == bot_id)))
+            || self.disk.work_queue.iter().any(|work| {
+                let WorkKind::User { text, .. } = &work.kind else { return false };
+                if let Some(speakers) = &work.speaker_bot_ids {
+                    return speakers.iter().any(|speaker| speaker == bot_id);
+                }
+                let Some(group_id) = self.conversation(&work.conversation_id).ok().and_then(|conversation| conversation.group_id.as_deref()) else {
+                    return false;
+                };
+                self.group_members(group_id).is_ok_and(|members| group_speakers(&members, text).iter().any(|speaker| speaker == bot_id))
+            })
+    }
+
     fn assert_group_quiet(&self, group_id: &str) -> HttpResult<()> {
-        if self.disk.conversations.iter().any(|conversation| conversation.group_id.as_deref() == Some(group_id) && conversation.group_round.is_some()) {
+        if self.disk.conversations.iter().any(|conversation| {
+            conversation.group_id.as_deref() == Some(group_id)
+                && (conversation.run.status.is_active()
+                    || conversation.group_round.is_some()
+                    || self.disk.work_queue.iter().any(|work| work.conversation_id == conversation.id && matches!(work.kind, WorkKind::User { .. })))
+        }) {
             return Err(HttpError::conflict(GROUP_BUSY));
         }
         Ok(())
@@ -225,7 +250,6 @@ impl State {
         self.assert_writable()?;
         let index = self.group_index(id)?;
         if let Some(members) = &input.member_bot_ids {
-            self.assert_idle()?;
             self.assert_group_quiet(id)?;
             self.assert_members_exist(members)?;
         }
@@ -254,7 +278,7 @@ impl State {
     /// IDs of the removed conversations (threads included) so the caller can remove their files
     /// outside `state.json` after the commit.
     pub fn delete_group(&mut self, id: &str) -> HttpResult<Vec<String>> {
-        self.assert_idle()?;
+        self.assert_writable()?;
         self.group(id)?;
         self.assert_group_quiet(id)?;
         let disk = self.disk_mut();
@@ -369,6 +393,7 @@ impl State {
         conversation.run = RunState {
             id: conversation.run.id.clone(),
             status: RunStatus::Error,
+            bot_id: conversation.run.bot_id.clone(),
             error: Some(error),
             permission: None,
             todos: conversation.run.todos.clone(),

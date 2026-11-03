@@ -17,6 +17,7 @@ async fn configure_key(f: &Fixture, api_key: &str) {
         workspace: String::new(),
         api_key: Some(api_key.into()),
         clear_api_key: None,
+        max_concurrent_runs: None,
     };
     f.store.mutate(|s| s.update_settings(settings)).await.unwrap();
 }

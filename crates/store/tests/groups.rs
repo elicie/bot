@@ -110,7 +110,7 @@ async fn members_and_fields_are_edited_with_idle_and_round_checks() {
     assert_eq!((edited.name.as_str(), edited.pinned), ("Renamed", Some(true)));
     assert_eq!(edited.member_bot_ids, [third.clone(), grok.clone(), second.clone()]);
 
-    // Member edits wait for idle and for a finished round; renames do not.
+    // Member edits wait for this group's active/pending round; renames do not.
     let conversation = f.store.mutate(|s| s.add_group_conversation(&id)).await.unwrap();
     assert_eq!((conversation.bot_id.as_str(), conversation.group_id.as_deref()), (id.as_str(), Some(id.as_str())));
     f.start(&conversation.id).await;
@@ -184,10 +184,14 @@ async fn deleting_a_group_removes_its_conversations_and_threads_but_keeps_bots()
     let direct_message = push(&f, &direct.id, message(Role::User, "Keep me", None, &now)).await;
     let direct_thread = f.store.mutate(|s| s.create_thread(&direct.id, &direct_message)).await.unwrap();
 
-    f.start(&direct.id).await;
+    f.start(&group_conversation.id).await;
     assert_eq!(f.store.mutate(|s| s.delete_group(&group.id)).await.unwrap_err().status, 409);
-    f.finish(&direct.id).await;
+    f.finish(&group_conversation.id).await;
+    // A member bot's independent direct run does not lock this otherwise quiet group.
+    f.start(&direct.id).await;
     let mut removed = f.store.mutate(|s| s.delete_group(&group.id)).await.unwrap();
+    assert_eq!(f.conversation(&direct.id).run.status, RunStatus::Running);
+    f.finish(&direct.id).await;
     removed.sort();
     let mut expected = vec![group_conversation.id.clone(), group_thread.id.clone()];
     expected.sort();

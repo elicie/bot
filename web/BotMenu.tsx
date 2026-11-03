@@ -2,7 +2,7 @@
 
 import { Bell, BellOff, CircleDot, MailOpen, Trash2, X } from 'lucide-react';
 import type { AppState, Bot } from '../shared/types';
-import { activeRun, mainBotId } from './state';
+import { isBotRunning, mainBotId } from './state';
 import { ErrorNotice, IconButton, Modal } from './ui';
 import { MainBotMenuItem } from './MainBot';
 import './chat-features.css';
@@ -37,7 +37,7 @@ export function BotDeleteDialog({ bot, data, busy, error, onCancel, onConfirm }:
 }) {
   const conversations = data.conversations.filter((conversation) => conversation.botId === bot.id);
   const routines = data.routines.filter((routine) => routine.botId === bot.id).length;
-  const running = conversations.some((conversation) => activeRun(conversation.run.status));
+  const running = isBotRunning(data, bot.id);
   const last = data.bots.length <= 1;
   const blocked = last ? '마지막 Bot은 삭제할 수 없어요. 다른 Bot을 먼저 추가하세요.' : running ? '이 Bot의 작업이 끝난 뒤 삭제할 수 있어요.' : null;
   // Deleting the main bot makes the first remaining bot the main bot (`grok_bot_store::main_bot`).
@@ -62,7 +62,7 @@ export function BotDeleteDialog({ bot, data, busy, error, onCancel, onConfirm }:
     <footer className="modal-footer">
       <button type="button" className="small-button" onClick={close} disabled={busy} data-autofocus>취소</button>
       <button type="button" className="danger-button" disabled={busy || !!blocked}
-        onClick={onConfirm}>{busy ? '삭제 중...' : '삭제'}</button>
+        onClick={() => { if (!busy && !blocked) onConfirm(); }}>{busy ? '삭제 중...' : '삭제'}</button>
     </footer>
   </Modal>;
 }

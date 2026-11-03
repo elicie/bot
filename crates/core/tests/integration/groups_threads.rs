@@ -261,12 +261,17 @@ async fn group_order_attribution_and_sessions(h: &Harness) {
     let busy = h.state().conversations.into_iter().find(|c| c.id == conversation).unwrap();
     assert_eq!(busy.group_round.as_ref().unwrap().pending_bot_ids, [beta.clone(), gamma.clone()]);
     let (status, body) = h.send(&conversation, "Interleaved").await;
-    assert_eq!((status, body["error"].as_str()), (409, Some("Another reply is still running. Wait for it to finish or stop it, then send again.")));
+    assert_eq!(status, 202, "the next group request is accepted durably: {body}");
+    assert_eq!(h.conversation(&conversation), busy, "a queued round never overwrites the live speaker");
+    let work = h.state().work_queue.into_iter().find(|work| work.conversation_id == conversation).expect("next group request waits");
+    assert_eq!(work.bot_id, alpha);
+    assert!(matches!(&work.kind, grok_bot_model::WorkKind::User { text, .. } if text == "Interleaved"));
     let (status, _) = h.post(&format!("/api/conversations/{conversation}/cancel"), json!({})).await;
     assert_eq!(status, 200);
     h.provider.release.notify_waiters();
     let cancelled = h.settled(&conversation, 13).await;
     assert_eq!(cancelled.run.status, RunStatus::Cancelled);
+    assert!(!h.state().work_queue.iter().any(|work| work.conversation_id == conversation), "Stop removes that conversation's pending next round too");
     tokio::time::sleep(Duration::from_millis(1500)).await;
     let after = h.conversation(&conversation);
     assert_eq!(after.messages.len(), 13, "no queued member answered after cancellation");

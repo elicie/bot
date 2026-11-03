@@ -184,7 +184,8 @@ pub(super) async fn custom_mcp_servers(f: &Fixture) {
     assert_eq!(lookup.status, ToolStatus::Completed);
     assert_eq!(fixture.lock().unwrap().calls.len(), 2);
 
-    // Secrets never reach the model, the snapshots, or any file but state.json.
+    // Secrets stay out of the model, snapshots and engine files. The primary private state
+    // and its required create-once private rollback backup intentionally retain stored values.
     let everything = serde_json::to_string(&f.provider.inference()).unwrap();
     assert!(!everything.contains(SECRET));
     assert!(!serde_json::to_string(&f.public()).unwrap().contains(SECRET));
@@ -192,7 +193,12 @@ pub(super) async fn custom_mcp_servers(f: &Fixture) {
     // The terminal run is visible in memory before its atomic write finishes. Scan only after
     // that write drains, otherwise its private state.json.<uuid>.tmp can appear mid-replacement.
     f.store.flush().await.unwrap();
-    assert_eq!(files_containing(&data_dir, SECRET.as_bytes()), [data_dir.join("state.json")]);
+    let backup = data_dir.join(grok_bot_store::PRE_WORK_QUEUE_BACKUP);
+    let mut stored = files_containing(&data_dir, SECRET.as_bytes());
+    stored.sort();
+    assert_eq!(stored, [data_dir.join("state.json"), backup.clone()]);
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(backup).unwrap().permissions().mode() & 0o777, 0o600);
     let engine_home = std::env::var("GROK_HOME").map(std::path::PathBuf::from).unwrap();
     let leaked = files_containing(engine_home.parent().unwrap(), SECRET.as_bytes());
     assert!(leaked.is_empty(), "engine files with the secret: {leaked:?}");

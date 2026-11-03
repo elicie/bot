@@ -15,6 +15,7 @@ mod maintenance;
 mod mcp_apps_http;
 mod mcp_initial_search;
 mod mcp_probe_shutdown;
+mod per_bot_concurrency;
 mod permissions_webhooks;
 mod provider_relay;
 mod runtime;

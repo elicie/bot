@@ -370,6 +370,9 @@ pub struct RunState {
     /// Empty string until the first run starts.
     pub id: String,
     pub status: RunStatus,
+    /// The executing bot, including a group's current speaker. Absent in legacy state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -385,7 +388,7 @@ pub struct RunState {
 
 impl RunState {
     pub fn idle() -> Self {
-        Self { id: String::new(), status: RunStatus::Idle, error: None, permission: None, todos: None, started_at: None, finished_at: None }
+        Self { id: String::new(), status: RunStatus::Idle, bot_id: None, error: None, permission: None, todos: None, started_at: None, finished_at: None }
     }
 }
 
@@ -550,6 +553,11 @@ pub struct Bot {
     pub knowledge: Option<Vec<KnowledgeFile>>,
 }
 
+/// Default maximum number of simultaneous model turns across different bots.
+pub const DEFAULT_MAX_CONCURRENT_RUNS: u32 = 3;
+pub const MIN_MAX_CONCURRENT_RUNS: u32 = 1;
+pub const MAX_MAX_CONCURRENT_RUNS: u32 = 16;
+
 /// Persisted provider settings, including the secret API key. Never sent to browsers.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -558,6 +566,15 @@ pub struct PrivateSettings {
     pub model: String,
     pub workspace: String,
     pub api_key: String,
+    /// Absent in legacy state: use three global slots. Each bot still has only one slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_runs: Option<u32>,
+}
+
+impl PrivateSettings {
+    pub fn max_concurrent_runs(&self) -> usize {
+        self.max_concurrent_runs.unwrap_or(DEFAULT_MAX_CONCURRENT_RUNS) as usize
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -567,6 +584,8 @@ pub struct PublicSettings {
     pub model: String,
     pub has_api_key: bool,
     pub workspace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_runs: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -579,6 +598,9 @@ pub struct SettingsInput {
     pub api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clear_api_key: Option<bool>,
+    /// Omission preserves the stored limit (or the legacy default of three).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_runs: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -687,6 +709,50 @@ pub struct RoutineRun {
     pub result: Option<RoutineResult>,
 }
 
+/// Durable pending model work. The vector in [`DiskState::work_queue`] is the canonical FIFO:
+/// timestamps are historical metadata, never a reason to reorder accepted work.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueuedWork {
+    pub id: String,
+    /// The actual bot that will execute this turn, not a group's ID.
+    pub bot_id: String,
+    /// A group user request's accepted speaker order. Renaming bots must not move accepted work
+    /// between FIFO lanes by changing how an already-accepted mention is parsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_bot_ids: Option<Vec<String>>,
+    pub conversation_id: String,
+    pub created_at: String,
+    #[serde(flatten)]
+    pub kind: WorkKind,
+}
+
+/// Specialized records retain their source of truth; these variants point to ready work there.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum WorkKind {
+    User {
+        text: String,
+        #[serde(default)]
+        attachments: Vec<Attachment>,
+    },
+    Routine {
+        run_id: String,
+    },
+    Delivery {
+        delivery_id: String,
+    },
+    Group {
+        round_id: String,
+    },
+    /// One pointer per source conversation, anchored to its first queued report.
+    Report {
+        delivery_id: String,
+    },
+}
+
+pub type QueuedWorkKind = WorkKind;
+
 /// `state.json`. Field order and names match the Node implementation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -706,6 +772,8 @@ pub struct DiskState {
     pub bot_exchanges: Vec<BotExchange>,
     #[serde(default)]
     pub bot_deliveries: Vec<BotDelivery>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub work_queue: Vec<QueuedWork>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permission_rules: Vec<PermissionRule>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -736,6 +804,8 @@ pub struct AppState {
     pub routine_runs: Vec<RoutineRun>,
     pub bot_exchanges: Vec<BotExchange>,
     pub bot_deliveries: Vec<BotDelivery>,
+    #[serde(default)]
+    pub work_queue: Vec<QueuedWork>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permission_rules: Vec<PermissionRule>,
     /// Omitted when empty, like `state.json`.

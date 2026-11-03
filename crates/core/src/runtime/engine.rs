@@ -123,8 +123,8 @@ pub struct EngineManager {
 }
 
 impl EngineManager {
-    /// The engine for `key`, starting or restarting it as needed. The caller guarantees that no
-    /// other run is active (the store admits one active run at a time).
+    /// Share the host for the same provider across concurrent sessions. Provider replacement is
+    /// allowed only after every run settles: global settings mutations retain the aggregate idle guard.
     pub async fn acquire(&self, runtime: &Arc<Runtime>, engine_root: &Path, key: &ProviderKey, relay: Option<&RelayEndpoint>) -> Result<Engine> {
         let mut slot = self.slot.lock().await;
         if let Some(current) = slot.as_ref()
@@ -170,17 +170,21 @@ async fn route(runtime: Weak<Runtime>, mut events: mpsc::UnboundedReceiver<Engin
     loop {
         tokio::select! {
             biased;
-            event = events.recv() => {
-                let Some(event) = event else { break };
-                let Some(runtime) = runtime.upgrade() else { break };
-                dispatch(&runtime, event).await;
-            }
             Some(ack) = barriers.recv() => {
-                while let Ok(event) = events.try_recv() {
+                // Capture a finite prefix. Another session can keep streaming indefinitely;
+                // waiting for the entire shared channel to become empty would starve this turn.
+                let pending = events.len();
+                for _ in 0..pending {
+                    let Ok(event) = events.try_recv() else { break };
                     let Some(runtime) = runtime.upgrade() else { return };
                     dispatch(&runtime, event).await;
                 }
                 let _ = ack.send(());
+            }
+            event = events.recv() => {
+                let Some(event) = event else { break };
+                let Some(runtime) = runtime.upgrade() else { break };
+                dispatch(&runtime, event).await;
             }
         }
     }
