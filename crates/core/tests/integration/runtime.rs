@@ -440,11 +440,27 @@ async fn file_approvals_and_sessions(f: &Fixture) {
     let queued = f.public().work_queue.into_iter().find(|work| work.conversation_id == id).expect("the second user turn is queued");
     assert_eq!(queued.bot_id, pending.bot_id);
     assert!(matches!(&queued.kind, WorkKind::User { text, attachments } if text == "second simultaneous run" && attachments.is_empty()));
-    assert_eq!(f.get(&id), pending, "queue admission must not append messages or replace the approval run");
+    let assert_same_turn = |current: Conversation| {
+        assert_eq!(current.run, pending.run, "queue mutations must not replace the live approval run");
+        assert_eq!(
+            current.messages.iter().map(|message| (&message.id, message.role, &message.text)).collect::<Vec<_>>(),
+            pending.messages.iter().map(|message| (&message.id, message.role, &message.text)).collect::<Vec<_>>(),
+            "queue mutations must not append or replace transcript messages"
+        );
+        assert_eq!(
+            current.messages.iter().flat_map(|message| message.tools.iter().map(|tool| &tool.id)).collect::<Vec<_>>(),
+            pending.messages.iter().flat_map(|message| message.tools.iter().map(|tool| &tool.id)).collect::<Vec<_>>(),
+            "queued work must not inject tools into the active message"
+        );
+        let proposed = pending.messages.last().unwrap().tools.iter().find(|tool| tool.title == "Write notes.txt").unwrap();
+        assert_eq!(current.messages.last().unwrap().tools.iter().find(|tool| tool.id == proposed.id), Some(proposed));
+        // Existing search-tool notifications may legitimately finish while the write approval waits.
+    };
+    assert_same_turn(f.get(&id));
     assert_eq!(f.store.read(|state| state.active_count()), 1, "same-Bot requests never overlap");
     f.runtime.cancel_queued_turn(&id, &queued.id).await.unwrap();
     assert!(!f.public().work_queue.iter().any(|work| work.id == queued.id));
-    assert_eq!(f.get(&id), pending, "removing queued work leaves the approved-write scenario intact");
+    assert_same_turn(f.get(&id));
     assert_eq!(f.notes(), "original\n");
     let permission = pending.run.permission.clone().unwrap();
     assert_eq!(permission.paths, ["notes.txt"]);
