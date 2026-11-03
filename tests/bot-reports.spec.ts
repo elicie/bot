@@ -19,9 +19,6 @@ const gate = () => {
   return { promise: new Promise<MockCompletion>(resolve => { release = resolve; }), release: (reply: MockCompletion) => release(reply) };
 };
 
-// Follow-up ("report") turns exist only in the Rust backend.
-test.skip(process.env.GROK_BOT_BACKEND !== 'rust', 'Bot follow-up turns are implemented by the Rust backend only.');
-
 test('a finished bot delivery is reported back in a follow-up reply with a marker instead of the raw report input', async ({ page }) => {
   const app = await startTestApp();
   let recipientId = '';

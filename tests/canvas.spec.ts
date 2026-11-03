@@ -173,7 +173,6 @@ test('secret projection changes refresh the same revision without saving masked 
 });
 
 test('group and thread canvases keep their exact conversation ownership', async ({ page }) => {
-  test.skip(process.env.GROK_BOT_BACKEND !== 'rust', 'Group routes belong to the Rust backend during migration.');
   const app = await startTestApp(); const provider = await startMockProvider();
   try {
     await page.setViewportSize({ width: 1440, height: 900 });

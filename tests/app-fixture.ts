@@ -22,26 +22,29 @@ export async function startTestApp(options: { network?: boolean; hostname?: stri
   await new Promise<void>(resolve => listener.close(() => resolve()));
   const url = `http://${options.network ? options.hostname ?? 'grok-bot.test' : '127.0.0.1'}:${port}`;
   const probeUrl = `http://127.0.0.1:${port}`;
-  // GROK_BOT_BACKEND=rust runs the Rust server binary against the built frontend (`npm run build`).
-  const rust = process.env.GROK_BOT_BACKEND === 'rust';
+  // Build the frontend and Rust debug server before running e2e (`npm run build && npm run build:server`).
   const rustBinary = process.env.GROK_BOT_SERVER_BIN ?? join(process.cwd(), 'target', 'debug', 'grok-bot');
-  const [command, args] = rust ? [rustBinary, []] : [process.execPath, ['--import', 'tsx', 'server/index.ts', '--dev']];
-  const child: ChildProcess = spawn(command, args, {
+  const child: ChildProcess = spawn(rustBinary, [], {
     cwd: process.cwd(),
-    env: { ...process.env, HOST: options.network ? '0.0.0.0' : '127.0.0.1', PORT: String(port), GROK_BOT_ALLOWED_HOSTS: options.network ? options.hostname ?? 'grok-bot.test' : '', GROK_BOT_DATA_DIR: dataDir, NODE_ENV: 'test', ...options.env },
+    env: { ...process.env, HOST: options.network ? '0.0.0.0' : '127.0.0.1', PORT: String(port), GROK_BOT_ALLOWED_HOSTS: options.network ? options.hostname ?? 'grok-bot.test' : '', GROK_BOT_DATA_DIR: dataDir, GROK_BOT_WEB_ROOT: join(process.cwd(), 'dist'), NODE_ENV: 'test', ...options.env },
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: process.platform !== 'win32',
   });
   let logs = '';
+  let spawnError: Error | undefined;
+  let closed = false;
+  child.once('error', error => { spawnError = error; });
+  child.once('close', () => { closed = true; });
   child.stdout?.on('data', chunk => { logs += chunk.toString(); });
   child.stderr?.on('data', chunk => { logs += chunk.toString(); });
   const stop = async () => {
-    if (child.exitCode === null && child.pid) {
-      const exited = new Promise<void>(resolve => child.once('exit', () => resolve()));
+    if (!closed && child.exitCode === null && child.signalCode === null && child.pid) {
+      const exited = new Promise<void>(resolve => child.once('close', () => resolve()));
       try { process.kill(process.platform === 'win32' ? child.pid : -child.pid, 'SIGTERM'); } catch {}
       await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 4000))]);
-      if (child.exitCode === null) {
+      if (!closed && child.exitCode === null && child.signalCode === null) {
         try { process.kill(process.platform === 'win32' ? child.pid : -child.pid, 'SIGKILL'); } catch {}
+        await exited;
       }
     }
     await rm(root, { recursive: true, force: true });
@@ -49,7 +52,8 @@ export async function startTestApp(options: { network?: boolean; hostname?: stri
   try {
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
-      if (child.exitCode !== null) throw new Error(`Application exited: ${logs}`);
+      if (spawnError) throw new Error(`Could not start Rust server at ${rustBinary}: ${spawnError.message}. Run npm run build:server first.`, { cause: spawnError });
+      if (closed || child.exitCode !== null || child.signalCode !== null) throw new Error(`Application exited (${child.signalCode ?? child.exitCode}): ${logs}`);
       try {
         const response = await fetch(`${probeUrl}/api/state`);
         if (response.ok) return { url, workspace, dataDir, root, stop, logs: () => logs };

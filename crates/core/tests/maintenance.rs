@@ -28,6 +28,7 @@ impl Fixture {
             data_dir: root.join("data"),
             engine_root: engine.to_path_buf(),
             web_root: None,
+            embedded_web: None,
             allowed_hosts: Vec::new(),
             now: None,
             scheduler: Some(SchedulerOptions { auto_start: false, ..SchedulerOptions::default() }),

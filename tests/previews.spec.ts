@@ -126,10 +126,8 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
   });
 }
 
-// The Rust server relays provider traffic and turns OpenRouter-style `images` into stored, linked
-// images; the Node backend has no relay.
+// The provider relay turns OpenRouter-style `images` into stored, linked images.
 test('provider-generated images appear in the reply and open full screen', async ({ page }) => {
-  test.skip(process.env.GROK_BOT_BACKEND !== 'rust', 'The provider relay exists only in the Rust server.');
   const app = await startTestApp();
   const provider = await startMockProvider({ reply: request => request.tools?.some(tool => tool.function.name === 'search_tool') ? { images: [`data:image/png;base64,${pixel}`] } : { text: '차트' } });
   const errors: string[] = [];

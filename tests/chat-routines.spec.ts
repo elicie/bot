@@ -8,7 +8,6 @@ const routine = { name: '아침 브리핑', prompt: '오늘 할 일을 정리해
 
 // Routines are set up by asking the bot in chat; each save waits for a one-use approval.
 test('a bot creates a routine from chat after approval and the card opens the routines view', async ({ page }) => {
-  test.skip(process.env.GROK_BOT_BACKEND !== 'rust', 'Chat-managed routines are implemented by the Rust server.');
   const app = await startTestApp();
   let stage = 0;
   const provider = await startMockProvider({ reply: request => {

@@ -3,13 +3,14 @@
 //   web=true|false      web UI typecheck and build
 //   rust=true|false     rustfmt check (and clippy/tests for `packages`)
 //   packages=...        `-p <crate>` flags including reverse dependents, `--workspace`, or empty
-//   node=...            Node backend tests to run: `all`, a space-separated file list, or empty
-//   specs=...           Playwright spec files that changed, or empty
-//   tools=true|false    CI script tests (independent of the app suites)
+//   unit=...            existing unit test files that changed, space-separated (tests/*.test.ts, scripts/*.test.mjs)
+//   specs=...           existing Playwright spec files that changed, or empty
+//   release=true|false  standalone Rust release build and smoke check, only for release-path changes
+//   tools=true|false    CI diagnostic script tests (independent of the app suites)
 // Usage: git diff --name-only <base>...HEAD | node scripts/ci-changes.mjs
 // There is no full-suite mode: every run, including one that edits CI itself, checks only what changed.
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -25,7 +26,7 @@ const isCrateDocumentation = file => /^(?:crates\/[^/]+\/|engine\/)(?:README(?:\
 const isCrateFile = file => !isCrateDocumentation(file)
   && (/^(crates\/|engine\/)/.test(file) || file.endsWith('.rs') || file.endsWith('/Cargo.toml'));
 const isRustBuildFile = file => /^(\.cargo\/|rust-toolchain(?:\.toml)?$)/.test(file)
-  || ['Cargo.toml', 'Cargo.lock', 'scripts/cargo.mjs', 'scripts/rust-env.mjs', 'scripts/build-engine.mjs'].includes(file);
+  || ['Cargo.toml', 'Cargo.lock', 'scripts/cargo.mjs', 'scripts/rust-env.mjs'].includes(file);
 
 const affectedPackages = (files, cwd, loadMetadata) => {
   const crateFiles = files.filter(isCrateFile);
@@ -63,7 +64,9 @@ const affectedPackages = (files, cwd, loadMetadata) => {
   return members.filter(pkg => selected.has(pkg.id)).map(pkg => pkg.name).sort().map(name => `-p ${name}`).join(' ');
 };
 
-export function selectChanges(changedFiles, { cwd = root, loadMetadata = () => readCargoMetadata(cwd) } = {}) {
+export function selectChanges(changedFiles, {
+  cwd = root, loadMetadata = () => readCargoMetadata(cwd), fileExists = existsSync,
+} = {}) {
   const files = [...new Set(changedFiles.map(file => file.trim()).filter(Boolean))];
   const under = prefix => files.some(file => file.startsWith(prefix));
   const tools = under('scripts/ci-') || files.includes('.github/workflows/ci.yml');
@@ -72,12 +75,14 @@ export function selectChanges(changedFiles, { cwd = root, loadMetadata = () => r
   // Formatting configuration alone needs only the format check, not crate lints and tests.
   const rust = packages !== '' || files.some(file => ['rustfmt.toml', '.rustfmt.toml'].includes(file));
 
-  // The Node backend has no per-module test mapping: a backend change runs its whole (fast)
-  // suite, otherwise only the Node test files that changed.
-  const nodeTests = files.filter(file => /^tests\/[^/]+\.test\.ts$/.test(file));
-  const node = under('server/') ? 'all' : nodeTests.join(' ');
-  const specs = files.filter(file => /^tests\/[^/]+\.spec\.ts$/.test(file)).join(' ');
-  return { web, rust, packages, node, specs, tools };
+  // Rust is the only backend. Unit tests and browser specs stay changed-only, even for
+  // frontend, fixture, build or CI edits. Ignore deleted paths rather than trying to run them.
+  const existingTests = pattern => files.filter(file => pattern.test(file) && fileExists(path.resolve(cwd, file))).join(' ');
+  const unit = existingTests(/^(?:tests\/[^/]+\.test\.ts|scripts\/[^/]+\.test\.mjs)$/);
+  const specs = existingTests(/^tests\/[^/]+\.spec\.ts$/);
+  // The opt-level-3 release build is slow; run it only when the release path itself changes.
+  const release = under('crates/server/') || files.some(file => ['crates/core/src/web.rs', 'scripts/verify-release.mjs'].includes(file));
+  return { web, rust, packages, unit, specs, release, tools };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -1,8 +1,82 @@
 # Verification
 
-Verified on Linux x86_64 with Node.js 24.18.0, Rust 1.98.0, app engine 0.1.0 linked to Grok Build source `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8`, ACP SDK 2.2.0, and Google Chrome through Playwright.
+## Current Rust-only check commands
 
-## Automated checks
+The current backend is the Rust server with an in-process engine library. Node.js 22.12+ is frontend/build/test tooling, not a release-runtime dependency. Run these commands from the checkout with the native build prerequisites in [README.md](<../README.md#실행>) installed:
+
+```sh
+npm run typecheck
+npm test
+npm run test:rust
+npm run build
+npm run build:server
+npm run test:e2e
+npm run build:release
+node scripts/verify-release.mjs target/release/grok-bot
+```
+
+`npm test` retains frontend unit tests; `npm run test:rust` covers the Rust workspace backend and engine tests. Playwright uses Rust by default with no backend selection flag or Rust-only e2e alias. Its build order is frontend, debug server, then e2e. Fixtures use temporary data/workspaces and a local OpenAI-compatible provider, not paid model calls. Browser checks and managed computing require system Google Chrome and its working sandbox.
+
+`build:release` runs `npm run build` followed by `node scripts/cargo.mjs build --locked --release -p grok-bot-server`. [crates/server/build.rs](<../crates/server/build.rs>) embeds the compiled [dist/](<../dist/>) for release builds. Release compilation must fail rather than produce a UI-less artifact when the frontend output is absent. Debug builds never embed frontend output: they serve [dist/](<../dist/>) in the current working directory, or run API-only when it is absent. Their build script does not watch frontend output. An explicit `GROK_BOT_WEB_ROOT` takes precedence and must contain `index.html`.
+
+## Rebased review verification
+
+### Latest main merge after the owner's merge-order change
+
+The owner's 2026-11-02 follow-up makes P4 the first PR to merge and authorizes merging `main` at `a1a9227` into this branch, superseding the earlier dependency hold. Canvas, composer, MCP App protocol and browser tests are retained. Only Node-backend tests are removed: the original 13 plus `canvas.test.ts` and `mcp-app-store.test.ts` (15 total); the orphaned Node-test diagnostic helper is removed too. Canvas and MCP App storage/runtime functionality stays in Rust, not silently dropped with the legacy modules.
+
+- Retention check passed: clean `npm ci`, 113 frontend unit assertions, TypeScript and Vite build.
+- Targeted Rust canvas/model/store and integrated canvas HTTP, MCP Apps, initial MCP discovery, probe shutdown, maintenance, runtime and scheduler checks passed (32 tests). These include the real scripted engine scenarios, not filename-presence-only checks.
+- Preserved-feature browser acceptance passed: 48 scenarios across the 11 changed specs plus the directly relevant canvas-read spec, with no backend opt-in variable or migration skip. This is a focused retention run, not an automatic full-suite expansion.
+- The merged release compiled and passed the copied-binary standalone smoke, including embedded assets, ETag/304, authenticated engine turn, Host/API guards, clean shutdown and explicit disk override.
+- Selector and CI diagnostics/service unit regressions passed; the final current-head CI and renewed independent-review result are recorded in PR #28. Earlier results below remain revision-bound evidence, not proof of an unreviewed merge.
+
+### Earlier reviewed base before the dependency hold
+
+The review worktree was rebased onto `origin/main` at `576aa44`, including bounded MCP probes, update maintenance/backups, cancellation fixes, per-runner Cargo cache limits, and sidebar text previews. `HttpContext::new` keeps private probe lifecycle state initialized for the backend and the maintenance/report test hosts. The service updater passes its immutable staged frontend to the release embedder through `GROK_BOT_BUILD_WEB_ROOT`, rather than requiring or embedding a stale checkout bundle. The review corrected the claim that every removed Node backend test had a Rust replacement: scheduler concurrency coverage was incomplete. Backend tests now run in the Rust workspace, but their number alone does not establish coverage parity.
+
+Review-era results are separate from the actual earlier P4 evidence below:
+
+- **Passed during review:** clean `npm ci`, TypeScript check, and Vite build with the merged MCP frontend; four targeted core web unit tests, one real-HTTP web test, and the merged MCP-probe shutdown test. These targeted runs precede the final workspace rerun.
+- **Passed build-script guards:** the real [build script](<../crates/server/build.rs>) in a dependency-free Cargo fixture leaves repeated no-dist debug builds fresh, including after frontend output is created; release rejects missing frontend output, embeds newly added assets, and rejects symlinks. These fixture checks do not replace the release/server runtime smoke below.
+- **Passed:** `umask 0022; npm run test:rust`, `cargo fmt --all --check`, and workspace/all-target clippy with `-D warnings`, including the new [scheduler integration harness](<../crates/core/tests/scheduler.rs>) and [gated provider](<../crates/core/tests/scheduler/provider.rs>). Its six scenario groups cover global serialization/FIFO, overlapping ticks, both manual/scheduled race orders with held and immediate completions, duplicate HTTP/manual admission, queued/active cancellation, shutdown and durable-queue recovery, and automatic polling/repeated starts. Provider prompts and actual persisted execution/result state are asserted. The scheduler target also passed three isolated runs; no scheduler production behavior changed.
+- **Passed integration acceptance:** all nine changed Chrome specs: 29 scenarios, no skips, about one minute locally. The newly merged sidebar spec was migrated away from the removed Node store and seeds disposable state from the real Rust schema. Unchanged browser specs were not included in this scoped rerun. Unchanged frontend unit suites were not rerun in this scoped pass; the earlier 11 frontend and 57 e2e passes remain earlier-revision evidence.
+- **Passed:** `npm run build:release` and the updated copied-binary standalone smoke (including immutable assets and conditional ETag/304 responses). The rebased Linux x86_64 artifact is about 248 MiB with `strip="debuginfo"`: `readelf` confirms `.symtab` retained and `.debug_info` absent. Actual debug-server probes confirm no-dist API200/root404, current cwd assets after restart, and changed disk content without recompilation. Supported CLI flags exit successfully; unknown or multiple flags reject.
+- **Passed integration guards:** the changed service-script suite (88 cases) and selector suite (10 cases). Only changed `.test.ts` / `.test.mjs` unit files are selected; unchanged frontend tests and browser specs are not broadened. A real dependency-free Cargo build with a staged path containing spaces, stale checkout output and an incorrect inherited build-root value embeds the forced staged bundle correctly. Per-runner cache/cap YAML wiring is retained for lint, tests, and release.
+- Independent AI approval for the exact base/head and the current CI result are recorded in [PR #28](https://github.com/elicie/bot/pull/28). A changed base or head requires renewed approval; the local evidence above does not imply merge approval or a merged PR.
+
+## Earlier P4 verification (2026-11-02, before rebase)
+
+Environment: Linux x86_64, Node.js 24.18.0, Rust 1.98.0, system Google Chrome. The implementation revision was `030794a6c87811e11b2d8dfb223a07e5e209f3a4`. These are actual earlier local checks, not claims about the rebased review revision. In particular, their release size, symbol stripping, debug embedding/precedence, and screenshot evidence describe that earlier implementation. GitHub Actions and final-head review are recorded separately in [PR #28](https://github.com/elicie/bot/pull/28).
+
+| Check | Command / required evidence | Earlier P4 result |
+| --- | --- | --- |
+| Frontend types and tests | Clean `npm ci`; `npm run typecheck`; `npm test`; `npm run build` | Passed. Both frontend suites retained: 11 tests, no skips. Retained dependency versions unchanged. |
+| Rust backend and engine | `umask 0022; npm run test:rust`; fmt and clippy with `-D warnings` | Passed. All workspace tests, no skips. Encoded reserved-namespace asset regressions and real HTTP disk/embedded precedence also passed on the reviewed source. |
+| Default Rust acceptance path | `npm run build && npm run build:server && npm run test:e2e` | Passed. All 57 Chrome tests / 26 specs, no skips; 2.6 minutes locally. |
+| Single release artifact | `npm run build:release` (also rerun after clean `npm ci`) | Passed. Optimized, stripped Linux x86_64 ELF, approximately 181 MiB. First uncached compilation took 18m20s locally. |
+| Independent runtime | `node scripts/verify-release.mjs target/release/grok-bot` | Passed. Only the executable is copied into a fresh directory; its PATH contains no executables. Embedded HTML/JS/CSS, HEAD, SPA, missing/reserved routes, Host guard and API checks pass; a real engine turn completes against the local mock provider; SIGTERM exits cleanly. |
+| CLI identity and notices | `./target/release/grok-bot --help`; `--version`; `--licenses`; an unknown flag | Passed. Version identifies app 0.1.0 and Grok Build `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8`; invalid flag exits nonzero. All four original notice/license files appear verbatim in the embedded output. |
+| External assets | Valid and invalid `GROK_BOT_WEB_ROOT` directories | Passed. Explicit override wins; missing `index.html` is rejected with an actionable error. |
+| Debug without frontend | Real locked debug compilation with the frontend temporarily moved aside, followed by startup from a fresh empty cwd | Passed. `/api/state` returns 200 and `/` returns 404 with no embedded or cwd frontend. The frontend was restored and normal debug/release builds passed again. |
+| Release without frontend | Real locked release compilation with the frontend temporarily moved aside | Passed. Compilation fails with the actionable `Release builds require dist/index.html` error. Separate build-script checks also covered recursive sorted embedding, rerun directives, and symlink rejection. |
+| Profile and native dependencies | Root [Cargo.toml](<../Cargo.toml>); `file` and `ldd` on the release artifact | Passed. `opt-level=3`, `debug=0`, `strip="symbols"`, `panic="unwind"`; stripped dynamic ELF links libz, libgcc_s, libm, libc and the ELF loader. |
+| Cleanup and retained frontend tests | Source/config review; `node --test scripts/ci-changes.test.mjs`; Cargo metadata | Passed. 13 Node-backend test files removed; both frontend suites retained. Selector 9/9 after the owner's scoped-CI adjustment; only workspace executable target is `grok-bot`. No backend selection gates/imports remain in active code/CI. |
+| User-visible build guidance | Same Settings → Updates scenario before/after | Passed. [Actual captures and revision/scenario details](<evidence/issue-21/README.md>), 1040 × 760 dark, plus 390/320 px. No page errors or horizontal overflow; UI-copy detector found no issues. |
+
+The host's inherited `umask 0077` exposed an existing, unrelated file-mode test assumption: saving an explicitly `0640` file produced `0600`, while the test expected `0640`. The full suite passed under CI's standard `umask 0022`; the file implementation and its permission test were not changed by P4. A read-only review also found an encoded API/internal path incorrectly classified as a SPA route; classification now runs after decoding and its regressions pass. No API authorization bypass was found.
+
+The release executable is intended to run from any working directory without the checkout, Node/npm, external frontend assets, or a standalone engine. This is not a static-link, cross-platform, or older-libc compatibility guarantee. Compatible Linux native libraries (including libc and zlib) remain necessary, and managed browsing still needs system Chrome. `panic="unwind"` preserves existing thread/task unwinding; no complete engine panic-recovery check is claimed here.
+
+Preserve [engine/NOTICE](<../engine/NOTICE>) and [engine/licenses](<../engine/licenses/>). `grok-bot --licenses` exposes the embedded original source notices, not a completed audit of all final Rust/npm dependencies. Redistribution still needs the applicable notices and covered-source availability; exact resolved-graph review, MPL source obligations, cross-platform releases, and reproducible binary hashes remain separate release work. See [source-engine.md](<source-engine.md#notices-and-redistribution>).
+
+## Historical verification — pre-P4
+
+Everything below records earlier source-engine/Node-backend and UI work. Obsolete commands, artifacts, test counts, live-server descriptions, and limits are retained as evidence of those runs, not as current instructions or claims about the P4 executable. Historical Rust P0–P3 results are separately preserved in [rust-migration.md](<rust-migration.md#p0-결과-2026-11-01>).
+
+The earlier environment was Linux x86_64 with Node.js 24.18.0, Rust 1.98.0, app engine 0.1.0 linked to Grok Build source `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8`, ACP SDK 2.2.0, and Google Chrome through Playwright.
+
+### Automated checks
 
 - `npm run build:engine` passed and produced the directly linked application executable and preserved source notices.
 - `npm run build` passed. It includes strict TypeScript checks and a Vite production build.
@@ -15,7 +89,7 @@ Verified on Linux x86_64 with Node.js 24.18.0, Rust 1.98.0, app engine 0.1.0 lin
 - After the correction/skills revision, production build and all 94 tests passed. All 22 browser scenarios passed before the final backend edge fixes; ten affected shared scenarios passed again afterward. The source detector returned no findings. Production restarted on `0.0.0.0:3000` with canonical private/public values unchanged apart from the monotonic revision, including credentials and both stored conversations. A live Chrome pass at 1040/390/320 px exercised skill draft retention/discard, connector limitations, routine return, and both saved conversations with zero page errors and zero API mutations. Loopback, devbox and the configured Tailscale hostname returned 200; foreign-origin mutation returned 403.
 - The Impeccable source detector returned no findings. Independent source and browser-artifact reviews identified issues that were fixed and retested.
 
-## Browser behavior
+### Browser behavior
 
 The browser tests start the actual application and its directly linked `.engine/grok-bot-engine` executable. The source-migration runs additionally used `PATH=/usr/bin:/bin`, where `grok` is unavailable, with Node invoked by absolute path. A deterministic local OpenAI-compatible server supplies model responses and tool calls. Tests use disposable local files and read the resulting bytes directly.
 
@@ -27,7 +101,7 @@ The routine browser scenarios additionally cover bot creation and model-only cha
 
 Deterministic routine tests cover migration, invalid persisted references, due boundaries, duplicate manual/scheduled commands, recurring coalescing, DST gaps and repeated hours, recovery of queued and interrupted work, pause/delete guards, frozen results, failed persistence, shutdown during claims, capacity admission, and continued dispatch of accepted work. HTTP tests verify queued-prompt protection, queued cancellation, secret redaction, retained history, and startup/shutdown integration.
 
-## Live-reference UI, bot messages, and computing
+### Live-reference UI, bot messages, and computing
 
 The authorized Mac audit used the running Grok Bot 0.78.1 accessibility API and measured positions and sizes. It covered sidebar variants, bot menus, details/library/computer tabs, avatar selection, settings sections, and an existing read-only pair transcript. No remote message or computer execution was triggered. The user then granted screen recording for `sshd-keygen-wrapper` and confirmed the separate `com.apple.sshd-session` prompt. Native window capture and read-only navigation succeeded. Captures of chat, details/library, sleeping computer, new bot, general settings, and compact mode were compared with Chrome images at 1040 × 760. The app was returned to its original main-chat state; private original captures stay temporary. The sanitized audit is in `docs/grok-bot-ui-audit.md`.
 
@@ -37,7 +111,7 @@ Real sandboxed Chrome tests exercise PNG dimensions, controls and coordinates, t
 
 Wrapper/privacy regressions cover stop-invalidated queue generations, replacement-owner races, locality based on socket addresses, already-open remote SSE and mutation snapshots with local-only approval/tool detail stubs, and retained remote file-approval behavior. Model observations omit unrelated allowlist metadata.
 
-## Private skills and bot-creation corrections
+### Private skills and bot-creation corrections
 
 The live original-app audit confirms the app-connection catalog, selected-bot private-skills list, and editable name/description/Markdown detail. Remote inspection stayed read-only. The local implementation persists bot-scoped instruction skills, enabled switches and optimistic revisions, imports strict SKILL.md text, prepares a request without replacing existing composer text, and saves model proposals after complete one-use review. External connector authentication, installation, publishing, sharing and executable workflows remain incomplete.
 
@@ -47,7 +121,7 @@ Chrome exercises actual API/disk-backed create/edit/toggle/delete, desktop and 3
 
 The bot-creation investigation reproduced rejected-save feedback below the visible form and added automatic error visibility. Six Chrome scenarios verify keyboard/pointer creation, default/custom avatars, retained drafts/errors, busy state, retry, cancellation and exact disk persistence at 1040/390/320 px. The cause of the user's reported creation failure remains undiagnosed.
 
-## Runtime and file boundaries
+### Runtime and file boundaries
 
 Tests cover path traversal, symlink parents, symlink files, hard-linked files, size and UTF-8 limits, optimistic content hashes, one-use approvals, stale permission decisions, interrupted startup recovery, session continuity, replay deduplication, inactive-provider termination, approval waits, and server-parent death. Real engine tests verify that only MCP discovery and invocation appear in the agent tool catalog, forbidden shell and native readers fail, and file-backed argument paths cannot bypass the broker. Source review identified pre-tool path expansion. Regressions now cover literal `@path`, whitespace-separated references, Markdown-wrapped paths, image-path placeholders, inline data URIs, Unicode-whitespace slash commands, and replacement-session history. An external file canary stays absent from all captured inference requests, and the original display text stays intact.
 
@@ -55,11 +129,11 @@ Model-only chat tests verify that HTTP and MCP file access stays unavailable unt
 
 Additional regressions verify streamed credential-prefix masking in every emitted snapshot, opaque public tool identifiers, complete review of limited write proposals, late-approval rejection, persisted state revisions, committed-state publication, and delayed HTTP snapshot rejection.
 
-## Review process
+### Review process
 
 The pstack poteto workflow separated backend and frontend ownership behind a shared typed contract. Source-engine work additionally separated runtime/API exploration, build/packaging experiments, runtime migration, UI copy, and a targeted prompt-ingestion review. That final review found the Unicode-whitespace slash case; a real-engine regression now covers it. Two independent design sketches and separate UI/runtime reviews shaped the result. Independent routine reviews found queued-prompt replacement, mutable history, capacity-dispatch, and hidden-draft issues; regression tests now cover the fixes. All reviewers used the session's inherited model. Cross-model review was unavailable under the session's model-selection constraints. The comment review retained one explanation of the scheduler dependency's DST behavior and found zero suppression directives. The live-reference revision separated avatar, settings, bot-delivery, and managed-browser work. An independent computer integration review found ownership cleanup, local-permission disclosure, preview identity, unrelated cancellation, and excess metadata issues; targeted source and browser regressions cover the resulting fixes.
 
-## Limits
+### Limits at the time
 
 - The UI follows observed Grok Bot 0.78.1 window screenshots, accessibility geometry, and interactions. Captured states were visually compared and color/spacing/avatars refined; complete-product pixel equality remains unverified across fonts, independently drawn avatars, local feature extensions, and unobserved states. Original renderer bundles, fonts, and image assets are excluded.
 - Provider compatibility was exercised against a local OpenAI Chat Completions fixture. The user's actual provider and credentials were not supplied or tested.

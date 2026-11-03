@@ -4,26 +4,36 @@ Grok Build의 Rust 에이전트 코어를 직접 연결한 로컬 웹 앱입니�
 
 ## 실행
 
-Node.js 22.12 이상이 필요합니다. 엔진 소스 빌드에는 Rust stable, C/C++ 빌드 도구, `pkg-config`, zlib 개발 파일, `unzip`, `ripgrep`이 필요합니다. 검증 환경은 Linux x86_64, Node.js 24, Rust 1.98입니다. 엔진은 프로젝트 안에 빌드되며 별도 Grok Build CLI 설치 과정은 없습니다.
+Rust 실행 파일 하나가 웹 화면, API, Grok Build 엔진을 함께 제공합니다. 소스 빌드에는 Node.js 22.12 이상, Rust stable, C/C++ 빌드 도구, `pkg-config`, zlib 개발 파일, `unzip`, `ripgrep`이 필요합니다. Node/npm은 프론트엔드 빌드·개발 스크립트·테스트에만 사용하며 배포 실행에는 필요하지 않습니다. 별도 Grok Build CLI나 엔진 실행 파일을 설치하지 않습니다.
 
 ```sh
-npm install
-npm run build:engine
+npm ci
 npm run dev
 ```
 
-`build:engine`은 고정한 Grok Build 소스와 `engine/Cargo.lock`으로 `.engine/grok-bot-engine`을 만듭니다. 첫 빌드는 Rust 의존성을 내려받고 컴파일하므로 시간이 걸립니다. Linux x86_64에서는 체크섬을 확인한 Protocol Buffers 컴파일러를 자동 준비합니다. 다른 환경에서는 `PROTOC`에 컴파일러의 절대 경로를 지정할 수 있으며, 해당 환경의 동작은 추가 검증이 필요합니다. 소스와 빌드 의존성이 변경되면 엔진을 다시 빌드하고 앱을 재시작합니다.
+`npm run dev`는 프론트엔드를 빌드하고 Rust debug 서버를 빌드·실행합니다. Vite HMR이나 자동 재시작을 제공하는 명령은 아닙니다. `npm start`는 Cargo 래퍼로 Rust debug 서버를 실행하며 프론트엔드는 다시 빌드하지 않습니다. 화면 소스를 바꿨다면 `npm run dev`로 다시 빌드·실행합니다.
+
+첫 빌드는 고정한 Grok Build 소스와 의존성을 내려받고 컴파일하므로 시간이 걸립니다. Rust 의존성은 루트 [Cargo.lock](<Cargo.lock>)으로 고정합니다. [Cargo 래퍼](<scripts/cargo.mjs>)는 Linux x86_64에서 체크섬을 확인한 Protocol Buffers 컴파일러를 자동 준비합니다. 다른 빌드 환경에서는 `PROTOC`에 컴파일러의 절대 경로를 지정할 수 있으며, 해당 환경의 동작은 추가 검증이 필요합니다.
 
 브라우저에서 `http://127.0.0.1:3000`을 엽니다. 포트를 바꾸려면 `PORT=3100 npm run dev`로 실행합니다.
 
 네트워크에서 접속하려면 `HOST=0.0.0.0 npm run dev` 또는 빌드 후 `HOST=0.0.0.0 npm start`로 실행합니다. 이 컴퓨터의 IPv4 주소, 컴퓨터 이름, `<컴퓨터 이름>.local`로 접속할 수 있습니다. Tailscale DNS 등의 추가 이름은 `GROK_BOT_ALLOWED_HOSTS=devbox.example.net,other.example.net`으로 지정합니다. 호스트 이름은 대소문자와 마지막 마침표를 정규화하며, 동일 출처 검사는 유지합니다. 로그인 기능이 없으므로 신뢰하는 네트워크에서 사용합니다.
 
-배포용 빌드를 같은 컴퓨터에서 실행하려면 다음 명령을 사용합니다.
+### 배포용 단일 실행 파일
+
+저장소 루트에서 다음 명령을 실행합니다. 개발 서버를 먼저 실행할 필요는 없습니다.
 
 ```sh
-npm run build
-npm start
+npm ci
+npm run build:release
+./target/release/grok-bot
 ```
+
+`npm run build:release`는 `npm run build`로 프론트엔드를 만든 뒤 `node scripts/cargo.mjs build --locked --release -p grok-bot-server`를 실행합니다. [서버 빌드 스크립트](<crates/server/build.rs>)가 컴파일 시 [dist/](<dist/>)를 내장하므로 release 빌드에는 먼저 프론트엔드 빌드가 필요합니다. `npm run build`만으로는 Rust 실행 파일을 만들지 않습니다.
+
+결과인 `target/release/grok-bot`을 복사하면 저장소 밖의 어느 작업 디렉터리에서도 실행할 수 있습니다. 실행 시 Node/npm, 별도 프론트엔드 폴더, standalone 엔진이 필요하지 않습니다. 예를 들어 `HOST=0.0.0.0 PORT=7777 /absolute/path/grok-bot`으로 실행합니다. 단일 실행 파일이 정적 링크나 운영체제 간 호환성을 보장하지는 않습니다. 빌드와 호환되는 Linux 네이티브 라이브러리(libc, zlib 등)가 필요하며, 관리형 브라우저 기능에는 시스템 Google Chrome과 동작하는 샌드박스가 필요합니다.
+
+[release 프로필](<Cargo.toml>)은 `opt-level = 3`, `debug = 0`, `strip = "debuginfo"`, `panic = "unwind"`를 사용합니다. 함수 심볼 이름은 보존하고 디버그 정보만 제거합니다. 엔진 스레드의 panic이 프로세스 전체를 즉시 종료하지 않고 unwind할 수 있어야 하므로 `panic = "abort"`로 바꾸지 않습니다. 외부 화면 파일을 쓰려면 `GROK_BOT_WEB_ROOT`를 명시하며 지정한 폴더에는 `index.html`이 있어야 합니다. Release는 내장 화면을 기본으로 사용합니다. Debug 빌드는 화면을 내장하지 않고 현재 작업 디렉터리의 [dist/](<dist/>)를 사용하며, 화면이 없어도 API 전용 검사를 실행할 수 있습니다. 자세한 구조와 이전 P4 결과·리뷰 수정 후 재검증 상태는 [Rust 전환 문서](<docs/rust-migration.md>)에 있습니다.
 
 ## 모델과 작업 폴더 연결
 
@@ -42,7 +52,7 @@ API 기본 주소에는 `/chat/completions`를 붙이지 않습니다. 모델은
 - 하단 입력창에서 Enter로 메시지를 보냅니다. Shift+Enter는 줄바꿈입니다.
 - 상단 **새 대화**로 대화를 나눕니다. 상단 **대화 기록**에서 이전 대화를 확인합니다. 원본에 없는 별도 최근 대화 섹션은 표시하지 않습니다. 실행 중인 작업은 **작업 중단**으로 취소합니다.
 - 대화와 루틴 주소는 `?bot=…&conversation=…` 형태의 쿼리 매개변수를 사용합니다. 새로고침과 브라우저 뒤로·앞으로 이동 시 선택한 대화를 유지합니다.
-- 여러 단계 작업에서 봇이 만든 **할 일** 목록을 답변 위에서 확인할 수 있습니다. 대기·진행 중·완료·취소됨 상태와 완료 개수를 표시하고, 제목을 눌러 접거나 펼칩니다. 마지막 목록은 새로고침·서버 재시작 뒤에도 남으며, 다음 턴이 시작되면 비웁니다. 목록은 봇의 진행 보고이며 사용자가 직접 체크하는 입력란은 아닙니다. [동작과 검증](docs/todos.md)을 참고하세요.
+- 여러 단계 작업에서 봇이 만든 **할 일** 목록을 답변 위에서 확인할 수 있습니다. 대기·진행 중·완료·취소됨 상태와 완료 개수를 표시하고, 제목을 눌러 접거나 펼칩니다. 마지막 목록은 새로고침·서버 재시작 뒤에도 남으며, 다음 턴이 시작되면 비웁니다. 목록은 봇의 진행 보고이며 사용자가 직접 체크하는 입력란은 아닙니다. [동작과 검증](<docs/todos.md>)을 참고하세요.
 - 상단 봇 이름을 누르면 **세부 정보 / 라이브러리 / 컴퓨터** 패널이 열립니다. **라이브러리**에서 대화에 사용한 파일을 선택하면 실제 편집기가 열립니다. 상단 **컴퓨터** 버튼이나 입력창의 **+**로 작업 폴더를 엽니다.
 - 텍스트 파일을 선택하고 내용을 편집한 뒤 **저장**을 누릅니다. 저장은 실제 디스크에 반영됩니다.
 - AI가 제안한 파일 생성·수정은 대화의 승인 카드에서 내용을 확인한 뒤 한 번씩 승인합니다. 거절하면 파일을 변경하지 않습니다.
@@ -62,7 +72,7 @@ API 기본 주소에는 `/chat/completions`를 붙이지 않습니다. 모델은
 
 **봇에게 만들기 요청**은 기존 작성 내용을 보존하고 대화 입력창에 요청을 준비합니다. 직접 보내면 봇이 전체 내용을 제안하고, **Save skill once**로 승인한 스킬만 저장합니다. 활성 스킬은 해당 봇의 이후 대화와 루틴에서 앱 도구를 통해 읽을 수 있습니다. 스킬은 기존 파일·컴퓨터·메시지 승인을 유지하며 실행 권한을 추가하지 않습니다. 봇 간 수신 대화는 대화 전용입니다.
 
-봇당 최대 100개, 활성 스킬 전체 지침은 128 KiB로 제한합니다. 외부 커넥터 계정 인증·설치, 스킬 게시·공유, 실행형 워크플로는 아직 구현되지 않았습니다. 실제 모델의 자율적인 스킬 선택·준수는 사용하는 공급자에서 추가 확인이 필요합니다. 원본 화면과 소스 조사 결과는 [스킬 조사 기록](docs/skills-gap-audit.md)에 정리했습니다.
+봇당 최대 100개, 활성 스킬 전체 지침은 128 KiB로 제한합니다. 외부 커넥터 계정 인증·설치, 스킬 게시·공유, 실행형 워크플로는 아직 구현되지 않았습니다. 실제 모델의 자율적인 스킬 선택·준수는 사용하는 공급자에서 추가 확인이 필요합니다. 원본 화면과 소스 조사 결과는 [스킬 조사 기록](<docs/skills-gap-audit.md>)에 정리했습니다.
 
 ## 봇 간 대화
 
@@ -103,7 +113,7 @@ Rust 서버에서는 Bot 세부 정보의 **사용자 지정 MCP 추가**로 로
 
 서버가 실행 중일 때 예약을 처리합니다. 전체 봇에서 한 작업씩 실행하며, 같은 루틴의 대기·실행 작업은 하나로 제한합니다. 서버 중단 동안 놓친 반복 일정은 한 번으로 합칩니다. 실행을 시작한 작업은 재시작 시 중단 상태로 남고, 자동 재실행하지 않습니다. 대기 상태로 저장된 작업은 재시작 후 이어서 처리합니다. 파일 수정은 루틴에서도 브라우저 승인이 필요합니다. 예약 실행은 저장된 모델 설정을 사용하므로 연결한 공급자의 요금이 발생할 수 있습니다.
 
-루틴은 최대 1,000개, 실행 기록은 최대 10,000개이며 상태 파일은 64 MiB로 제한합니다. 기존 기록을 자동 삭제하지 않습니다. 자세한 예약·복구 동작은 [docs/routines.md](docs/routines.md)에 정리했습니다.
+루틴은 최대 1,000개, 실행 기록은 최대 10,000개이며 상태 파일은 64 MiB로 제한합니다. 기존 기록을 자동 삭제하지 않습니다. 자세한 예약·복구 동작은 [docs/routines.md](<docs/routines.md>)에 정리했습니다.
 
 ## 로컬 실행과 보안 범위
 
@@ -117,42 +127,31 @@ Rust 서버에서는 Bot 세부 정보의 **사용자 지정 MCP 추가**로 로
 
 이 앱은 개인용 로컬 실행을 대상으로 합니다. 공개 포트나 리버스 프록시를 통한 인터넷 공개에는 별도의 인증과 배포 보안 설계가 필요합니다.
 
-## Rust 서버 (전환 중)
-
-백엔드를 Rust로 옮기는 중입니다. 설계와 진행 상황은 [docs/rust-migration.md](docs/rust-migration.md)에 있습니다. Rust 서버는 같은 화면과 데이터 폴더를 사용하며, 관리형 Chrome도 같은 보호 조건으로 제공합니다.
-
-```sh
-npm install
-npm run build          # 프론트엔드 dist/
-npm run build:server   # Rust 서버 (엔진 포함)
-HOST=0.0.0.0 PORT=7777 ./target/debug/grok-bot
-```
-
-`npm run test:rust`는 Rust workspace 테스트를, `npm run test:e2e:rust`는 Rust 서버를 대상으로 브라우저 테스트를 실행합니다. 처음 빌드할 때는 Rust 의존성을 컴파일하므로 시간이 걸립니다.
-
-7777 서버를 상시 운영하려면 [release 사용자 서비스·백업·업데이트 안내](docs/server-operations.md)를 따릅니다. `node scripts/service.mjs install`로 release 실행·부팅 자동 시작·journald 로그를 구성하고, 이후 `node scripts/service.mjs update` 한 번으로 빌드 → 답변 실행 차단 → 데이터 백업 → 재시작 → 상태 확인을 수행합니다. 기존 debug 서버의 첫 전환과 lingering 설정은 안내의 준비 절차가 필요합니다.
+7777 서버를 상시 운영하려면 [release 사용자 서비스·백업·업데이트 안내](<docs/server-operations.md>)를 따릅니다. `node scripts/service.mjs install`로 release 실행·부팅 자동 시작·journald 로그를 구성하고, 이후 `node scripts/service.mjs update` 한 번으로 빌드 → 답변 실행 차단 → 데이터 백업 → 재시작 → 상태 확인을 수행합니다. 기존 debug 서버의 첫 전환과 lingering 설정은 안내의 준비 절차가 필요합니다.
 
 ## 검증 명령
 
 ```sh
 npm run typecheck
-npm test
-npm run build
-npm run test:e2e
+npm test               # 프론트엔드 테스트
+npm run test:rust      # Rust 백엔드·엔진 workspace 테스트
+npm run build          # 프론트엔드
+npm run build:server   # Rust debug 서버 (내장 엔진 포함)
+npm run test:e2e       # Rust 서버 대상 브라우저 테스트
 ```
 
-테스트는 임시 작업 폴더와 로컬 OpenAI 호환 모의 서버를 사용합니다. `npm run build:engine`으로 만든 실제 앱 엔진을 사용하는 통합 테스트도 포함합니다. API 키나 유료 모델 호출은 필요하지 않습니다. 엔진이 없으면 실제 엔진 통합 테스트가 실패하므로 먼저 빌드해야 합니다.
+Rust 서버가 기본이자 유일한 백엔드입니다. 별도 백엔드 선택 환경 변수나 Rust 전용 e2e 명령은 사용하지 않습니다. 테스트는 임시 작업 폴더와 로컬 OpenAI 호환 모의 서버를 사용합니다. 실제 내장 엔진을 사용하는 Rust 통합 테스트도 포함하며, API 키나 유료 모델 호출은 필요하지 않습니다.
 
-브라우저 테스트는 Chromium을 사용합니다. Google Chrome이 설치되어 있어야 합니다. 테스트 출력은 `/tmp/grok-bot-playwright-results`에 저장됩니다.
+브라우저 테스트에는 Google Chrome이 필요합니다. 테스트 출력은 `/tmp/grok-bot-playwright-results`에 저장됩니다. 이전 P4의 전체 테스트·release·독립 실행 결과와 리베이스한 현재 수정본의 재검증 상태는 [검증 기록](<docs/verification.md>)에서 구분합니다.
 
 ## 구현 범위와 출처
 
-화면은 허가받은 Mac에서 실행 중인 Grok Bot 0.78.1의 접근성 UI·패널 치수·읽기 전용 탐색을 관찰해 직접 구현했습니다. 이전 0.18 스크린샷은 보조 자료로 사용했습니다. 관찰 범위는 [UI 조사 기록](docs/grok-bot-ui-audit.md)에 남겼습니다. 원본 renderer 번들·폰트·이미지 자산은 포함하지 않습니다. 사용자가 화면 기록 권한을 허용한 뒤 원본 창의 채팅·우측 패널·설정·새 봇·컴팩트 화면을 캡처해 색상과 간격을 비교했습니다. 로컬 기능 확장·시스템 폰트·독립 아바타와 미관찰 상태의 차이가 있어 제품 전체의 픽셀 동일성은 보장하지 않습니다.
+화면은 허가받은 Mac에서 실행 중인 Grok Bot 0.78.1의 접근성 UI·패널 치수·읽기 전용 탐색을 관찰해 직접 구현했습니다. 이전 0.18 스크린샷은 보조 자료로 사용했습니다. 관찰 범위는 [UI 조사 기록](<docs/grok-bot-ui-audit.md>)에 남겼습니다. 원본 renderer 번들·폰트·이미지 자산은 포함하지 않습니다. 사용자가 화면 기록 권한을 허용한 뒤 원본 창의 채팅·우측 패널·설정·새 봇·컴팩트 화면을 캡처해 색상과 간격을 비교했습니다. 로컬 기능 확장·시스템 폰트·독립 아바타와 미관찰 상태의 차이가 있어 제품 전체의 픽셀 동일성은 보장하지 않습니다.
 
-앱 엔진은 [Grok Build 소스 `2bdd1d6a6369`](https://github.com/xai-org/grok-build/tree/2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8)의 `xai-grok-shell` 라이브러리를 직접 사용합니다. 앱 소유 진입점은 `engine/src/main.rs`에 있습니다. Apache-2.0 라이선스와 원본 고지는 `engine/licenses/`와 빌드 결과의 `.engine/licenses/`에 보존합니다. 통합 경계는 [docs/source-engine.md](docs/source-engine.md)에 정리했습니다.
+앱 엔진은 [Grok Build 소스 `2bdd1d6a6369`](https://github.com/xai-org/grok-build/tree/2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8)의 `xai-grok-shell` 라이브러리를 직접 사용합니다. [engine/src/host.rs](<engine/src/host.rs>)가 `LocalSet` 전용 스레드에서 엔진을 실행하며 별도 엔진 바이너리는 만들지 않습니다. 원본 고지는 [engine/NOTICE](<engine/NOTICE>)와 [engine/licenses/](<engine/licenses/>)에 보존하며 `grok-bot --licenses`로 내장된 원문을 확인할 수 있습니다. `--help`와 `--version`은 사용법과 앱·엔진 소스 식별자를 표시합니다. 일반 서버 실행은 인자 없이 하며 위 환경 변수로 설정합니다. 지원하지 않는 플래그·위치 인자는 오류로 거절합니다. 실행 파일을 재배포할 때도 해당 라이선스·고지를 제공해야 합니다. 내장 고지만으로 최종 Rust/npm 의존성 전체의 고지와 필요한 소스 제공 의무가 충족된다고 보장하지 않습니다. 통합과 배포 확인 범위는 [소스 엔진 문서](<docs/source-engine.md>)에 정리했습니다.
 
 - [Grok Build](https://github.com/xai-org/grok-build)
 - [ACP 문서](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/15-agent-mode.md)
 - [OpenAI 호환 모델 설정](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md)
 
-이 프로젝트는 xAI 또는 원본 제품의 공식 클라이언트가 아닙니다. Grok Build와 사용한 의존성의 라이선스 및 모델 서비스 이용 조건은 각각 적용됩니다. 구조와 데이터 소유권은 [ARCHITECTURE.md](ARCHITECTURE.md)에 정리했습니다. 검증 결과와 확인 범위는 [docs/verification.md](docs/verification.md)에서 확인할 수 있습니다.
+이 프로젝트는 xAI 또는 원본 제품의 공식 클라이언트가 아닙니다. Grok Build와 사용한 의존성의 라이선스 및 모델 서비스 이용 조건은 각각 적용됩니다. 구조와 데이터 소유권은 [ARCHITECTURE.md](<ARCHITECTURE.md>)에 정리했습니다. 검증 결과와 확인 범위는 [docs/verification.md](<docs/verification.md>)에서 확인할 수 있습니다.

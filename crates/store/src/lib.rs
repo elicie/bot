@@ -1,23 +1,20 @@
-//! Durable application state. Port of `server/store.ts`, `server/skills.ts`,
-//! `server/bot-messages.ts` (data rules), and `server/routines.ts` (schedule math).
+//! Durable application state and data rules for bots, skills, deliveries, and routines.
 //!
-//! CONTRACT (owned by the store agent; signatures are fixed so other crates can build against them):
 //! - `Store` serializes all mutations, persists `state.json` atomically, bumps `revision`, and
 //!   broadcasts the redacted public snapshot after the write succeeds.
 //! - `State` holds the in-memory data. Read through `disk()`. Every `&mut` accessor marks the state
 //!   dirty; `Store::mutate` commits only when the closure returned `Ok` *and* the state is dirty.
-//!   A closure that returns `Err` must not have mutated anything (validate first, then apply),
-//!   exactly like the Node store.
+//!   A closure that returns `Err` must not have mutated anything: validate first, then apply.
 //! - Commit runs the `changed()` projections first: routine results from conversation runs and
 //!   bot delivery reconciliation.
 //!
-//! Design: `std::sync::Mutex<State>` guards the data and is never held across `.await`. A commit
-//! serializes `state.json` and the public snapshot under the lock and hands both to a dedicated
-//! writer thread through an ordered channel, so writes land and subscribers are notified in
-//! revision order. `mutate` resolves after its write is durable.
+//! `std::sync::Mutex<State>` guards the data and is never held across `.await`. A commit serializes
+//! `state.json` and the public snapshot under the lock and hands both to a dedicated writer thread
+//! through an ordered channel, so writes land and subscribers are notified in revision order.
+//! `mutate` resolves after its write is durable.
 //!
-//! Domain methods take the inputs the HTTP layer deserializes and perform the zod validation the
-//! Node routes did (`field: message` errors, status 400) before any other check.
+//! Domain methods validate deserialized HTTP inputs (`field: message` errors, status 400) before
+//! checking state or applying changes.
 
 pub mod attachments;
 mod bot_activity;

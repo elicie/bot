@@ -38,5 +38,9 @@ debug = 0
 incremental = false
 
 [profile.release]
+opt-level = 3
 debug = 0
+# Preserve function symbols for operational panic backtraces.
 strip = "debuginfo"
+# Keep engine/task panics unwindable; abort would take down the entire HTTP server.
+panic = "unwind"

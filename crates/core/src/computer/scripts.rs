@@ -1,5 +1,4 @@
-//! Page scripts of the managed computer, verbatim from `server/computer.ts` except the page-text
-//! walk of [`capture`], which is new in this port.
+//! Managed-browser page guards and bounded observation scripts.
 //!
 //! The init script runs in the page's main world before any page script and disables network and
 //! popup APIs and sensitive input events. The observation scripts run in a fresh isolated world

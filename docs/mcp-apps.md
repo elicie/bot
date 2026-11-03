@@ -2,7 +2,7 @@
 
 ## 지원 범위
 
-Rust 서버의 **사용자 지정 MCP 서버**가 제공하는 자체 포함 HTML 앱을 도구 활동 아래에 표시합니다. 일반 Markdown의 HTML/시각화 코드에는 도구 권한을 추가하지 않습니다. 기존 사용자 지정 MCP와 마찬가지로 Node 서버에서는 MCP 실행을 지원하지 않습니다. Node 상태 리더는 새 선택적 앱 필드를 보존하지만, Rust의 다른 기능까지 포함한 상태 파일의 교차 호환성을 새로 보장하지는 않습니다.
+Rust 서버의 **사용자 지정 MCP 서버**가 제공하는 자체 포함 HTML 앱을 도구 활동 아래에 표시합니다. 일반 Markdown의 HTML/시각화 코드에는 도구 권한을 추가하지 않습니다. Node 백엔드와 전용 상태 리더 테스트는 P4에서 제거했으며, 앱 필드 보존·검증·마스킹은 Rust 저장소와 해당 테스트가 담당합니다.
 
 도구 정의의 `_meta.ui.resourceUri`(이전 `_meta["ui/resourceUri"]`도 인식)를 받은 성공한 호출에 대해, 같은 서버 연결의 `resources/read`로 정확히 그 `ui://` URI를 읽습니다. 응답의 URI와 `text/html;profile=mcp-app` MIME을 확인한 뒤 문자열 HTML 또는 UTF-8 base64 HTML을 저장합니다. 실패하거나 한도를 넘으면 원래 도구 결과를 유지하며 앱을 표시할 수 없다는 안내를 붙입니다.
 
@@ -49,12 +49,12 @@ npx tsx examples/mcp-counter.ts
 npm ci
 npm run build
 npm run build:server
-GROK_BOT_BACKEND=rust npx playwright test tests/mcp-apps.spec.ts tests/visualizations.spec.ts
-npx tsx --test tests/mcp-app-protocol.test.ts tests/mcp-app-store.test.ts
+npx playwright test tests/mcp-apps.spec.ts tests/visualizations.spec.ts
+npx tsx --test tests/mcp-app-protocol.test.ts
 node scripts/cargo.mjs test --locked -p grok-bot-model -p grok-bot-store -p grok-bot-core
 ```
 
-[PR #31의 검증 기록](<https://github.com/elicie/bot/pull/31>)에 실제 실행 결과를 남겼습니다. 캔버스·대화 라우팅·현재 CI 변경을 통합한 구현 리비전 `b0d06f78bb7e33a0fc244f2cff5027d53b40fa0c` 기준으로 Rust 모델/저장소/코어 테스트 249개, 전체 Node 테스트 233개, 브라우저 인수/회귀 테스트 40개와 엄격한 Clippy·포맷·웹/서버 빌드가 통과했습니다. 시나리오는 실제 MCP 리소스 인식·표시, 매번 승인/거절, 승인 전 무호출, 결과 상관관계, 자동 승인 규칙 무시, 새로고침·디스크 저장, 전체 화면, 데스크톱/모바일, 출처·ID 재사용·늦은 응답·변경된 서버·크기/MIME/URI 거절을 포함합니다. 브라우저의 접근성 의미/키보드는 확인했지만 실제 보조기기 음성 출력은 검증하지 않았습니다.
+[PR #31의 검증 기록](<https://github.com/elicie/bot/pull/31>)에 P4 이전 리비전의 실제 실행 결과를 남겼습니다. 아래의 Node 검사 수는 그 당시의 증빙이며 현재 Node 백엔드 테스트나 P4 head의 결과를 뜻하지 않습니다. 캔버스·대화 라우팅·현재 CI 변경을 통합한 구현 리비전 `b0d06f78bb7e33a0fc244f2cff5027d53b40fa0c` 기준으로 Rust 모델/저장소/코어 테스트 249개, 전체 Node 테스트 233개, 브라우저 인수/회귀 테스트 40개와 엄격한 Clippy·포맷·웹/서버 빌드가 통과했습니다. 시나리오는 실제 MCP 리소스 인식·표시, 매번 승인/거절, 승인 전 무호출, 결과 상관관계, 자동 승인 규칙 무시, 새로고침·디스크 저장, 전체 화면, 데스크톱/모바일, 출처·ID 재사용·늦은 응답·변경된 서버·크기/MIME/URI 거절을 포함합니다. 브라우저의 접근성 의미/키보드는 확인했지만 실제 보조기기 음성 출력은 검증하지 않았습니다.
 
 ## 시각 비교
 

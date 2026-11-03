@@ -1,10 +1,29 @@
-//! Web server binary. Port of `server/index.ts`.
+//! Standalone web server: HTTP API, in-process engine, and embedded frontend.
 
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
 use grok_bot_core::app::{Backend, BackendOptions};
+
+mod cli;
+include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
+
+fn frontend() -> anyhow::Result<(Option<PathBuf>, Option<grok_bot_core::web::EmbeddedWeb>)> {
+    if let Some(root) = std::env::var_os("GROK_BOT_WEB_ROOT") {
+        let root = std::path::absolute(PathBuf::from(root))?;
+        if !root.join("index.html").is_file() {
+            bail!("GROK_BOT_WEB_ROOT must contain index.html: {}", root.display());
+        }
+        return Ok((Some(root), None));
+    }
+    if cfg!(debug_assertions) {
+        // Development always sees the latest frontend build, never a stale embedded copy.
+        let root = std::path::absolute("dist")?;
+        return Ok((root.join("index.html").is_file().then_some(root), None));
+    }
+    Ok((None, (!WEB_ASSETS.is_empty()).then_some(WEB_ASSETS)))
+}
 
 fn ipv4_addresses() -> Vec<Ipv4Addr> {
     let mut addresses = Vec::new();
@@ -43,6 +62,10 @@ fn configured_hosts() -> anyhow::Result<Vec<String>> {
 }
 
 fn main() -> anyhow::Result<()> {
+    if cli::handled()? {
+        return Ok(());
+    }
+    let (web_root, embedded_web) = frontend()?;
     let port: u16 = match std::env::var("PORT") {
         Ok(value) => value.parse().ok().filter(|p| *p >= 1).context("PORT must be an integer between 1 and 65535.")?,
         Err(_) => 3000,
@@ -58,7 +81,6 @@ fn main() -> anyhow::Result<()> {
     };
     let data_dir = std::path::absolute(data_dir)?;
     let engine_root = data_dir.join("engine");
-    let web_root = std::path::absolute(std::env::var_os("GROK_BOT_WEB_ROOT").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("dist")))?;
     let addresses = ipv4_addresses();
     let allowed_hosts = if host == "0.0.0.0" {
         let machine = hostname::get().ok().and_then(|n| n.into_string().ok()).unwrap_or_default();
@@ -81,16 +103,8 @@ fn main() -> anyhow::Result<()> {
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
-        let backend = Backend::new(BackendOptions {
-            data_dir,
-            engine_root,
-            web_root: web_root.join("index.html").is_file().then_some(web_root),
-            allowed_hosts,
-            now: None,
-            scheduler: None,
-            runtime: None,
-        })
-        .await?;
+        let backend =
+            Backend::new(BackendOptions { data_dir, engine_root, web_root, embedded_web, allowed_hosts, now: None, scheduler: None, runtime: None }).await?;
         let listener = match tokio::net::TcpListener::bind((host.as_str(), port)).await {
             Ok(listener) => listener,
             Err(error) => bail!("Local server could not start. {error}"),

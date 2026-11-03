@@ -1,4 +1,4 @@
-//! `/api/computer*` routes. Port of `installComputerRoutes` in `server/computer-api.ts`.
+//! Loopback-only `/api/computer*` routes for the managed browser.
 //!
 //! Every route requires a loopback socket (forwarded-address headers grant nothing): this server
 //! has no user authentication, and the managed browser acts from the server computer. Starts and

@@ -5,9 +5,6 @@ import { startTestApp } from './app-fixture';
 import { startMockProvider, type MockCompletion, type MockProviderRequest } from './mock-provider';
 import type { AppState } from '../shared/types';
 
-// Knowledge files and bot templates are implemented by the Rust server only.
-test.skip(process.env.GROK_BOT_BACKEND !== 'rust', 'Knowledge files and templates run against the Rust server.');
-
 const snapshot = (page: Page): Promise<AppState> => page.evaluate(async () => (await fetch('/api/state')).json());
 const details = (page: Page) => page.getByRole('complementary', { name: '대화 세부 정보', exact: true });
 async function openDetails(page: Page) {

@@ -1,5 +1,4 @@
-//! OpenAI-compatible provider check (`GET {baseUrl}/models`). Port of `checkProvider` in
-//! `server/store.ts`. CONTRACT (files agent).
+//! Bounded OpenAI-compatible provider check (`GET {baseUrl}/models`).
 
 use std::time::Duration;
 

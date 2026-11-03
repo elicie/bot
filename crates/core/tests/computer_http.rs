@@ -41,6 +41,7 @@ impl App {
             data_dir: root.join("data"),
             engine_root: root.join("engine"),
             web_root: None,
+            embedded_web: None,
             allowed_hosts: vec![lan.to_string()],
             now: None,
             scheduler: None,
