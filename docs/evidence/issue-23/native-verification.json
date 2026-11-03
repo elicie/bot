@@ -1,0 +1,25 @@
+{
+  "implementationRevision": "daefd99fea71ac564358502a73ea20b593db794f",
+  "runtime": "real Tauri application via tauri-driver/WebKitWebDriver",
+  "viewport": {
+    "width": 1040,
+    "height": 760
+  },
+  "theme": "dark",
+  "checks": [
+    "stopped web-state copy opens existing completed web chat in real Tauri",
+    "unauthenticated local HTTP rejected",
+    "real in-process engine chat in Tauri",
+    "file approval changes disk only after Allow once",
+    "Deny leaves approved file unchanged",
+    "reload re-authenticates and restores history",
+    "approved Bot message, recipient response and sender follow-up visible in Tauri",
+    "one-time scheduled routine runs automatically and UI opens its result conversation",
+    "routine result survives native UI refresh",
+    "ordinary app sandboxed srcdoc visualization becomes ready",
+    "authenticated image attachment renders from blob URL",
+    "user-clicked authenticated text attachment downloads exact bytes to original Downloads",
+    "ordinary Markdown link hands credential-free HTTP URL to OS-browser opener with original HOME, no native popup",
+    "original web import state unchanged byte-for-byte"
+  ]
+}
