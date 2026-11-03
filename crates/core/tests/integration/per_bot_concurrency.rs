@@ -3,9 +3,9 @@
 //! These scenarios drive a listening Backend, its live scheduler and the real in-process engine.
 //! Provider one-shot gates, store subscriptions and explicit scheduler fences establish ordering;
 //! no assertion depends on sleeping long enough for another task to run. The engine environment is
-//! process-global, so all scenarios share this binary's single #[test].
+//! process-global, so these related scenarios share one isolated integration case.
 
-mod common;
+use super::common;
 #[path = "scheduler/provider.rs"]
 mod provider;
 #[path = "per_bot_concurrency/scripted_provider.rs"]
