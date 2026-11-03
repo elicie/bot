@@ -20,7 +20,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   # Rust on the self-hosted runner: `rustup toolchain install <ver> --profile minimal -c clippy -c rustfmt`,
-  # plus `apt install mold sccache` and the sccache-grok-bot systemd unit (see docs/ci.md).
+  # plus `apt install sccache`, the sccache-grok-bot unit and the grok-bot-ci.slice memory cap (docs/ci.md).
   SELF_HOSTED_RUST: 1.98.0
   # Per-runner target dirs; with the shared sccache (20G) a cleared dir rebuilds quickly.
   SELF_HOSTED_TARGET_CAP_GB: 30
@@ -121,10 +121,6 @@ jobs:
             if systemctl is-active --quiet sccache-grok-bot; then
               { echo "RUSTC_WRAPPER=sccache"; echo "SCCACHE_SERVER_PORT=4231"; } >> "$GITHUB_ENV"
             fi
-            # mold links the many integration-test binaries (each embeds the engine) much faster than ld.
-            if command -v mold >/dev/null; then
-              echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
-            fi
           else
             dir="$GITHUB_WORKSPACE/target"
           fi
@@ -198,10 +194,6 @@ jobs:
             # server would be killed by the runner's orphan cleanup mid-way through the other runner's build.
             if systemctl is-active --quiet sccache-grok-bot; then
               { echo "RUSTC_WRAPPER=sccache"; echo "SCCACHE_SERVER_PORT=4231"; } >> "$GITHUB_ENV"
-            fi
-            # mold links the many integration-test binaries (each embeds the engine) much faster than ld.
-            if command -v mold >/dev/null; then
-              echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
             fi
           else
             dir="$GITHUB_WORKSPACE/target"
@@ -291,10 +283,6 @@ jobs:
             # server would be killed by the runner's orphan cleanup mid-way through the other runner's build.
             if systemctl is-active --quiet sccache-grok-bot; then
               { echo "RUSTC_WRAPPER=sccache"; echo "SCCACHE_SERVER_PORT=4231"; } >> "$GITHUB_ENV"
-            fi
-            # mold links the many integration-test binaries (each embeds the engine) much faster than ld.
-            if command -v mold >/dev/null; then
-              echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
             fi
           else
             dir="$GITHUB_WORKSPACE/target"

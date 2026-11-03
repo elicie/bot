@@ -138,17 +138,19 @@ job and whether the Rust cache actually restored; do not infer a guarantee from 
 single run. New reverse-dependent coverage can increase the work for low-level
 crate changes, intentionally trading some selectivity for correctness.
 
-## Self-hosted build speed
+## Self-hosted build speed and memory
 
-The ai-dev runners share a compiler cache and use the mold linker:
+The ai-dev runners share a compiler cache, and a memory cap keeps CI builds from
+taking down the machine:
 
 - `sccache` (apt) runs as the systemd unit `sccache-grok-bot` on port 4231 with
   `SCCACHE_DIR=~/.cache/grok-bot-ci/sccache` and a 20G limit. It runs outside the jobs
   because the runner kills processes a job started when that job ends, which would stop
   a job-started server during the other runner's build. CI sets `RUSTC_WRAPPER=sccache`
-  only when the unit is active.
-- `mold` (apt) is used via `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=mold`
-  when installed. Each integration-test binary embeds the engine, so linking is a large
-  share of a test build.
-- The `Final disk usage` step prints sccache hit/miss counts.
-
+  only when the unit is active. The `Final disk usage` step prints hit/miss counts.
+- Both runner services and `sccache-grok-bot` (whose children are the actual `rustc`
+  processes) run in `grok-bot-ci.slice`: `MemoryHigh=12G`, `MemoryMax=14G`,
+  `MemorySwapMax=0`, via `Slice=grok-bot-ci.slice` drop-ins. A build over the cap fails
+  instead of exhausting the 31G host, which also runs VMs and other repos' runners.
+- mold is not used: with parallel links of the engine-embedding test binaries it drove
+  the host into swap thrashing on 2026-11-03 (load ~270, unreachable until reboot).
