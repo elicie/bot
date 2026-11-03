@@ -1,10 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowDown, ArrowUp, AtSign, Clock3, Menu, MoreHorizontal, Pencil, Plus, SquarePen, Trash2, Users, X } from 'lucide-react';
 import type { AppState, AvatarShape, Bot, Conversation, Group, GroupInput, Message } from '../shared/types';
-import { request } from './api';
+import { cancelQueuedTurn, request } from './api';
 import { botColors, History } from './Bots';
 import { Composer, Transcript } from './Conversation';
-import { activeRun, conversationPreview, type Surface } from './state';
+import { QueuedTurns } from './QueuedTurns';
+import { activeRun, conversationPreview, hasConversationWork, type Surface } from './state';
 import { ThreadLinks } from './Threads';
 import { Avatar, avatarShapes, ErrorNotice, IconButton, Modal } from './ui';
 import './groups.css';
@@ -32,6 +33,12 @@ export const shownGroupConversation = (data: AppState | null, surface: GroupSurf
 };
 
 export const roundPending = (conversation: Conversation | undefined) => !!conversation?.groupRound?.pendingBotIds.length;
+/** Structural member edits wait for this group's accepted work, never unrelated Bots. */
+export const groupStructureBusy = (data: AppState, groupId: string): boolean =>
+  data.conversations.some(conversation => conversation.groupId === groupId && (
+    activeRun(conversation.run.status) || roundPending(conversation)
+    || data.workQueue?.some(work => work.conversationId === conversation.id && work.kind === 'user')
+  ));
 
 export function GroupList({ data, search, selectedId, busy, onOpen, onCreate, onEdit }: {
   data: AppState | null; search: string; selectedId: string | null; busy: boolean;
@@ -86,12 +93,15 @@ export function GroupDialog({ data, group, busy, error: serverError, run, onSnap
   const errorRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => { if (error) errorRef.current?.scrollIntoView({ block: 'nearest' }); }, [error]);
   const initialMembers = group?.memberBotIds.join(',') ?? '';
+  const membersChanged = members.join(',') !== initialMembers;
+  const structureBusy = !!group && groupStructureBusy(data, group.id);
   const dirty = name !== (group?.name ?? '') || color !== (group?.color ?? botColors[7]) || shape !== (group?.shape ?? 'cloud') || members.join(',') !== initialMembers;
   const close = () => { if (busy || (dirty && !window.confirm('저장하지 않은 그룹 설정을 버릴까요?'))) return; onClose(); };
   const move = (index: number, delta: number) => setMembers(current => { const next = [...current]; const [item] = next.splice(index, 1); next.splice(index + delta, 0, item); return next; });
   const others = data.bots.filter(bot => !members.includes(bot.id));
   const valid = !!name.trim() && members.length >= 2 && members.length <= 12;
   const save = async () => {
+    if (busy || (membersChanged && structureBusy)) return;
     setAttempted(true);
     const body: GroupInput = { name: name.trim(), color, shape, memberBotIds: members };
     const saved = await run('group', async () => {
@@ -108,7 +118,7 @@ export function GroupDialog({ data, group, busy, error: serverError, run, onSnap
     if (saved) { if (!group) onCreated(saved); onClose(); }
   };
   const remove = async () => {
-    if (!group || !window.confirm('이 그룹과 채팅 기록이 영구적으로 삭제돼요. 안의 Bot은 삭제되지 않고 각각 그대로 쓸 수 있어요. 되돌릴 수 없어요.')) return;
+    if (!group || busy || structureBusy || !window.confirm('이 그룹과 채팅 기록이 영구적으로 삭제돼요. 안의 Bot은 삭제되지 않고 각각 그대로 쓸 수 있어요. 되돌릴 수 없어요.')) return;
     setAttempted(true);
     const removed = await run('group-delete', async () => {
       onSnapshot(await request<AppState>(`/api/groups/${encodeURIComponent(group.id)}`, { method: 'DELETE', body: {} }));
@@ -119,7 +129,7 @@ export function GroupDialog({ data, group, busy, error: serverError, run, onSnap
   const title = group ? '그룹 편집' : '그룹 채팅 만들기';
   return <Modal title={title} onClose={close} className="compact-modal bot-dialog group-dialog">
     <header className="modal-header"><h2>{title}</h2><IconButton label="그룹 설정 닫기" onClick={close} disabled={busy}><X size={18} /></IconButton></header>
-    <form aria-busy={busy} onSubmit={event => { event.preventDefault(); if (valid && dirty && !busy) void save(); }}>
+    <form aria-busy={busy} onSubmit={event => { event.preventDefault(); if (valid && dirty && !busy && !(membersChanged && structureBusy)) void save(); }}>
       <div className="bot-dialog-body">
         <div className="bot-dialog-preview" role="img" aria-label="그룹 아바타 미리보기"><Avatar color={color} seed={group?.id ?? name} size={80} shape={shape} /></div>
         <label className="bot-dialog-name"><span>그룹 이름</span>
@@ -135,21 +145,21 @@ export function GroupDialog({ data, group, busy, error: serverError, run, onSnap
           {members.length === 0 && <p className="muted">아래에서 Bot을 2개 이상 추가하세요.</p>}
           <ol>{members.map((id, index) => { const bot = data.bots.find(item => item.id === id); return <li key={id}>
             <span className="group-member-order">{index + 1}</span><Avatar color={bot?.color} seed={id} shape={bot?.shape} size={22} /><span className="group-member-name">{bot?.name ?? '삭제된 Bot'}</span>
-            <IconButton label={`${bot?.name ?? 'Bot'} 위로`} disabled={busy || index === 0} onClick={() => move(index, -1)}><ArrowUp size={13} /></IconButton>
-            <IconButton label={`${bot?.name ?? 'Bot'} 아래로`} disabled={busy || index === members.length - 1} onClick={() => move(index, 1)}><ArrowDown size={13} /></IconButton>
-            <IconButton label={`${bot?.name ?? 'Bot'} 멤버에서 빼기`} disabled={busy} onClick={() => setMembers(members.filter(item => item !== id))}><X size={13} /></IconButton>
+            <IconButton label={`${bot?.name ?? 'Bot'} 위로`} disabled={busy || structureBusy || index === 0} onClick={() => move(index, -1)}><ArrowUp size={13} /></IconButton>
+            <IconButton label={`${bot?.name ?? 'Bot'} 아래로`} disabled={busy || structureBusy || index === members.length - 1} onClick={() => move(index, 1)}><ArrowDown size={13} /></IconButton>
+            <IconButton label={`${bot?.name ?? 'Bot'} 멤버에서 빼기`} disabled={busy || structureBusy} onClick={() => setMembers(members.filter(item => item !== id))}><X size={13} /></IconButton>
           </li>; })}</ol>
           {others.length > 0 && <div className="group-member-candidates" role="group" aria-label="멤버 추가">
-            {others.map(bot => <button type="button" key={bot.id} className="small-button" disabled={busy || members.length >= 12} onClick={() => setMembers([...members, bot.id])} aria-label={`${bot.name} 멤버 추가`}><Plus size={12} /><Avatar color={bot.color} seed={bot.id} shape={bot.shape} size={16} />{bot.name}</button>)}
+            {others.map(bot => <button type="button" key={bot.id} className="small-button" disabled={busy || structureBusy || members.length >= 12} onClick={() => setMembers([...members, bot.id])} aria-label={`${bot.name} 멤버 추가`}><Plus size={12} /><Avatar color={bot.color} seed={bot.id} shape={bot.shape} size={16} />{bot.name}</button>)}
           </div>}
           <small className="muted">그룹에 보낸 메시지에는 멤버가 순서대로 한 번씩 답합니다. @이름으로 멘션하면 멘션한 멤버만 답합니다.</small>
         </section>
         {error && <div ref={errorRef}><ErrorNotice>{error}</ErrorNotice></div>}
       </div>
       <footer className="modal-footer">
-        {group && <button type="button" className="small-button danger-button" onClick={() => void remove()} disabled={busy}><Trash2 size={14} />그룹 삭제</button>}
+        {group && <button type="button" className="small-button danger-button" onClick={() => void remove()} disabled={busy || structureBusy}><Trash2 size={14} />그룹 삭제</button>}
         <button type="button" className="small-button" onClick={close} disabled={busy}>취소</button>
-        <button type="submit" className="primary-button" aria-label={group ? '그룹 저장' : '그룹 만들기'} disabled={busy || !valid || !dirty}>{busy ? '저장 중…' : group ? '그룹 저장' : '만들기'}</button>
+        <button type="submit" className="primary-button" aria-label={group ? '그룹 저장' : '그룹 만들기'} disabled={busy || (membersChanged && structureBusy) || !valid || !dirty}>{busy ? '저장 중…' : group ? '그룹 저장' : '만들기'}</button>
       </footer>
     </form>
   </Modal>;
@@ -163,22 +173,23 @@ export function GroupView({ data, surface, busy, online, run, onSnapshot, onRout
   canvasControl?: ReactNode;
 }) {
   const [history, setHistory] = useState(false);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
   const group = data.groups?.find(item => item.id === surface.groupId);
   const conversations = group ? groupConversations(data, group.id) : [];
   const conversation = shownGroupConversation(data, surface);
   if (!group) return <div className="main-empty"><button type="button" className="mobile-only icon-button group-empty-menu" aria-label="봇 목록 열기" onClick={onSidebar}><Menu size={19} /></button><Users size={28} /><h1>삭제된 그룹</h1><p>이 그룹을 찾을 수 없습니다. 사이드바에서 다른 Bot이나 그룹을 선택하세요.</p></div>;
   const bot = groupAsBot(group);
   const members = group.memberBotIds.map(id => data.bots.find(item => item.id === id)).filter((item): item is Bot => !!item);
-  const globalRun = data.conversations.find(item => activeRun(item.run.status));
   const pending = roundPending(conversation);
-  const running = !!conversation && (activeRun(conversation.run.status) || pending);
+  const running = !!conversation && activeRun(conversation.run.status);
   const key = `group:${group.id}:${conversation?.id ?? 'new'}`;
   const text = draft(key);
   const speakerFor = speakerLookup(data);
   const select = (conversationId: string | null) => onRoute({ kind: 'group', groupId: group.id, conversationId });
   const send = async () => {
     const message = text.trim();
-    if (!message || running || globalRun) return;
+    if (!message || !online || busy || members.length === 0) return;
     if (!data.settings.baseUrl || !data.settings.model) { onSettings(); return; }
     await run('group-message', async () => {
       let target = conversation?.id;
@@ -189,12 +200,16 @@ export function GroupView({ data, surface, busy, online, run, onSnapshot, onRout
         select(target);
       }
       onSnapshot(await request<AppState>(`/api/conversations/${encodeURIComponent(target)}/messages`, { method: 'POST', body: { text: message } }));
-      onDraft(key, '');
+      if (draftRef.current(key) === text) onDraft(key, '');
     });
   };
   const cancel = async () => {
-    if (!conversation || !running) return;
+    if (!conversation || !hasConversationWork(data, conversation)) return;
     await run('cancel', async () => onSnapshot(await request<AppState>(`/api/conversations/${encodeURIComponent(conversation.id)}/cancel`, { method: 'POST', body: {} })));
+  };
+  const cancelQueued = async (turnId: string) => {
+    if (!conversation) return;
+    await run('cancel-queued', async () => onSnapshot(await cancelQueuedTurn(conversation.id, turnId)));
   };
   const permission = async (optionId: string) => {
     const pendingPermission = conversation?.run.permission;
@@ -222,7 +237,7 @@ export function GroupView({ data, surface, busy, online, run, onSnapshot, onRout
       </div>
       <div className="chat-controls">
         <IconButton label="대화 기록" onClick={() => setHistory(true)}><Clock3 size={17} /></IconButton>
-        <IconButton label="새 대화" onClick={() => void newConversation()} disabled={busy || !!globalRun}><SquarePen size={17} /></IconButton>
+        <IconButton label="새 대화" onClick={() => void newConversation()} disabled={busy}><SquarePen size={17} /></IconButton>
         {canvasControl}
       </div>
     </header>
@@ -238,8 +253,9 @@ export function GroupView({ data, surface, busy, online, run, onSnapshot, onRout
       <AtSign size={13} aria-hidden="true" />
       {members.length ? members.map(member => <button type="button" key={member.id} onClick={() => mention(member.name)} aria-label={`${member.name} 멘션`}><Avatar color={member.color} seed={member.id} shape={member.shape} size={14} />{member.name}</button>) : <span>아직 멘션할 대상이 없어요</span>}
     </div>
+    <QueuedTurns data={data} conversationId={conversation?.id} disabled={busy || !online} onCancel={turnId => void cancelQueued(turnId)} />
     <Composer botName={group.name} placeholder="그룹에 메시지 보내기" value={text} onChange={value => onDraft(key, value)} onSend={() => void send()}
-      onCancel={() => void cancel()} running={running} disabled={!online || !!globalRun || pending || members.length === 0} busy={busy} model={data.settings.model} />
-    {history && <History bot={bot} conversations={conversations} selectedId={conversation?.id ?? null} busy={busy || !!globalRun} onClose={() => setHistory(false)} onNew={() => void newConversation()} onSelect={id => { select(id); setHistory(false); }} />}
+      onCancel={() => void cancel()} running={running} pendingWork={hasConversationWork(data, conversation)} disabled={!online || members.length === 0} busy={busy} model={data.settings.model} />
+    {history && <History bot={bot} conversations={conversations} selectedId={conversation?.id ?? null} busy={busy} onClose={() => setHistory(false)} onNew={() => void newConversation()} onSelect={id => { select(id); setHistory(false); }} />}
   </>;
 }

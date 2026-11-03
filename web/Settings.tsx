@@ -1,4 +1,4 @@
-import { useReducer, useState } from 'react';
+import { useEffect, useReducer, useState } from 'react';
 import {
   Check,
   CheckCircle2,
@@ -16,20 +16,22 @@ import {
 } from 'lucide-react';
 import type { AppState, ProviderCheck, SettingsInput } from '../shared/types';
 import { errorText, request } from './api';
-import type { SettingsTab } from './state';
+import { runningConversation, type SettingsTab } from './state';
 import { ErrorNotice, IconButton, Modal, Spinner } from './ui';
 import { PermissionRules } from './PermissionRules';
 import { NotificationSettings } from './ActivitySettings';
 import { VaultSettings } from './Vault';
 import './settings.css';
+import './concurrency.css';
 
 interface FormState {
+  maxConcurrentRuns: string;
   baseUrl: string;
   model: string;
   workspace: string;
   apiKey: string;
   clearApiKey: boolean;
-  baseline: string;
+  baseline: SettingsFields;
   saved: boolean;
   check:
     | { status: 'idle' }
@@ -37,14 +39,43 @@ interface FormState {
     | { status: 'done'; result: ProviderCheck }
     | { status: 'error'; error: string };
 }
+type SettingsFields = Pick<FormState, 'baseUrl' | 'model' | 'workspace' | 'maxConcurrentRuns'>;
 type FormAction =
-  | { type: 'field'; field: 'baseUrl' | 'model' | 'workspace' | 'apiKey'; value: string }
+  | { type: 'field'; field: keyof SettingsFields | 'apiKey'; value: string }
   | { type: 'clear'; value: boolean }
   | { type: 'saved' }
+  | { type: 'reconcile'; settings: AppState['settings'] }
   | { type: 'check'; check: FormState['check'] };
-const signature = (form: Pick<FormState, 'baseUrl' | 'model' | 'workspace'>) =>
-  JSON.stringify([form.baseUrl, form.model, form.workspace]);
-function formReducer(state: FormState, action: FormAction): FormState {
+const fields = (form: SettingsFields): SettingsFields => ({
+  baseUrl: form.baseUrl, model: form.model, workspace: form.workspace, maxConcurrentRuns: form.maxConcurrentRuns,
+});
+const settingsFields = (settings: AppState['settings']): SettingsFields =>
+  fields({ ...settings, maxConcurrentRuns: String(settings.maxConcurrentRuns ?? 3) });
+const signature = (form: SettingsFields) => JSON.stringify(fields(form));
+export function concurrencyLimitError(value: string): string | null {
+  const limit = Number(value);
+  return value.trim() && Number.isInteger(limit) && limit >= 1 && limit <= 16
+    ? null : '1에서 16 사이의 정수를 입력해 주세요.';
+}
+export function initialSettingsForm(settings: AppState['settings']): FormState {
+  const baseline = settingsFields(settings);
+  return {
+    ...baseline, apiKey: '', clearApiKey: false, baseline, saved: false, check: { status: 'idle' },
+  };
+}
+export function settingsFormDirty(form: FormState): boolean {
+  return signature(form) !== signature(form.baseline) || !!form.apiKey || form.clearApiKey;
+}
+export function settingsFormInput(form: FormState): SettingsInput | null {
+  if (concurrencyLimitError(form.maxConcurrentRuns)) return null;
+  return {
+    maxConcurrentRuns: Number(form.maxConcurrentRuns),
+    baseUrl: form.baseUrl.trim(), model: form.model.trim(), workspace: form.workspace.trim(),
+    ...(form.apiKey ? { apiKey: form.apiKey } : {}),
+    ...(form.clearApiKey ? { clearApiKey: true } : {}),
+  };
+}
+export function formReducer(state: FormState, action: FormAction): FormState {
   switch (action.type) {
     case 'field':
       return {
@@ -63,7 +94,16 @@ function formReducer(state: FormState, action: FormAction): FormState {
         check: { status: 'idle' },
       };
     case 'saved':
-      return { ...state, apiKey: '', clearApiKey: false, baseline: signature(state), saved: true };
+      return { ...state, apiKey: '', clearApiKey: false, baseline: fields(state), saved: true };
+    case 'reconcile': {
+      const baseline = settingsFields(action.settings);
+      if (signature(baseline) === signature(state.baseline) || state.check.status === 'checking') return state;
+      const reconciled = fields(state);
+      for (const field of Object.keys(baseline) as (keyof SettingsFields)[]) {
+        if (state[field] === state.baseline[field]) reconciled[field] = baseline[field];
+      }
+      return { ...state, ...reconciled, baseline, saved: false, check: { status: 'idle' } };
+    }
     case 'check':
       return { ...state, check: action.check };
   }
@@ -166,20 +206,17 @@ export function Settings({
   linkPreviewsSaving: boolean;
   onLinkPreviewsChange: (enabled: boolean) => Promise<void>;
 }) {
-  const [form, dispatch] = useReducer(formReducer, data.settings, (settings): FormState => ({
-    baseUrl: settings.baseUrl,
-    model: settings.model,
-    workspace: settings.workspace,
-    apiKey: '',
-    clearApiKey: false,
-    baseline: signature(settings),
-    saved: false,
-    check: { status: 'idle' },
-  }));
+  const [form, dispatch] = useReducer(formReducer, data.settings, initialSettingsForm);
+  useEffect(() => {
+    dispatch({ type: 'reconcile', settings: data.settings });
+  }, [data.settings, form.check.status]);
   const [preferences, setPreferences] = useState(readBrowserPreferences);
   const [preferenceError, setPreferenceError] = useState<string | null>(null);
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copying' | 'copied' | 'error'>('idle');
-  const dirty = signature(form) !== form.baseline || !!form.apiKey || form.clearApiKey;
+  const dirty = settingsFormDirty(form);
+  const concurrencyError = concurrencyLimitError(form.maxConcurrentRuns);
+  const running = !!runningConversation(data);
+  const locked = busy || running;
   const pendingPermissions = data.conversations.filter(
     (conversation) => conversation.run.status === 'awaiting_permission' && conversation.run.permission,
   ).length;
@@ -232,6 +269,7 @@ export function Settings({
     onClose();
   };
   const testProvider = async () => {
+    if (locked || form.check.status === 'checking') return;
     dispatch({ type: 'check', check: { status: 'checking' } });
     try {
       const result = await request<ProviderCheck>('/api/provider/test', {
@@ -284,14 +322,9 @@ export function Settings({
           className="settings-form"
           onSubmit={async (event) => {
             event.preventDefault();
-            if (busy || form.check.status === 'checking') return;
-            const saved = await onSave({
-              baseUrl: form.baseUrl.trim(),
-              model: form.model.trim(),
-              workspace: form.workspace.trim(),
-              ...(form.apiKey ? { apiKey: form.apiKey } : {}),
-              ...(form.clearApiKey ? { clearApiKey: true } : {}),
-            });
+            const input = settingsFormInput(form);
+            if (locked || form.check.status === 'checking' || !input || !dirty) return;
+            const saved = await onSave(input);
             if (saved) dispatch({ type: 'saved' });
           }}
         >
@@ -437,7 +470,7 @@ export function Settings({
             )}
             {tab === 'permissions' && (
               <>
-                <PermissionRules data={data} disabled={busy} />
+                <PermissionRules data={data} disabled={locked} />
                 <section className="settings-section">
                   <h3>승인 대기</h3>
                   <div className="settings-card">
@@ -482,7 +515,7 @@ export function Settings({
                     </div>
                   </div>
                 </section>
-                <VaultSettings data={data} />
+                <VaultSettings data={data} busy={busy} />
               </>
             )}
             {tab === 'usage' && (
@@ -565,6 +598,21 @@ export function Settings({
             {tab === 'models' && (
               <>
                 <section className="settings-section">
+                  <h3>동시 실행</h3>
+                  <div className="settings-card field-card">
+                    <label className="settings-field" htmlFor="settings-concurrency">
+                      <span>동시 실행 Bot 수</span>
+                      <input id="settings-concurrency" className="settings-concurrency-input" type="number" min={1} max={16} step={1} required
+                        aria-label="동시 실행 Bot 수" aria-invalid={!!concurrencyError}
+                        aria-describedby={`settings-concurrency-help${concurrencyError ? ' settings-concurrency-error' : ''}`}
+                        value={form.maxConcurrentRuns} disabled={locked || form.check.status === 'checking'}
+                        onChange={(event) => dispatch({ type: 'field', field: 'maxConcurrentRuns', value: event.target.value })} />
+                      <small id="settings-concurrency-help">1~16 · 기본값 3. 서로 다른 Bot은 설정한 수만큼 동시에 실행합니다. 같은 Bot의 작업은 요청 순서대로 하나씩 실행합니다.</small>
+                      {concurrencyError && <small id="settings-concurrency-error" className="settings-concurrency-error" role="alert">{concurrencyError}</small>}
+                    </label>
+                  </div>
+                </section>
+                <section className="settings-section">
                   <h3>OpenAI-compatible provider</h3>
                   <div className="settings-card field-card">
                     <label className="settings-field">
@@ -578,7 +626,7 @@ export function Settings({
                         onChange={(event) =>
                           dispatch({ type: 'field', field: 'baseUrl', value: event.target.value })
                         }
-                        disabled={busy || form.check.status === 'checking'}
+                        disabled={locked || form.check.status === 'checking'}
                       />
                       <small>OpenAI 호환 API의 기본 주소를 입력하세요.</small>
                     </label>
@@ -593,7 +641,7 @@ export function Settings({
                         onChange={(event) =>
                           dispatch({ type: 'field', field: 'model', value: event.target.value })
                         }
-                        disabled={busy || form.check.status === 'checking'}
+                        disabled={locked || form.check.status === 'checking'}
                       />
                       <small>서버가 제공하는 모델 ID를 그대로 입력하세요.</small>
                     </label>
@@ -625,7 +673,7 @@ export function Settings({
                         onChange={(event) =>
                           dispatch({ type: 'field', field: 'apiKey', value: event.target.value })
                         }
-                        disabled={busy || form.check.status === 'checking' || form.clearApiKey}
+                        disabled={locked || form.check.status === 'checking' || form.clearApiKey}
                       />
                       <small>키는 서버에만 저장됩니다. 브라우저로 다시 불러오지 않습니다.</small>
                     </label>
@@ -637,7 +685,7 @@ export function Settings({
                           onChange={(event) =>
                             dispatch({ type: 'clear', value: event.target.checked })
                           }
-                          disabled={busy || form.check.status === 'checking'}
+                          disabled={locked || form.check.status === 'checking'}
                         />
                         저장된 API 키 삭제
                       </label>
@@ -651,7 +699,7 @@ export function Settings({
                       type="button"
                       className="small-button"
                       onClick={testProvider}
-                      disabled={!form.baseUrl.trim() || form.check.status === 'checking' || busy}
+                      disabled={!form.baseUrl.trim() || form.check.status === 'checking' || locked}
                     >
                       {form.check.status === 'checking' ? (
                         <Spinner label="테스트 중" />
@@ -684,6 +732,7 @@ export function Settings({
                           type="button"
                           key={model}
                           aria-pressed={model === form.model}
+                          disabled={locked || form.check.status === 'checking'}
                           onClick={() => dispatch({ type: 'field', field: 'model', value: model })}
                         >
                           {model === form.model && <Check size={13} />}
@@ -739,7 +788,7 @@ export function Settings({
                         onChange={(event) =>
                           dispatch({ type: 'field', field: 'workspace', value: event.target.value })
                         }
-                        disabled={busy || form.check.status === 'checking'}
+                        disabled={locked || form.check.status === 'checking'}
                       />
                       <small>서버 컴퓨터에 있는 폴더의 절대 경로를 입력하세요.</small>
                     </label>
@@ -795,7 +844,7 @@ export function Settings({
           </div>
           <footer className="settings-footer">
             <span className="muted" role="status">
-              {form.saved ? (
+              {running ? '모든 Bot의 작업이 끝나면 설정을 저장할 수 있습니다' : form.saved ? (
                 <>
                   <CheckCircle2 size={14} />
                   설정을 저장했습니다
@@ -811,7 +860,7 @@ export function Settings({
             <button
               className="primary-button"
               type="submit"
-              disabled={busy || form.check.status === 'checking' || !dirty}
+              disabled={locked || form.check.status === 'checking' || !!concurrencyError || !dirty}
             >
               {busy ? '저장 중…' : '설정 저장'}
             </button>

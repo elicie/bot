@@ -1,0 +1,23 @@
+/* Execution state stays within the incumbent sidebar geometry, including pinned and compact avatars. */
+.reference-sidebar .bot-pending-count {
+  position: absolute;
+  inset-inline-start: -3px;
+  bottom: -1px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  min-height: 18px;
+  padding: 0 3px;
+  border: 2px solid var(--chrome);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 10px;
+  line-height: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.reference-sidebar .bot-copy .bot-execution-preview { color: var(--secondary); }
+.settings-modal .settings-concurrency-input { max-width: 100px; font-variant-numeric: tabular-nums; }
+.settings-modal .settings-field .settings-concurrency-error { color: var(--danger); }
+.bot-dialog .bot-configuration-status { color: var(--secondary); font-size: 11px; line-height: 18px; }

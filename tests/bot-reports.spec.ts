@@ -150,12 +150,13 @@ for (const viewport of [{ width: 1040, height: 760, startFirst: false }, { width
       await permission.getByRole('button', { name: 'Send once', exact: true }).click();
       await expect.poll(() => stage, { timeout: 60_000 }).toBe(4);
 
-      // Queue an older routine while the recipient is held. FIFO runs it before the report,
-      // keeping the follow-up queued without racing the scheduler or forging application state.
-      const scheduled = await api<AppState>(page, '/api/routines', { botId: recipientId, name: '정기 점검', prompt: '다른 작업을 처리합니다.', enabled: false, schedule: { kind: 'interval', minutes: 60 } });
+      // Issue #20: another Bot's routine cannot block the sender. Occupy the actual sender Bot
+      // before its report arrives, preserving a real Bot-local FIFO boundary without state overrides.
+      const senderId = (await snapshot(page)).botDeliveries![0].fromBotId;
+      const scheduled = await api<AppState>(page, '/api/routines', { botId: senderId, name: '정기 점검', prompt: '다른 작업을 처리합니다.', enabled: false, schedule: { kind: 'interval', minutes: 60 } });
       await api(page, `/api/routines/${scheduled.routines[0].id}/run`, {});
-      recipient.release({ text: '계획을 검토했습니다. 진행해도 좋습니다.' });
       await expect.poll(() => stage, { timeout: 60_000 }).toBe(5);
+      recipient.release({ text: '계획을 검토했습니다. 진행해도 좋습니다.' });
       await expect.poll(async () => (await snapshot(page)).botDeliveries?.[0]?.report?.status).toBe('queued');
       const before = await snapshot(page);
       const delivery = before.botDeliveries![0];
@@ -175,6 +176,12 @@ for (const viewport of [{ width: 1040, height: 760, startFirst: false }, { width
         const routineConversation = seeded.conversations.find((conversation: AppState['conversations'][number]) => conversation.id === routine.conversationId);
         routineConversation.messages = [];
         routineConversation.run = { id: '', status: 'idle' };
+        // The accepted FIFO, not timestamps, is canonical. Restore the older routine's queue
+        // pointer alongside its reset receipt so the selected report remains behind it on reopen.
+        seeded.workQueue = [
+          { id: randomUUID(), botId: routine.botId, conversationId: routine.conversationId, createdAt: routine.createdAt, kind: 'routine', runId: routine.id },
+          ...(seeded.workQueue ?? []).filter((work: { kind: string }) => work.kind !== 'routine'),
+        ];
         blocker.release({ text: '이전 fixture 종료' });
         await app.stop();
         await writeFile(path.join(dataDir, 'state.json'), JSON.stringify(seeded), { mode: 0o600 });
@@ -256,7 +263,7 @@ for (const viewport of [{ width: 1040, height: 760, startFirst: false }, { width
       const disk = JSON.parse(await readFile(path.join(dataDir, 'state.json'), 'utf8'));
       expect(disk.botDeliveries[0].report).toEqual(cancelled);
 
-      // Free the global slot and observe several scheduler polls: no follow-up appears.
+      // Free the sender Bot's slot and observe several scheduler polls: no follow-up appears.
       blocker.release({ text: '정기 점검을 마쳤습니다.' });
       await expect.poll(async () => (await snapshot(page)).routineRuns[0]?.result?.status).toBe('completed');
       await page.waitForTimeout(1500);
@@ -313,7 +320,7 @@ async function approveChainTurn(page: Page, conversationId: string) {
   await chainApi(page, 'POST', `/api/conversations/${conversationId}/permissions/${permission.id}`, { optionId: permission.options.find(option => option.kind === 'allow_once')!.id });
 }
 
-test('UI contract only: Enter sends a separate turn while an idle queued chain keeps its independent Stop action', async ({ page }) => {
+test('UI contract only: Enter accepts Bot-local FIFO work and Stop never targets another Bot or a waiting chain', async ({ page }) => {
   // This deliberately routed snapshot is a client interaction regression, NOT native runtime or
   // screenshot evidence. The production scheduler cannot be paused over HTTP/SSE; the real-engine
   // manual-scheduler regression checks acceptance and the eventual single report separately.
@@ -349,51 +356,76 @@ test('UI contract only: Enter sends a separate turn while an idle queued chain k
       messages: [{ id: 'fixture-delivery', botId: a, text: 'Review the public fixture.', createdAt: now }],
     }];
     const queued = structuredClone(fixture.botDeliveries[0]);
+    fixture.workQueue = [{ id: 'fixture-delivery-work', botId: bots.b, conversationId: recipient.id, createdAt: now, kind: 'delivery', deliveryId: queued.id }];
     const otherFixture = fixture.conversations.find(conversation => conversation.id === other.id)!;
-    otherFixture.run = { id: 'fixture-unrelated-run', status: 'running', startedAt: now };
+    otherFixture.run = { id: 'fixture-unrelated-run', botId: bots.c, status: 'running', startedAt: now };
+    const unrelatedRun = structuredClone(otherFixture.run);
     fixture.revision += 100;
     await page.route('**/api/state', route => route.fulfill({ json: fixture }));
     await page.route('**/api/events', async route => { await eventsHeld; await route.abort(); });
-    await page.route('**/api/conversations/*/cancel', async route => { cancelled.push(route.request().url()); await route.abort(); });
-    await page.route(`**/api/conversations/${source.id}/messages`, async route => {
-      sent.push(route.request().postDataJSON());
+    await page.route(`**/api/conversations/${source.id}/cancel`, async route => {
+      cancelled.push(route.request().url());
       fixture.revision++;
-      sourceFixture.messages.push(
-        { id: 'fixture-separate-user', role: 'user', text: 'A separate user question.', tools: [], createdAt: now },
-        { id: 'fixture-separate-answer', role: 'assistant', text: '', tools: [], createdAt: now },
-      );
-      sourceFixture.run = { id: 'fixture-own-active-run', status: 'running', startedAt: now };
+      sourceFixture.run = { ...sourceFixture.run, status: 'cancelled', finishedAt: now };
+      fixture.workQueue = fixture.workQueue!.filter(work => work.conversationId !== source.id);
+      await route.fulfill({ json: fixture });
+    });
+    await page.route(`**/api/conversations/${source.id}/messages`, async route => {
+      const body = route.request().postDataJSON() as { text: string };
+      sent.push(body);
+      fixture.revision++;
+      if (sent.length === 1) {
+        sourceFixture.messages.push(
+          { id: 'fixture-separate-user', role: 'user', text: body.text, tools: [], createdAt: now },
+          { id: 'fixture-separate-answer', role: 'assistant', text: '', tools: [], createdAt: now },
+        );
+        sourceFixture.run = { id: 'fixture-own-active-run', botId: a, status: 'running', startedAt: now };
+      } else {
+        fixture.workQueue!.push({ id: `fixture-user-work-${sent.length}`, botId: a, conversationId: source.id, createdAt: now, kind: 'user', text: body.text, attachments: [] });
+      }
       await route.fulfill({ json: fixture });
     });
     const url = `${app.url}/?bot=${a}&conversation=${source.id}`;
     await page.goto(url, { waitUntil: 'domcontentloaded' });
     const input = page.getByLabel('메시지', { exact: true });
     const send = page.getByRole('button', { name: '메시지 보내기', exact: true });
-    const chainStop = page.getByRole('button', { name: 'Bot 체인 중단', exact: true });
+    const stop = page.getByRole('button', { name: '작업 중단', exact: true });
     await input.fill('A separate user question.');
-    // Pending work does not override the existing one-global-active-run restriction.
-    await expect(send).toBeDisabled();
-    await expect(chainStop).toBeEnabled();
-    await input.press('Enter');
-    expect(sent).toEqual([]);
-
-    otherFixture.run = { id: 'fixture-unrelated-run', status: 'completed', finishedAt: now };
-    fixture.revision++;
-    await page.reload({ waitUntil: 'domcontentloaded' });
-    await input.fill('A separate user question.');
+    // Revised rule 7: B's queued delivery is not A's Stop scope, and live C does not disable A.
     await expect(page.getByLabel('Chain B 답변 상태', { exact: true })).toHaveText('대기 중');
+    await expect(stop).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Bot 체인 중단', exact: true })).toHaveCount(0);
     await expect(send).toBeEnabled();
-    await expect(chainStop).toBeEnabled();
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await input.press('Enter');
     await expect.poll(() => sent).toEqual([{ text: 'A separate user question.' }]);
     await expect(input).toHaveValue('');
+    await expect(stop).toBeVisible();
+    await expect(stop).toHaveAttribute('title', '이 대화의 실행과 대기 중인 작업만 중단');
+    await expect(send).toHaveCount(0);
+    const live = structuredClone(sourceFixture);
+    for (const message of ['Queued second question.', 'Queued third question.']) {
+      await input.fill(message);
+      await expect(send).toBeEnabled();
+      await expect(send).toHaveAttribute('title', '메시지 보내기 · 대기열에 추가');
+      await input.press('Enter');
+      await expect(input).toHaveValue('');
+    }
+    const pending = page.getByRole('region', { name: '대기 중인 메시지', exact: true });
+    await expect(pending.locator('li[data-queued-turn-id] p')).toHaveText(['Queued second question.', 'Queued third question.']);
+    expect(sourceFixture).toEqual(live); // Accepted queued turns are not hidden/live transcript input.
+    expect(fixture.workQueue!.filter(work => work.conversationId === source.id).map(work => work.id)).toEqual(['fixture-user-work-2', 'fixture-user-work-3']);
     expect(cancelled).toEqual([]);
     expect(fixture.botDeliveries).toEqual([queued]);
-    // Only the new own run replaces Send with the existing active-run Stop control.
-    await expect(page.getByRole('button', { name: '작업 중단', exact: true })).toBeVisible();
-    await expect(send).toHaveCount(0);
-    await expect(chainStop).toHaveCount(0);
+    expect(otherFixture.run).toEqual(unrelatedRun);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await stop.click();
+    await expect(stop).toHaveCount(0);
+    await expect(pending).toHaveCount(0);
+    expect(cancelled).toEqual([`${app.url}/api/conversations/${source.id}/cancel`]);
+    expect(sourceFixture.messages).toEqual(live.messages);
+    expect(fixture.botDeliveries).toEqual([queued]);
+    expect(otherFixture.run).toEqual(unrelatedRun);
+    expect(fixture.workQueue).toEqual([{ id: 'fixture-delivery-work', botId: bots.b, conversationId: recipient.id, createdAt: now, kind: 'delivery', deliveryId: queued.id }]);
   } finally { releaseEvents(); await app.stop(); }
 });
 
@@ -447,16 +479,17 @@ test('a nested review waits for C, then reports B and A exactly once with hidden
     const log = page.getByRole('log', { name: '대화 메시지', exact: true });
     await expect(log.getByLabel('Chain B 답변 상태', { exact: true })).toHaveText('하위 답변 대기 중');
     await expect(page.getByText('Bot 답변 대기 중', { exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Bot 체인 중단', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Bot 체인 중단', exact: true })).toHaveCount(0);
     await expect(log.getByRole('note', { name: '이어서 답한 Bot 답변', exact: true })).toHaveCount(0);
     await page.getByLabel('메시지', { exact: true }).fill('A separate draft while the review is pending.');
-    // The real held C run still owns the global engine slot. A keeps its normal Send action,
-    // disabled by that existing policy rather than replaced by the chain Stop control.
-    await expect(page.getByRole('button', { name: '메시지 보내기', exact: true })).toBeDisabled();
+    // Revised issue #20 scope: C occupies only C's slot. A can send a new turn, while a waiting
+    // outbound chain alone is neither A's live work nor A's pending work and exposes no local Stop.
+    await expect(page.getByRole('button', { name: '메시지 보내기', exact: true })).toBeEnabled();
     await expect(page.getByRole('button', { name: '작업 중단', exact: true })).toHaveCount(0);
     for (const width of [320, 390]) {
       await page.setViewportSize({ width, height: 844 });
-      await expect(page.getByRole('button', { name: 'Bot 체인 중단', exact: true })).toBeVisible();
+      await expect(page.getByRole('button', { name: '메시지 보내기', exact: true })).toBeEnabled();
+      await expect(page.getByRole('button', { name: '작업 중단', exact: true })).toHaveCount(0);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     }
 
@@ -504,11 +537,18 @@ test('cancelling C follow-up in waiting B reports one non-success to A without a
   let reportInput = '';
   const child = gate();
   const blocker = gate();
+  const upstreamBlocker = gate();
+  const upstreamPrompt = 'Keep A independently occupied until the selected nested report is cancelled.';
+  let upstreamStarted = false;
   const provisional = 'B_PROVISIONAL_NOT_FINAL: I asked C and will summarize later.';
   const pageErrors: string[] = [];
   page.on('pageerror', error => pageErrors.push(error.message));
   const provider = await startMockProvider({ reply: request => {
     if (!request.tools?.some(tool => tool.function.name === 'search_tool')) return { text: 'Nested report cancellation fixture' };
+    if (request.messages.some(message => message.role === 'user' && text(message.content).includes(upstreamPrompt))) {
+      upstreamStarted = true;
+      return upstreamBlocker.promise;
+    }
     const replies: Array<MockCompletion | Promise<MockCompletion>> = [
       { tool: { name: 'search_tool', arguments: { query: 'workspace send_message', limit: 3 } } },
       { tool: { name: 'use_tool', arguments: { tool_name: 'workspace__send_message', tool_input: { toBotId: bots.b, text: 'Ask C and return only the final verdict.' } } } },
@@ -536,20 +576,31 @@ test('cancelling C follow-up in waiting B reports one non-success to A without a
     await approveChainTurn(page, root.recipientConversationId);
     await expect.poll(() => stage, { timeout: 60_000 }).toBe(7);
 
-    // This is real native FIFO work, not a state override: an older routine takes the global slot
-    // after held C finishes, keeping C's follow-up queued in B for PR39's selected-report action.
+    // Issue #20: B's waiting aggregate holds no slot, and a C routine cannot block B's report.
+    // Keep B live in an unrelated routine; a separate A routine preserves the queued upstream
+    // receipt after cancellation. These are real per-Bot slots, not forged application state.
     const scheduled = await chainApi<AppState>(page, 'POST', '/api/routines', {
-      botId: bots.c, name: 'Unrelated FIFO review blocker', prompt: 'Finish an unrelated routine.', enabled: false,
+      botId: bots.b, name: 'Unrelated FIFO review blocker', prompt: 'Finish an unrelated routine.', enabled: false,
       schedule: { kind: 'interval', minutes: 60 },
     });
     await chainApi(page, 'POST', `/api/routines/${scheduled.routines[0].id}/run`, {});
-    child.release({ text: 'C_FINAL_CANCEL_CANARY: the plan was approved.' });
     await expect.poll(() => stage, { timeout: 60_000 }).toBe(8);
+    const upstream = await chainApi<AppState>(page, 'POST', '/api/routines', {
+      botId: root.fromBotId, name: 'Independent upstream blocker', prompt: upstreamPrompt, enabled: false,
+      schedule: { kind: 'interval', minutes: 60 },
+    });
+    const upstreamRoutine = upstream.routines.find(routine => routine.name === 'Independent upstream blocker')!;
+    await chainApi(page, 'POST', `/api/routines/${upstreamRoutine.id}/run`, {});
+    await expect.poll(() => upstreamStarted, { timeout: 60_000 }).toBe(true);
+    child.release({ text: 'C_FINAL_CANCEL_CANARY: the plan was approved.' });
     await expect.poll(async () => (await snapshot(page)).botDeliveries?.find(delivery => delivery.hop === 2)?.report?.status).toBe('queued');
     const before = await snapshot(page);
     const leaf = before.botDeliveries!.find(delivery => delivery.hop === 2)!;
     const bBefore = before.conversations.find(conversation => conversation.id === root.recipientConversationId)!;
-    const unrelated = before.conversations.find(conversation => conversation.id === before.routineRuns[0].conversationId)!;
+    const unrelatedRun = before.routineRuns.find(run => run.routineId === scheduled.routines[0].id)!;
+    const upstreamRun = before.routineRuns.find(run => run.routineId === upstreamRoutine.id)!;
+    const unrelated = before.conversations.find(conversation => conversation.id === unrelatedRun.conversationId)!;
+    const independentUpstream = before.conversations.find(conversation => conversation.id === upstreamRun.conversationId)!;
     expect(before.botDeliveries!.find(delivery => delivery.id === root.id)!.status).toBe('waiting_children');
     expect(before.botDeliveries!.find(delivery => delivery.id === root.id)!.report).toBeUndefined();
     expect(before.botExchanges!.find(exchange => exchange.id === root.exchangeId)!.messages).toHaveLength(1);
@@ -582,10 +633,12 @@ test('cancelling C follow-up in waiting B reports one non-success to A without a
     expect(cancelled.conversations.find(conversation => conversation.id === bBefore.id)!.messages).toEqual(bBefore.messages);
     expect(cancelled.conversations.find(conversation => conversation.id === bBefore.id)!.run.status).toBe('cancelled');
     expect(cancelled.conversations.find(conversation => conversation.id === unrelated.id)!.run).toEqual(unrelated.run);
+    expect(cancelled.conversations.find(conversation => conversation.id === independentUpstream.id)!.run).toEqual(independentUpstream.run);
     expect(cancelled.botExchanges!.find(exchange => exchange.id === root.exchangeId)!.messages).toHaveLength(1);
     expect(stage).toBe(8);
 
     blocker.release({ text: 'The unrelated routine completed normally.' });
+    upstreamBlocker.release({ text: 'The independent upstream routine completed normally.' });
     await expect.poll(async () => (await snapshot(page)).botDeliveries?.find(delivery => delivery.id === root.id)?.report?.status, { timeout: 60_000 }).toBe('completed');
     const final = await snapshot(page);
     const aFinal = final.conversations.find(conversation => conversation.id === root.sourceConversationId)!;
@@ -599,7 +652,8 @@ test('cancelling C follow-up in waiting B reports one non-success to A without a
     expect(reportInput).not.toContain('C_FINAL_CANCEL_CANARY');
     expect(bFinal.messages).toEqual(bBefore.messages);
     expect(final.botExchanges!.find(exchange => exchange.id === root.exchangeId)!.messages.map(message => message.text)).toEqual([root.text]);
-    expect(final.routineRuns[0].result?.status).toBe('completed');
+    expect(final.routineRuns.find(run => run.id === unrelatedRun.id)!.result?.status).toBe('completed');
+    expect(final.routineRuns.find(run => run.id === upstreamRun.id)!.result?.status).toBe('completed');
     expect(stage).toBe(9); // A reports once; B never resumes the cancelled C follow-up.
 
     const sourceUrl = `/?bot=${root.fromBotId}&conversation=${root.sourceConversationId}`;
@@ -630,6 +684,7 @@ test('cancelling C follow-up in waiting B reports one non-success to A without a
   } finally {
     child.release({ text: 'Fixture cleanup.' });
     blocker.release({ text: 'Fixture cleanup.' });
+    upstreamBlocker.release({ text: 'Fixture cleanup.' });
     await app.stop();
     await provider.close();
     if (path.resolve(dataDir) !== dataDir || path.dirname(dataDir) !== tmpdir() || !path.basename(dataDir).startsWith('grok-bot-review-nested-cancel-')) throw Error('Unexpected review test data path');
@@ -637,13 +692,22 @@ test('cancelling C follow-up in waiting B reports one non-success to A without a
   }
 });
 
-test('Stop in the waiting root cancels C approval and leaves no descendant or report to replay', async ({ page }) => {
+test('root Stop removes only its queued messages while C approval and independent Bot runs survive until their own Stop', async ({ page }) => {
   test.setTimeout(120_000);
   const app = await startTestApp();
   let bots = { b: '', c: '' };
   let stage = 0;
+  const aBlocker = gate();
+  const bBlocker = gate();
+  const aPrompt = 'Keep A independently live while its other conversation stops queued requests.';
+  const bPrompt = 'Keep B independently live until its nested report is cleaned up locally.';
+  let aStarted = false;
+  let bStarted = false;
   const provider = await startMockProvider({ reply: request => {
     if (!request.tools?.some(tool => tool.function.name === 'search_tool')) return { text: 'Nested Stop fixture' };
+    const users = request.messages.filter(message => message.role === 'user').map(message => text(message.content)).join('\n');
+    if (users.includes(aPrompt)) { aStarted = true; return aBlocker.promise; }
+    if (users.includes(bPrompt)) { bStarted = true; return bBlocker.promise; }
     const replies: MockCompletion[] = [
       { tool: { name: 'search_tool', arguments: { query: 'workspace send_message', limit: 3 } } },
       { tool: { name: 'use_tool', arguments: { tool_name: 'workspace__send_message', tool_input: { toBotId: bots.b, text: 'Ask C before giving the final verdict.' } } } },
@@ -652,9 +716,9 @@ test('Stop in the waiting root cancels C approval and leaves no descendant or re
       { tool: { name: 'use_tool', arguments: { tool_name: 'workspace__send_message', tool_input: { toBotId: bots.c, text: 'Prepare a review note.' } } } },
       { text: 'B delegated to C.' },
       { tool: { name: 'search_tool', arguments: { query: 'workspace send_message', limit: 3 } } },
-      { tool: { name: 'use_tool', arguments: { tool_name: 'workspace__send_message', tool_input: { toBotId: bots.b, text: 'An unapproved follow-up that root Stop must cancel.' } } } },
+      { tool: { name: 'use_tool', arguments: { tool_name: 'workspace__send_message', tool_input: { toBotId: bots.b, text: 'This unapproved follow-up must survive root Stop until C is stopped locally.' } } } },
     ];
-    return replies[stage++] ?? { text: 'Unexpected answer after root Stop.' };
+    return replies[stage++] ?? { text: 'Unexpected answer after local Stop cleanup.' };
   } });
   try {
     await page.goto(app.url);
@@ -673,25 +737,83 @@ test('Stop in the waiting root cancels C approval and leaves no descendant or re
       return state.conversations.find(conversation => conversation.id === leaf?.recipientConversationId)?.run.status;
     }, { timeout: 60_000 }).toBe('awaiting_permission');
     const waiting = await snapshot(page);
+    const source = waiting.conversations.find(conversation => conversation.id === root.sourceConversationId)!;
     const leaf = waiting.botDeliveries!.find(delivery => delivery.hop === 2)!;
-    const stale = waiting.conversations.find(conversation => conversation.id === leaf.recipientConversationId)!.run.permission!;
+    const cBefore = waiting.conversations.find(conversation => conversation.id === leaf.recipientConversationId)!;
+    const stale = cBefore.run.permission!;
+    const stop = page.getByRole('button', { name: '작업 중단', exact: true });
     await expect(page.getByLabel('Chain B 답변 상태', { exact: true })).toHaveText('하위 답변 대기 중');
-    await page.getByRole('button', { name: 'Bot 체인 중단', exact: true }).click();
-    await expect.poll(async () => (await snapshot(page)).conversations.find(conversation => conversation.id === leaf.recipientConversationId)?.run.status, { timeout: 30_000 }).toBe('cancelled');
+    // WaitingChildren is not an occupied slot or local pending work: there is no root Stop yet.
+    await expect(stop).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Bot 체인 중단', exact: true })).toHaveCount(0);
+    for (const [botId, name, prompt] of [[root.fromBotId, 'Independent A', aPrompt], [bots.b, 'Independent B', bPrompt]]) {
+      const scheduled = await chainApi<AppState>(page, 'POST', '/api/routines', { botId, name, prompt, enabled: false, schedule: { kind: 'interval', minutes: 60 } });
+      const routine = scheduled.routines.find(item => item.name === name)!;
+      await chainApi(page, 'POST', `/api/routines/${routine.id}/run`, {});
+    }
+    await expect.poll(() => aStarted && bStarted, { timeout: 60_000 }).toBe(true);
+    const before = await snapshot(page);
+    const independentRuns = before.routineRuns.map(run => before.conversations.find(conversation => conversation.id === run.conversationId)!);
+    const input = page.getByLabel('메시지', { exact: true });
+    for (const message of ['Queued root question one.', 'Queued root question two.']) {
+      await input.fill(message);
+      await expect(page.getByRole('button', { name: '메시지 보내기', exact: true })).toBeEnabled();
+      await input.press('Enter');
+      await expect(input).toHaveValue('');
+    }
+    const queue = page.getByRole('region', { name: '대기 중인 메시지', exact: true });
+    await expect(queue.locator('li[data-queued-turn-id] p')).toHaveText(['Queued root question one.', 'Queued root question two.']);
+    const accepted = await snapshot(page);
+    expect(accepted.conversations.find(conversation => conversation.id === source.id)).toEqual(source);
+    expect(accepted.workQueue!.filter(work => work.conversationId === source.id).map(work => work.kind)).toEqual(['user', 'user']);
+    await expect(stop).toHaveAttribute('title', '이 대화의 실행과 대기 중인 작업만 중단');
+    await stop.click();
+    await expect(queue).toHaveCount(0);
+    await expect(stop).toHaveCount(0);
     const stopped = await snapshot(page);
-    expect(stopped.botDeliveries!.find(delivery => delivery.id === root.id)!.chainTermination?.status).toBe('cancelled');
-    expect(stopped.botDeliveries!.every(delivery => !['queued', 'running', 'waiting_children'].includes(delivery.status) && !['queued', 'running'].includes(delivery.report?.status ?? ''))).toBe(true);
-    expect(stopped.conversations.find(conversation => conversation.id === leaf.recipientConversationId)!.run.permission).toBeUndefined();
+    expect(stopped.conversations.find(conversation => conversation.id === source.id)).toEqual(source);
+    expect(stopped.conversations.find(conversation => conversation.id === cBefore.id)).toEqual(cBefore);
+    expect(stopped.botDeliveries).toEqual(before.botDeliveries);
+    expect(stopped.botDeliveries!.find(delivery => delivery.id === root.id)!.chainTermination).toBeUndefined();
+    for (const independent of independentRuns) expect(stopped.conversations.find(conversation => conversation.id === independent.id)!.run).toEqual(independent.run);
+    expect(stage).toBe(8);
+
+    // C's approval is still actionable after root Stop. Only Stop in C's own execution invalidates it.
+    await page.goto(`${app.url}/?bot=${bots.c}&conversation=${leaf.recipientConversationId}`);
+    await expect(permission).toContainText('This unapproved follow-up must survive root Stop');
+    await expect(stop).toHaveAttribute('title', '이 대화의 실행과 대기 중인 작업만 중단');
+    await stop.click();
+    await expect.poll(async () => (await snapshot(page)).conversations.find(conversation => conversation.id === cBefore.id)?.run.status, { timeout: 30_000 }).toBe('cancelled');
+    const ownStopped = await snapshot(page);
+    expect(ownStopped.conversations.find(conversation => conversation.id === cBefore.id)!.run.permission).toBeUndefined();
+    for (const independent of independentRuns) expect(ownStopped.conversations.find(conversation => conversation.id === independent.id)!.run).toEqual(independent.run);
     const lateStatus = await page.evaluate(async ({ id, permission }) => (await fetch(`/api/conversations/${id}/permissions/${permission.id}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Grok-Bot': '1' }, body: JSON.stringify({ optionId: permission.options[0].id }) })).status, { id: leaf.recipientConversationId, permission: stale });
     expect(lateStatus).toBe(409);
+    expect(ownStopped.botDeliveries!.find(delivery => delivery.id === leaf.id)!.report?.status).toBe('queued');
+    // Future reports from independent Bots are separate work: remove each via its own conversation,
+    // never by reviving the old whole-chain Stop policy. Both unrelated routine runs remain live.
+    await chainApi(page, 'POST', `/api/conversations/${root.recipientConversationId}/cancel`, {});
+    await chainApi(page, 'POST', `/api/conversations/${source.id}/cancel`, {});
+    const cleaned = await snapshot(page);
+    expect(cleaned.botDeliveries!.every(delivery => !['queued', 'running', 'waiting_children'].includes(delivery.status) && !['queued', 'running'].includes(delivery.report?.status ?? ''))).toBe(true);
+    for (const independent of independentRuns) expect(cleaned.conversations.find(conversation => conversation.id === independent.id)!.run).toEqual(independent.run);
+    aBlocker.release({ text: 'A independent routine completed normally.' });
+    bBlocker.release({ text: 'B independent routine completed normally.' });
+    await expect.poll(async () => (await snapshot(page)).routineRuns.every(run => run.result?.status === 'completed')).toBe(true);
+    await page.goto(`${app.url}/?bot=${root.fromBotId}&conversation=${source.id}`);
     await page.reload();
-    await expect(page.getByRole('button', { name: 'Bot 체인 중단', exact: true })).toHaveCount(0);
+    await expect(stop).toHaveCount(0);
     await expect(page.getByLabel('Chain B 답변 상태', { exact: true })).toHaveText('중단됨');
-    await expect(page.getByText('Bot 작업을 중단했습니다.', { exact: true })).toBeVisible();
-    await expect(page.getByText('작업 완료', { exact: true })).toHaveCount(0);
+    await expect(page.getByText('Bot 작업을 중단했습니다.', { exact: true })).toHaveCount(0); // No whole-chain cancellation claim.
     await expect(page.getByRole('note', { name: '이어서 답한 Bot 답변', exact: true })).toHaveCount(0);
-    await page.waitForTimeout(1200); // Cross a real scheduler poll after reload: no follow-up may restart.
+    await page.waitForTimeout(1200); // After explicit local cleanup, nothing is replayed on a scheduler poll.
     expect(stage).toBe(8);
-    expect((await snapshot(page)).conversations.find(conversation => conversation.id === root.sourceConversationId)!.messages).toHaveLength(2);
-  } finally { await app.stop(); await provider.close(); }
+    expect((await snapshot(page)).conversations.find(conversation => conversation.id === source.id)!.messages).toEqual(source.messages);
+    expect(await readFile(path.join(app.workspace, 'notes.txt'), 'utf8')).toBe('original local content\n');
+  } finally {
+    aBlocker.release({ text: 'Fixture cleanup.' });
+    bBlocker.release({ text: 'Fixture cleanup.' });
+    await app.stop();
+    await provider.close();
+  }
 });

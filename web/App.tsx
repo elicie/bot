@@ -23,9 +23,10 @@ import type {
   RoutineRunResult,
   SettingsInput,
 } from '../shared/types';
-import { errorText, getState, request } from './api';
+import { cancelQueuedTurn, errorText, getState, request } from './api';
 import { BotDialog, History } from './Bots';
-import { Composer, Transcript } from './Conversation';
+import { Composer, OtherRuns, Transcript } from './Conversation';
+import { QueuedTurns } from './QueuedTurns';
 import { BotChat } from './BotChat';
 import { Sidebar } from './Sidebar';
 import { Details, type DetailsTab } from './Details';
@@ -42,9 +43,10 @@ import {
   draftKey,
   initialState,
   isDirty,
+  isBotRunning,
+  hasConversationWork,
   readRoute,
   queuedRoutineRun,
-  pendingBotWork,
   reducer,
   recipientDelivery,
   runningConversation,
@@ -107,7 +109,7 @@ export function App() {
   const [linkPreviewsPaused, setLinkPreviewsPaused] = useState(false);
   const linkPreviewsEnabled = data?.linkPreviewsEnabled === true && !linkPreviewsPaused;
   const queuedRun = queuedRoutineRun(data, conversation);
-  const botWork = pendingBotWork(data, conversation);
+  const ownWork = hasConversationWork(data, conversation);
   const selectionKey = draftKey(state.selection);
   const draft = state.drafts[selectionKey] ?? '';
   const [pendingFiles, setPendingFiles] = useState<Record<string, PendingAttachment[]>>({});
@@ -427,7 +429,7 @@ export function App() {
     if (
       !selected ||
       (!text && !files.length) ||
-      runningConversation(before.data) ||
+      recipientDelivery(before.data, before.selection.conversationId) ||
       queuedRoutineRun(before.data, selectedConversation(before)) ||
       commandLock.current
     )
@@ -488,13 +490,18 @@ export function App() {
   const cancel = async () => {
     const before = current.current;
     const active = selectedConversation(before);
-    if (!active || (!activeRun(active.run.status) && !queuedRoutineRun(before.data, active) && !pendingBotWork(before.data, active))) return;
+    if (!active || !hasConversationWork(before.data, active)) return;
     await command('cancel', async () => {
       const snapshot = await request<AppState>(
         `/api/conversations/${encodeURIComponent(active.id)}/cancel`,
         { method: 'POST', body: {} },
       );
       dispatch({ type: 'snapshot', data: snapshot });
+    });
+  };
+  const cancelQueued = async (conversationId: string, turnId: string) => {
+    await command('cancel-queued', async () => {
+      dispatch({ type: 'snapshot', data: await cancelQueuedTurn(conversationId, turnId) });
     });
   };
   const cancelReports = async (conversationId: string, deliveryIds: string[]) => {
@@ -647,7 +654,7 @@ export function App() {
     if (!confirmSkillsNavigation() || !confirmCanvasChange() || !confirmFileChange()) return;
     dispatch({ type: 'computer', open: false });
     if (target) { setCanvasId(target); setCanvasChat(false); return; }
-    if (!data || busy || globalRun) return;
+    if (!data || busy) return;
     const version = navigationVersion.current;
     const groupId = surface.kind === 'group' ? surface.groupId : undefined;
     const from = groupId ? `group:${groupId}:new` : draftKey(current.current.selection);
@@ -666,7 +673,7 @@ export function App() {
       }
     });
   };
-  const canvasControl = (target?: string) => <CanvasButton open={!!target && target === canvasId && !canvasChat} onClick={() => void toggleCanvas(target)} disabled={!data || busy || (!target && !!globalRun) || !!data.botDeliveries?.some(delivery => delivery.recipientConversationId === target)} />;
+  const canvasControl = (target?: string) => <CanvasButton open={!!target && target === canvasId && !canvasChat} onClick={() => void toggleCanvas(target)} disabled={!data || busy || !!data.botDeliveries?.some(delivery => delivery.recipientConversationId === target)} />;
   const prepareCanvasExport = (text: string) => {
     if (!canvasConversation) return;
     const key = canvasConversation.thread ? `thread:${canvasConversation.id}` : canvasConversation.groupId ? `group:${canvasConversation.groupId}:${canvasConversation.id}` : canvasConversation.id;
@@ -689,13 +696,13 @@ export function App() {
         />
       )}
       <Sidebar data={data} selection={state.selection} lastConversation={state.lastConversation}
-        chat={state.surface.kind === 'chat'} search={state.search} open={state.sidebarOpen} mobile={state.viewport === 'mobile'} busy={busy || !!globalRun}
+        chat={state.surface.kind === 'chat'} search={state.search} open={state.sidebarOpen} mobile={state.viewport === 'mobile'} busy={busy}
         onSearch={value => dispatch({ type: 'search', value })} onSelect={select}
         onClose={() => dispatch({ type: 'sidebar', open: false })} onNew={() => openOverlay({ kind: 'bot' })}
         onSettings={() => settings()} onCapabilities={() => openOverlay({ kind: 'capabilities' })}
         onRoutines={() => { if (state.surface.kind === 'routines') dispatch({ type: 'sidebar', open: false }); else navigate({ selection: current.current.selection, surface: { kind: 'routines' } }); }}
         onPatch={(id, patch) => { void command('bot-layout', async () => { const snapshot = await request<AppState>(`/api/bots/${encodeURIComponent(id)}`, { method: 'PATCH', body: patch }); dispatch({ type: 'snapshot', data: snapshot }); }); }}
-        menuExtras={(item, close) => <BotMenuExtras bot={item} busy={busy || !!globalRun} close={close}
+        menuExtras={(item, close) => <BotMenuExtras bot={item} busy={busy || isBotRunning(data, item.id)} close={close}
           onUnread={(target, unread) => void botState(target.id, 'unread', { unread })}
           onNotify={(target, enabled) => void setNotify(target, enabled)}
           onDelete={(target) => { dispatch({ type: 'error', error: null }); setDeleting(target); }}
@@ -749,7 +756,7 @@ export function App() {
                 <IconButton
                   label="새 대화"
                   onClick={() => void newConversation()}
-                  disabled={!bot || busy || !!globalRun}
+                  disabled={!bot || busy}
                 >
                   <SquarePen size={17} />
                 </IconButton>
@@ -797,17 +804,7 @@ export function App() {
             <button type="button" onClick={() => setReportNotice(null)}>보고 취소 안내 닫기</button>
           </div>
         )}
-        {globalRun && !shownIds.includes(globalRun.id) && (
-          <div className="other-run">
-            <span>다른 대화에서 작업이 실행 중입니다.</span>
-            <button
-              type="button"
-              onClick={() => openConversation(globalRun)}
-            >
-              실행 중인 대화 보기
-            </button>
-          </div>
-        )}
+        {data && <OtherRuns data={data} shownIds={shownIds} onOpen={openConversation} />}
         {data && state.surface.kind === 'routines' ? (
           <Routines
             key={navigationVersion.current}
@@ -852,6 +849,8 @@ export function App() {
               onRuntimeSettings={() => settings('general')}
               onPermission={(optionId) => void permission(optionId)}
             />
+            <QueuedTurns data={data} conversationId={conversation?.id} disabled={busy || state.connection !== 'online'}
+              onCancel={turnId => { if (conversation) void cancelQueued(conversation.id, turnId); }} />
             <Composer
               botName={bot.name}
               value={draft}
@@ -859,9 +858,9 @@ export function App() {
               onSend={() => void send()}
               onFiles={() => toggleComputer(true)}
               onCancel={() => void cancel()}
-              running={!!queuedRun || (!!conversation && activeRun(conversation.run.status))}
-              pendingBotWork={botWork}
-              disabled={state.connection !== 'online' || !!globalRun || !!queuedRun || !!recipientDelivery(data, conversation?.id)}
+              running={!!conversation && activeRun(conversation.run.status)}
+              pendingWork={ownWork}
+              disabled={state.connection !== 'online' || !!queuedRun || !!recipientDelivery(data, conversation?.id)}
               placeholder={recipientDelivery(data, conversation?.id) ? '다른 Bot의 요청으로 열린 대화라 여기서는 보낼 수 없습니다' : undefined}
               readOnly={!!recipientDelivery(data, conversation?.id)}
               busy={busy}
@@ -939,6 +938,7 @@ export function App() {
       {state.overlay?.kind === 'bot' && (
         <BotDialog
           bot={state.overlay.bot}
+          data={data}
           busy={busy}
           error={state.error}
           onClose={closeOverlay}
@@ -980,7 +980,7 @@ export function App() {
           conversations={botConversations}
           requestFrom={(item) => { const delivery = recipientDelivery(data, item.id); return delivery && (data?.bots.find((entry) => entry.id === delivery.fromBotId)?.name ?? '삭제된 Bot'); }}
           selectedId={state.selection.conversationId}
-          busy={busy || !!globalRun}
+          busy={busy}
           onClose={closeOverlay}
           onNew={() => void newConversation()}
           onSelect={(id) => {
@@ -993,8 +993,8 @@ export function App() {
           onCreated={group => navigate({ selection: current.current.selection, surface: { kind: 'group', groupId: group.id, conversationId: null } })}
           onDeleted={group => { const now = current.current.surface; if (now.kind === 'group' && now.groupId === group.id) navigate({ selection: current.current.selection, surface: { kind: 'chat' } }); }} />
       )}
-      {state.overlay?.kind === 'capabilities' && bot && (
-        <Skills key={bot.id} bot={bot} busy={busy || !!globalRun} onClose={closeOverlay}
+      {state.overlay?.kind === 'capabilities' && data && bot && (
+        <Skills key={bot.id} bot={bot} data={data} busy={busy} onClose={closeOverlay}
           onChange={snapshot => dispatch({ type: 'snapshot', data: snapshot })}
           onCreateWithBot={prepareSkillRequest} />
       )}

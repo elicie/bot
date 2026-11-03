@@ -1,9 +1,10 @@
 import { useLayoutEffect, useRef, useState } from 'react';
 import { ArrowLeftRight, Clock3, Plus, X } from 'lucide-react';
-import type { AvatarShape, Bot, Conversation } from '../shared/types';
-import { activeRun, conversationPreview, runLabels } from './state';
+import type { AppState, AvatarShape, Bot, Conversation } from '../shared/types';
+import { activeRun, conversationPreview, isBotRunning, runLabels } from './state';
 import { Avatar, avatarShapes, ErrorNotice, IconButton, Modal } from './ui';
 import './bots.css';
+import './concurrency.css';
 
 const botPalette = [
   { color: '#ffffff', label: '흰색' },
@@ -22,12 +23,14 @@ export const botColors = botPalette.map((option) => option.color);
 
 export function BotDialog({
   bot,
+  data,
   busy,
   error,
   onClose,
   onSave,
 }: {
   bot?: Bot;
+  data?: AppState | null;
   busy: boolean;
   error: string | null;
   onClose: () => void;
@@ -38,6 +41,8 @@ export function BotDialog({
   const [color, setColor] = useState(bot?.color ?? botColors[0]);
   const [shape, setShape] = useState<AvatarShape>(bot?.shape ?? 'blob');
   const errorRef = useRef<HTMLDivElement>(null);
+  const running = !!bot && isBotRunning(data ?? null, bot.id);
+  const blocked = busy || running;
   useLayoutEffect(() => {
     if (error) errorRef.current?.scrollIntoView({ block: 'nearest' });
   }, [error]);
@@ -62,7 +67,7 @@ export function BotDialog({
         aria-busy={busy}
         onSubmit={async (event) => {
           event.preventDefault();
-          if (!name.trim() || busy || !dirty) return;
+          if (!name.trim() || blocked || !dirty) return;
           if (await onSave({ name: name.trim(), instructions, color, shape })) onClose();
         }}
       >
@@ -79,7 +84,7 @@ export function BotDialog({
               required
               value={name}
               onChange={(event) => setName(event.target.value)}
-              disabled={busy}
+              disabled={blocked}
               placeholder="Bot 이름"
               autoComplete="off"
             />
@@ -94,7 +99,7 @@ export function BotDialog({
                 aria-pressed={shape === option.value}
                 title={`${option.label} 캐릭터 모양`}
                 onClick={() => setShape(option.value)}
-                disabled={busy}
+                disabled={blocked}
               >
                 <Avatar color={color} size={40} shape={option.value} />
               </button>
@@ -111,7 +116,7 @@ export function BotDialog({
                 aria-pressed={color.toLowerCase() === option.color}
                 title={`${option.label} 캐릭터 색상`}
                 onClick={() => setColor(option.color)}
-                disabled={busy}
+                disabled={blocked}
               />
             ))}
           </div>
@@ -125,11 +130,12 @@ export function BotDialog({
               maxLength={20000}
               value={instructions}
               onChange={(event) => setInstructions(event.target.value)}
-              disabled={busy}
+              disabled={blocked}
               placeholder="어떤 일을 도울지, 어떻게 응답할지 알려주세요."
             />
             <small>새 작업에 적용되는 에이전트 지침입니다.</small>
           </label>
+          {running && <p className="bot-configuration-status" role="status">이 Bot의 작업이 끝나면 설정을 저장할 수 있습니다. 작성 중인 내용은 유지됩니다.</p>}
           {error && <div ref={errorRef}><ErrorNotice>{error}</ErrorNotice></div>}
         </div>
         <footer className="modal-footer">
@@ -140,7 +146,7 @@ export function BotDialog({
             type="submit"
             className="primary-button"
             aria-label={bot ? '봇 저장' : '봇 추가'}
-            disabled={busy || !name.trim() || !dirty}
+            disabled={blocked || !name.trim() || !dirty}
           >
             {busy ? '저장 중…' : bot ? '봇 저장' : '만들기'}
           </button>
