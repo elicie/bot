@@ -208,6 +208,9 @@ async fn host_ext(host: &EngineHost, method: &'static str, params: Value, timeou
 fn bound_app(state: &State, conversation_id: &str, activity_id: &str) -> HttpResult<(McpApp, ResolvedMcpServer)> {
     state.assert_writable()?;
     let conversation = state.conversation(conversation_id)?;
+    if state.worker_for_conversation(conversation_id).is_some() {
+        return Err(HttpError::forbidden("Workers are read-only. MCP apps are unavailable in worker conversations."));
+    }
     let (message, activity) = conversation
         .messages
         .iter()
@@ -284,6 +287,11 @@ impl Runtime {
     /// Schedule bounded resource work without stalling the sole normal-update router. Finishing
     /// joins these turn-owned tasks before closing the originating session.
     pub(super) fn queue_mcp_app_capture(&self, run: &Arc<Run>, update: Value) {
+        // A stray engine update cannot expand a hidden worker's read-only authority or fetch UI
+        // resources. Check both the private run flag and the durable conversation ownership.
+        if run.worker_id.is_some() || self.store.read(|state| state.worker_for_conversation(&run.conversation_id).is_some()) {
+            return;
+        }
         let call_id = update["toolCallId"].as_str().unwrap_or_default().to_owned();
         // Older messages have durable captures; this turn reserves its remaining slots in the task
         // vector. Never acquire the store lock while holding flags (projection does the reverse).
@@ -742,6 +750,9 @@ mod tests {
             loaded_prompt: None,
             extra_rules: None,
             report_deliveries: Vec::new(),
+            worker_id: None,
+            worker_deadline: None,
+            worker_report: None,
             keys: Vec::new(),
             mcp: RunMcp::default(),
             flags: std::sync::Mutex::new(super::super::RunFlags { finishing: true, ..Default::default() }),

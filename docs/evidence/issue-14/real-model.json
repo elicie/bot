@@ -1,0 +1,131 @@
+{
+  "model": "gpt-6.1-sol",
+  "prompt": "다음은 실제 날씨가 아니라 비교 연습용으로 제공한 자료야. 서울: 기온 18°C, 강수 확률 20%. 부산: 22°C, 40%. 제주: 24°C, 60%. 같은 Bot의 하위 worker 3개에게 도시 하나씩 나눠 맡겨 각각 한 줄로 요약하게 해 줘. 외부 정보는 조회하지 말고 제공한 자료만 사용해. 결과가 모두 오면 한 번에 표로 비교하고, 가장 따뜻한 도시와 비 가능성이 가장 낮은 도시를 알려 줘.",
+  "approvals": 3,
+  "observations": [
+    {
+      "elapsedSeconds": 0,
+      "parent": "idle"
+    },
+    {
+      "elapsedSeconds": 0,
+      "parent": "running"
+    },
+    {
+      "elapsedSeconds": 12,
+      "parent": "awaiting_permission"
+    },
+    {
+      "elapsedSeconds": 12,
+      "parent": "running",
+      "workers": [
+        "queued"
+      ]
+    },
+    {
+      "elapsedSeconds": 19,
+      "parent": "awaiting_permission",
+      "workers": [
+        "queued"
+      ]
+    },
+    {
+      "elapsedSeconds": 19,
+      "parent": "running",
+      "workers": [
+        "queued",
+        "queued"
+      ]
+    },
+    {
+      "elapsedSeconds": 26,
+      "parent": "awaiting_permission",
+      "workers": [
+        "queued",
+        "queued"
+      ]
+    },
+    {
+      "elapsedSeconds": 26,
+      "parent": "running",
+      "workers": [
+        "queued",
+        "queued",
+        "queued"
+      ]
+    },
+    {
+      "elapsedSeconds": 33,
+      "parent": "completed",
+      "workers": [
+        "running",
+        "queued",
+        "queued"
+      ]
+    },
+    {
+      "capturedActive": true
+    },
+    {
+      "elapsedSeconds": 36,
+      "parent": "completed",
+      "workers": [
+        "completed",
+        "running",
+        "queued"
+      ]
+    },
+    {
+      "elapsedSeconds": 39,
+      "parent": "completed",
+      "workers": [
+        "completed",
+        "completed",
+        "running"
+      ]
+    },
+    {
+      "elapsedSeconds": 49,
+      "parent": "running",
+      "workers": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "report": "running"
+    },
+    {
+      "elapsedSeconds": 56,
+      "parent": "completed",
+      "workers": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "report": "completed"
+    }
+  ],
+  "publicConversationCount": 1,
+  "visibleUserMessages": 1,
+  "workers": [
+    {
+      "task": "비교 연습용 자료의 서울만 맡아 한국어 한 줄로 요약하세요. 제공 자료: 서울 기온 18°C, 강수 확률 20%. 외부 정보 조회와 도구 사용 없이 이 자료만 사용하세요. 출력 형식: 서울: 기온 18°C, 강수 확률 20%.",
+      "status": "completed",
+      "answer": "서울: 기온 18°C, 강수 확률 20%."
+    },
+    {
+      "task": "비교 연습용 자료의 부산만 맡아 한국어 한 줄로 요약하세요. 제공 자료: 부산 기온 22°C, 강수 확률 40%. 외부 정보 조회와 도구 사용 없이 이 자료만 사용하세요. 출력 형식: 부산: 기온 22°C, 강수 확률 40%.",
+      "status": "completed",
+      "answer": "부산: 기온 22°C, 강수 확률 40%."
+    },
+    {
+      "task": "비교 연습용 자료의 제주만 맡아 한국어 한 줄로 요약하세요. 제공 자료: 제주 기온 24°C, 강수 확률 60%. 외부 정보 조회와 도구 사용 없이 이 자료만 사용하세요. 출력 형식: 제주: 기온 24°C, 강수 확률 60%.",
+      "status": "completed",
+      "answer": "제주: 기온 24°C, 강수 확률 60%."
+    }
+  ],
+  "reportStatus": "completed",
+  "reportAnswer": "하위 worker 3개가 모두 한 줄 요약을 완료했습니다. 제공하신 비교 연습용 자료를 종합한 결과입니다.\n\n| 도시 | 기온 | 강수 확률 |\n|---|---:|---:|\n| 서울 | 18°C | 20% |\n| 부산 | 22°C | 40% |\n| 제주 | 24°C | 60% |\n\n- **가장 따뜻한 도시:** 제주 — 24°C\n- **비 가능성이 가장 낮은 도시:** 서울 — 강수 확률 20%",
+  "browserErrors": [],
+  "canonicalStateUnchanged": true
+}

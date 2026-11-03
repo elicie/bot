@@ -1,4 +1,4 @@
-use grok_bot_model::{PrivateSettings, QueuedWork, RunState, WorkKind};
+use grok_bot_model::{DiskState, PrivateSettings, QueuedWork, RunState, WorkKind};
 use serde_json::json;
 
 #[test]
@@ -17,6 +17,8 @@ fn work_items_have_a_flat_tag_and_camel_case_receipt_fields() {
         WorkKind::Delivery { delivery_id: "delivery-id".into() },
         WorkKind::Group { round_id: "round-id".into() },
         WorkKind::Report { delivery_id: "reported-delivery-id".into() },
+        WorkKind::Worker { worker_id: "worker-id".into() },
+        WorkKind::WorkerReport { batch_id: "batch-id".into() },
     ] {
         let work = QueuedWork { kind, ..base.clone() };
         let value = serde_json::to_value(&work).unwrap();
@@ -32,6 +34,33 @@ fn work_items_have_a_flat_tag_and_camel_case_receipt_fields() {
     let mut user = serde_json::to_value(&base).unwrap();
     user.as_object_mut().unwrap().remove("attachments");
     assert_eq!(serde_json::from_value::<QueuedWork>(user).unwrap(), base);
+}
+
+#[test]
+fn legacy_state_defaults_both_queue_and_worker_receipts_without_forcing_new_fields() {
+    let disk: DiskState = serde_json::from_value(json!({
+        "version": 1,
+        "settings": { "baseUrl": "", "model": "", "workspace": "", "apiKey": "" },
+        "bots": [],
+        "conversations": []
+    }))
+    .unwrap();
+    assert!(disk.work_queue.is_empty() && disk.worker_batches.is_empty());
+    let saved = serde_json::to_value(disk).unwrap();
+    assert!(saved.get("workQueue").is_none() && saved.get("workerBatches").is_none());
+}
+
+#[test]
+fn worker_pointer_tags_are_additive_and_strict() {
+    for (kind, expected) in [
+        (WorkKind::Worker { worker_id: "worker-id".into() }, json!({ "kind": "worker", "workerId": "worker-id" })),
+        (WorkKind::WorkerReport { batch_id: "batch-id".into() }, json!({ "kind": "worker_report", "batchId": "batch-id" })),
+    ] {
+        assert_eq!(serde_json::to_value(&kind).unwrap(), expected);
+        assert_eq!(serde_json::from_value::<WorkKind>(expected).unwrap(), kind);
+    }
+    assert!(serde_json::from_value::<WorkKind>(json!({ "kind": "workerReport", "batchId": "batch-id" })).is_err());
+    assert!(serde_json::from_value::<WorkKind>(json!({ "kind": "worker", "batchId": "batch-id" })).is_err());
 }
 
 #[test]

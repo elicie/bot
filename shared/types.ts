@@ -95,6 +95,35 @@ export interface DeliveryReport {
   finishedAt?: string;
   error?: string;
 }
+/** App-owned, read-only same-Bot work. Child conversations are omitted from public state. */
+export interface WorkerTask {
+  id: string;
+  conversationId: string;
+  task: string;
+  createdAt: string;
+  status: Exclude<BotDelivery['status'], 'waiting_children'>;
+  executionRunId?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  error?: string;
+  answer?: string;
+}
+export interface WorkerBatch {
+  id: string;
+  botId: string;
+  parentConversationId: string;
+  sourceMessageId: string;
+  sourceRunId: string;
+  /** The read-only file workspace explicitly authorized at spawn; absent legacy tasks get none. */
+  authorizedWorkspace?: string;
+  createdAt: string;
+  releasedAt?: string;
+  cancelled: boolean;
+  workers: WorkerTask[];
+  report?: DeliveryReport;
+  reportInputId?: string;
+  reportMessageId?: string;
+}
 export interface PermissionOption { id: string; label: string; kind: string }
 export interface PendingPermission {
   id: string;
@@ -293,6 +322,8 @@ export type QueuedWork = {
   | { kind: 'delivery'; deliveryId: string }
   | { kind: 'group'; roundId: string }
   | { kind: 'report'; deliveryId: string }
+  | { kind: 'worker'; workerId: string }
+  | { kind: 'worker_report'; batchId: string }
 );
 export interface AppState {
   revision: number;
@@ -304,6 +335,7 @@ export interface AppState {
   workQueue?: QueuedWork[];
   botExchanges?: BotExchange[];
   botDeliveries?: BotDelivery[];
+  workerBatches?: WorkerBatch[];
   permissionRules?: PermissionRule[];
   groups?: Group[];
   routineSchedulingError?: string;

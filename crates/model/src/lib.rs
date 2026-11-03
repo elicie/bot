@@ -15,6 +15,8 @@ mod mcp_apps;
 pub use mcp_apps::*;
 mod vault;
 pub use vault::*;
+mod workers;
+pub use workers::*;
 
 pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
@@ -749,6 +751,14 @@ pub enum WorkKind {
     Report {
         delivery_id: String,
     },
+    /// A released, unstarted task in an application-managed worker batch.
+    Worker {
+        worker_id: String,
+    },
+    /// The single grouped follow-up after a worker batch's children are terminal.
+    WorkerReport {
+        batch_id: String,
+    },
 }
 
 pub type QueuedWorkKind = WorkKind;
@@ -772,6 +782,8 @@ pub struct DiskState {
     pub bot_exchanges: Vec<BotExchange>,
     #[serde(default)]
     pub bot_deliveries: Vec<BotDelivery>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worker_batches: Vec<WorkerBatch>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub work_queue: Vec<QueuedWork>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -806,6 +818,8 @@ pub struct AppState {
     pub bot_deliveries: Vec<BotDelivery>,
     #[serde(default)]
     pub work_queue: Vec<QueuedWork>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worker_batches: Vec<WorkerBatch>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permission_rules: Vec<PermissionRule>,
     /// Omitted when empty, like `state.json`.

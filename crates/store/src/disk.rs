@@ -88,6 +88,7 @@ pub(crate) fn schema_valid(disk: &mut DiskState) -> bool {
         && disk.bot_deliveries.iter_mut().all(delivery_valid)
         && crate::permissions::rules_valid(&disk.permission_rules)
         && crate::vault::schema_valid(disk)
+        && crate::workers::schema_valid(disk)
         && crate::queue::schema_valid(disk)
 }
 
@@ -158,6 +159,7 @@ pub(crate) fn references_valid(disk: &DiskState) -> Result<(), String> {
         })
         || !crate::groups::references_valid(disk)
         || !crate::vault::references_valid(disk)
+        || !crate::workers::references_valid(disk)
         || !crate::queue::references_valid(disk)
         || disk.routines.iter().any(|routine| {
             !bot_ids.contains(routine.bot_id.as_str())

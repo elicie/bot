@@ -23,12 +23,13 @@ import type {
   RoutineRun,
   ToolActivity,
 } from '../shared/types';
-import { activeRun, pendingBotWork, runLabels } from './state';
+import { activeRun, pendingBotWork, pendingWorkerBatch, runLabels } from './state';
 import { Avatar, ErrorNotice, IconButton } from './ui';
 import { BotMessageLinks, BotReportMarker, BotRequestBanner } from './BotChat';
 import { RichMarkdown } from './RichMarkdown';
 import { LinkPreviewGroup } from './LinkPreviews';
 import { TodoList } from './TodoList';
+import { WorkerProgress, WorkerReportMarker } from './Workers';
 import { McpAppCard } from './McpApp';
 import { AttachButton, AttachmentTray, DropOverlay, MessageAttachments, useFileDrop, type ComposerAttachments } from './Attachments';
 
@@ -102,8 +103,12 @@ function ToolCard({ tool }: { tool: ToolActivity }) {
   );
 }
 function MessageView({ message, bot, conversationId, named, settled }: { message: Message; bot: Bot; conversationId?: string; named?: boolean; settled: boolean }) {
-  // Successful native plan updates are represented once by the latest checklist, not tool history.
-  const tools = message.tools.filter(tool => tool.kind !== 'think' || tool.title !== 'Updating plan' || tool.status === 'failed');
+  // Plans have their checklist. A worker's broker approval is already represented by the engine
+  // invocation row (and its separate approval card), so do not show a second completed tool row.
+  const tools = message.tools.filter(tool =>
+    (tool.kind !== 'think' || tool.title !== 'Updating plan' || tool.status === 'failed') &&
+    tool.title !== 'Spawn read-only worker',
+  );
   return (
     <article
       className={`message-row ${message.role}`}
@@ -285,6 +290,8 @@ export function Transcript({
     return () => observer.disconnect();
   }, []);
   const running = conversation && activeRun(conversation.run.status);
+  const workerPending = pendingWorkerBatch(data, conversation?.id);
+  const workerBatches = data?.workerBatches?.filter(batch => batch.parentConversationId === conversation?.id) ?? [];
   const waitingBotWork = !running && pendingBotWork(data ?? null, conversation);
   const tailDelivery = data?.botDeliveries?.find(delivery => delivery.sourceConversationId === conversation?.id && delivery.sourceMessageId === tail?.id);
   const chainTermination = tailDelivery && data?.botDeliveries?.find(delivery => delivery.id === tailDelivery.chainId)?.chainTermination;
@@ -340,7 +347,9 @@ export function Transcript({
                   {message === tail && message.role === 'assistant' && !!conversation?.run.todos?.length && (
                     <TodoList key={`${conversationId}-${conversation.run.id}`} todos={conversation.run.todos} running={!!running} />
                   )}
+                  <WorkerReportMarker messageId={message.id} data={data} />
                   <MessageView message={message} bot={speakerFor?.(message) ?? bot} conversationId={conversation?.id} named={!!speakerFor} settled={!running || message !== tail} />
+                  {workerBatches.filter(batch => batch.sourceMessageId === message.id).map(batch => <WorkerProgress key={batch.id} batch={batch} />)}
                   {data && onBotChat && <BotMessageLinks message={message} data={data} onOpen={onBotChat} onCancelReports={onCancelReports} cancelReportsDisabled={cancelReportsDisabled} />}
                   {onRoutines && <RoutineLinks message={message} onOpen={onRoutines} />}
                   {messageExtras?.(message)}
@@ -348,6 +357,9 @@ export function Transcript({
               )}
             </div>
           ))}
+          {workerPending && !running && (
+            <p className="run-indicator" role="status"><LoaderCircle size={14} className="spin" />하위 작업 결과를 기다리는 중</p>
+          )}
           {queuedRoutine && (
             <p className="run-indicator" role="status">
               <Clock3 size={14} />루틴 실행 대기 중
@@ -384,7 +396,7 @@ export function Transcript({
               작업을 중단했습니다.
             </p>
           )}
-          {status === 'completed' && (
+          {status === 'completed' && !workerPending && !workerBatches.some(batch => batch.sourceRunId === conversation?.run.id && batch.cancelled) && (
             <p className="terminal-note" role="status">
               {waitingBotWork ? <Clock3 size={13} /> : chainTermination ? <Square size={12} /> : <CheckCircle2 size={13} />}
               {waitingBotWork ? 'Bot 답변 대기 중' : chainTermination ? (chainTermination.status === 'cancelled' ? 'Bot 작업을 중단했습니다.' : 'Bot 작업이 실패했습니다.') : '작업 완료'}

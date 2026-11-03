@@ -44,6 +44,8 @@ pub(crate) fn schema_valid(disk: &DiskState) -> bool {
                 WorkKind::Routine { run_id } => is_uuid(run_id),
                 WorkKind::Delivery { delivery_id } | WorkKind::Report { delivery_id } => is_uuid(delivery_id),
                 WorkKind::Group { round_id } => is_uuid(round_id),
+                WorkKind::Worker { worker_id } => is_uuid(worker_id),
+                WorkKind::WorkerReport { batch_id } => is_uuid(batch_id),
             }
     })
 }
@@ -65,6 +67,7 @@ pub(crate) fn references_valid(disk: &DiskState) -> bool {
                 (None, None) => user_owner(disk, conversation, text).as_deref() == Some(work.bot_id.as_str()),
                 (None, Some(_)) => false,
             }) && !disk.bot_deliveries.iter().any(|delivery| delivery.recipient_conversation_id == conversation.id)
+                && !disk.worker_batches.iter().flat_map(|batch| &batch.workers).any(|worker| worker.conversation_id == conversation.id)
                 && !disk.routine_runs.iter().any(|run| {
                     run.conversation_id == conversation.id && run.result.is_none() && !run.execution_run_id.as_deref().is_some_and(|id| !id.is_empty())
                 })
@@ -99,6 +102,8 @@ fn pointer_key(work: &QueuedWork) -> Option<PointerKey> {
         WorkKind::Delivery { delivery_id } => (1, delivery_id),
         WorkKind::Group { round_id } => (2, round_id),
         WorkKind::Report { delivery_id } => (3, delivery_id),
+        WorkKind::Worker { worker_id } => (4, worker_id),
+        WorkKind::WorkerReport { batch_id } => (5, batch_id),
     };
     Some((kind, work.conversation_id.clone(), work.bot_id.clone(), source.clone()))
 }
@@ -192,6 +197,34 @@ fn ready_pointers(disk: &DiskState, existing: &[QueuedWork]) -> Vec<QueuedWork> 
             first.finished_at.as_deref().unwrap_or(&first.created_at),
             WorkKind::Report { delivery_id: first.id.clone() },
         ));
+    }
+    for batch in &disk.worker_batches {
+        if batch.cancelled || batch.released_at.is_none() || !bots.contains(batch.bot_id.as_str()) {
+            continue;
+        }
+        for worker in &batch.workers {
+            if worker.status == DeliveryStatus::Queued
+                && worker.execution_run_id.is_none()
+                && worker.started_at.is_none()
+                && conversations
+                    .get(worker.conversation_id.as_str())
+                    .is_some_and(|child| child.bot_id == batch.bot_id && child.run.status == RunStatus::Idle && child.run.id.is_empty())
+            {
+                ready.push(pointer(&batch.bot_id, &worker.conversation_id, &worker.created_at, WorkKind::Worker { worker_id: worker.id.clone() }));
+            }
+        }
+        if batch.workers.iter().all(|worker| worker.status.is_terminal())
+            && batch.report.as_ref().is_some_and(|report| report.status == ReportStatus::Queued && report.run_id.is_none())
+            && conversations.get(batch.parent_conversation_id.as_str()).is_some_and(|parent| parent.bot_id == batch.bot_id)
+        {
+            let finished_at = batch
+                .workers
+                .iter()
+                .filter_map(|worker| worker.finished_at.as_deref())
+                .max_by_key(|timestamp| parse_ms(timestamp).unwrap_or(i64::MIN))
+                .unwrap_or(&batch.created_at);
+            ready.push(pointer(&batch.bot_id, &batch.parent_conversation_id, finished_at, WorkKind::WorkerReport { batch_id: batch.id.clone() }));
+        }
     }
     let indices: HashMap<&str, usize> = disk.conversations.iter().enumerate().map(|(index, conversation)| (conversation.id.as_str(), index)).collect();
     ready.sort_by(|a, b| {

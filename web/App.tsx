@@ -44,6 +44,7 @@ import {
   isDirty,
   readRoute,
   queuedRoutineRun,
+  pendingWorkerBatch,
   pendingBotWork,
   reducer,
   recipientDelivery,
@@ -429,6 +430,8 @@ export function App() {
       (!text && !files.length) ||
       runningConversation(before.data) ||
       queuedRoutineRun(before.data, selectedConversation(before)) ||
+      recipientDelivery(before.data, before.selection.conversationId) ||
+      pendingWorkerBatch(before.data, before.selection.conversationId ?? undefined) ||
       commandLock.current
     )
       return;
@@ -488,7 +491,7 @@ export function App() {
   const cancel = async () => {
     const before = current.current;
     const active = selectedConversation(before);
-    if (!active || (!activeRun(active.run.status) && !queuedRoutineRun(before.data, active) && !pendingBotWork(before.data, active))) return;
+    if (!active || (!activeRun(active.run.status) && !queuedRoutineRun(before.data, active) && !pendingBotWork(before.data, active) && !pendingWorkerBatch(before.data, active.id))) return;
     await command('cancel', async () => {
       const snapshot = await request<AppState>(
         `/api/conversations/${encodeURIComponent(active.id)}/cancel`,
@@ -859,9 +862,9 @@ export function App() {
               onSend={() => void send()}
               onFiles={() => toggleComputer(true)}
               onCancel={() => void cancel()}
-              running={!!queuedRun || (!!conversation && activeRun(conversation.run.status))}
+              running={!!queuedRun || (!!conversation && (activeRun(conversation.run.status) || !!pendingWorkerBatch(data, conversation.id)))}
               pendingBotWork={botWork}
-              disabled={state.connection !== 'online' || !!globalRun || !!queuedRun || !!recipientDelivery(data, conversation?.id)}
+              disabled={state.connection !== 'online' || !!globalRun || !!queuedRun || !!pendingWorkerBatch(data, conversation?.id) || !!recipientDelivery(data, conversation?.id)}
               placeholder={recipientDelivery(data, conversation?.id) ? '다른 Bot의 요청으로 열린 대화라 여기서는 보낼 수 없습니다' : undefined}
               readOnly={!!recipientDelivery(data, conversation?.id)}
               busy={busy}

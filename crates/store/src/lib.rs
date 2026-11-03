@@ -37,6 +37,7 @@ pub mod templates;
 pub mod validate;
 pub mod vault;
 pub mod webhooks;
+pub mod workers;
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -66,6 +67,9 @@ pub const MAX_ROUTINE_RUNS: usize = 10000;
 // delivery can also introduce a queued report, whose separate allowance must not grow the total.
 const BOT_REPORT_METADATA_RESERVE: usize = 8192;
 const BOT_TURN_TEXT_RESERVE: usize = 2 * MAX_BOT_REPLY_CHARACTERS * 6 + 2 * BOT_REPORT_METADATA_RESERVE;
+// The grouped worker report quotes at most 12 KiB of the redacted source request. Its JSON is
+// itself stored inside Message.text: reserve both escaping layers plus sourceUserId/field metadata.
+const WORKER_REPORT_SOURCE_RESERVE: usize = 12 * 1024 * 12 + 512;
 
 pub const DEFAULT_BOT_COLOR: &str = "#8b5cf6";
 const WRITE_FAILED: &str = "State could not be persisted. Restart after checking the data directory.";
@@ -109,6 +113,7 @@ enum Job {
         routine_scheduling_error: Option<String>,
         /// The bytes contain bot report fields, which binaries without reports cannot load.
         reports: bool,
+        workers: bool,
         /// `waiting_children`/`chainTermination` and recipient reports cannot be read by PR9.
         bot_chains: bool,
         /// Older report-aware binaries require a run ID on cancelled reports.
@@ -122,6 +127,8 @@ enum Job {
 
 /// One-time copy of a `state.json` from before bot reports, kept next to it.
 pub const PRE_REPORTS_BACKUP: &str = "state.json.pre-bot-reports.bak";
+/// One-time rollback copy from before the first worker batch is persisted.
+pub const PRE_WORKERS_BACKUP: &str = "state.json.pre-workers.bak";
 /// Separate rollback point for the upgrade from bot reports to nested bot chains.
 pub const PRE_BOT_CHAINS_BACKUP: &str = "state.json.pre-bot-chains.bak";
 /// One-time copy before a cancelled report without a run ID is first persisted. Report-aware older
@@ -172,7 +179,8 @@ fn backup_before_shape(path: &Path, name: &str, uses_shape: fn(&DiskState) -> bo
     let mut existing = Vec::new();
     source.read_to_end(&mut existing)?;
     let mut disk = serde_json::from_slice::<DiskState>(&existing)?;
-    if !disk::schema_valid(&mut disk) {
+    let data_dir = path.parent().ok_or_else(|| std::io::Error::other("State has no parent directory."))?;
+    if !disk::schema_valid(&mut disk) || !workers::authorization_valid(&disk, data_dir) {
         return Err(std::io::Error::other("Application state does not match the expected schema."));
     }
     disk::references_valid(&disk).map_err(std::io::Error::other)?;
@@ -191,7 +199,7 @@ fn backup_before_shape(path: &Path, name: &str, uses_shape: fn(&DiskState) -> bo
             // Parsing JSON alone is insufficient: this must also pass the real store loader's
             // schema and reference checks before it can make an incompatible write safe.
             let mut saved = serde_json::from_reader(file)?;
-            if !disk::schema_valid(&mut saved) {
+            if !disk::schema_valid(&mut saved) || !workers::authorization_valid(&saved, data_dir) {
                 return Err(std::io::Error::other("The state backup does not match the expected schema."));
             }
             disk::references_valid(&saved).map_err(std::io::Error::other)?;
@@ -225,11 +233,12 @@ fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_err
         revision,
         settings,
         bots,
-        conversations,
+        mut conversations,
         mut routines,
         routine_runs,
         bot_exchanges,
         bot_deliveries,
+        worker_batches,
         work_queue,
         permission_rules,
         groups,
@@ -238,6 +247,12 @@ fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_err
         ..
     } = disk;
     webhooks::strip_webhook_secrets(&mut routines);
+    let hidden: HashSet<&str> = worker_batches.iter().flat_map(|batch| batch.workers.iter().map(|worker| worker.conversation_id.as_str())).collect();
+    let inputs: HashSet<&str> = worker_batches.iter().filter_map(|batch| batch.report_input_id.as_deref()).collect();
+    conversations.retain(|conversation| !hidden.contains(conversation.id.as_str()));
+    for conversation in &mut conversations {
+        conversation.messages.retain(|message| !inputs.contains(message.id.as_str()));
+    }
     let max_concurrent_runs = Some(settings.max_concurrent_runs() as u32);
     let mut state = AppState {
         revision,
@@ -247,6 +262,7 @@ fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_err
         routine_runs,
         bot_exchanges,
         bot_deliveries,
+        worker_batches,
         work_queue,
         permission_rules,
         groups,
@@ -287,6 +303,7 @@ pub struct Store {
 }
 
 fn writer_loop(shared: Arc<Shared>, path: PathBuf, jobs: mpsc::Receiver<Job>) {
+    let mut workers_backed_up = false;
     let mut reports_backed_up = false;
     let mut bot_chains_backed_up = false;
     let mut unstarted_cancellations_backed_up = false;
@@ -296,7 +313,7 @@ fn writer_loop(shared: Arc<Shared>, path: PathBuf, jobs: mpsc::Receiver<Job>) {
             Job::Flush(done) => {
                 let _ = done.send(());
             }
-            Job::Write { bytes, runtime, routine_scheduling_error, reports, bot_chains, unstarted_report_cancellations, work_queue, done } => {
+            Job::Write { bytes, runtime, routine_scheduling_error, reports, workers, bot_chains, unstarted_report_cancellations, work_queue, done } => {
                 if reports && !reports_backed_up {
                     if let Err(error) = backup_before_shape(&path, PRE_REPORTS_BACKUP, uses_reports) {
                         // Preserve the original pre-reports backup's best-effort behavior.
@@ -326,6 +343,10 @@ fn writer_loop(shared: Arc<Shared>, path: PathBuf, jobs: mpsc::Receiver<Job>) {
                         if unstarted_report_cancellations && !unstarted_cancellations_backed_up {
                             backup_before_shape(&path, PRE_UNSTARTED_REPORT_CANCELLATION_BACKUP, uses_unstarted_report_cancellations)?;
                             unstarted_cancellations_backed_up = true;
+                        }
+                        if workers && !workers_backed_up {
+                            backup_before_shape(&path, PRE_WORKERS_BACKUP, |disk| !disk.worker_batches.is_empty())?;
+                            workers_backed_up = true;
                         }
                         if work_queue && !work_queue_backed_up {
                             backup_before_shape(&path, PRE_WORK_QUEUE_BACKUP, uses_work_queue)?;
@@ -392,6 +413,7 @@ fn default_state(now: DateTime<Utc>) -> DiskState {
         routine_runs: Vec::new(),
         bot_exchanges: Vec::new(),
         bot_deliveries: Vec::new(),
+        worker_batches: Vec::new(),
         work_queue: Vec::new(),
         permission_rules: Vec::new(),
         groups: Vec::new(),
@@ -418,7 +440,7 @@ fn load(path: &Path) -> anyhow::Result<Option<DiskState>> {
         let mut text = String::new();
         file.read_to_string(&mut text)?;
         let mut disk: DiskState = serde_json::from_str(&text)?;
-        if !disk::schema_valid(&mut disk) {
+        if !disk::schema_valid(&mut disk) || !workers::authorization_valid(&disk, path.parent().ok_or_else(|| anyhow::anyhow!(LOAD_FAILED))?) {
             anyhow::bail!("Application state does not match the expected schema.");
         }
         disk::references_valid(&disk).map_err(anyhow::Error::msg)?;
@@ -518,7 +540,9 @@ impl Store {
             if !dirty {
                 return Ok(value);
             }
-            let mut job = state.commit();
+            // Internal invariant failures are fail-stop, not a rollback of the closure: retain
+            // the last good durable state and refuse further mutations until restart.
+            let mut job = state.commit()?;
             let (done, wait) = oneshot::channel();
             if let Job::Write { done: slot, .. } = &mut job {
                 *slot = Some(done);
@@ -591,6 +615,8 @@ struct Prospect<'a> {
     bot_exchanges: Vec<&'a BotExchange>,
     bot_deliveries: Vec<&'a BotDelivery>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    worker_batches: Vec<&'a WorkerBatch>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     work_queue: Vec<&'a QueuedWork>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     permission_rules: &'a Vec<PermissionRule>,
@@ -602,6 +628,8 @@ struct Prospect<'a> {
     mcp_servers: &'a Vec<McpServerRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
     main_bot_id: &'a Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    link_previews_enabled: bool,
 }
 
 fn truthy(value: &Option<String>) -> bool {
@@ -649,12 +677,14 @@ impl State {
             routine_runs: self.disk.routine_runs.iter().collect(),
             bot_exchanges: self.disk.bot_exchanges.iter().collect(),
             bot_deliveries: self.disk.bot_deliveries.iter().collect(),
+            worker_batches: self.disk.worker_batches.iter().collect(),
             work_queue: self.disk.work_queue.iter().collect(),
             permission_rules: &self.disk.permission_rules,
             groups: &self.disk.groups,
             secrets: &self.disk.secrets,
             mcp_servers: &self.disk.mcp_servers,
             main_bot_id: &self.disk.main_bot_id,
+            link_previews_enabled: self.disk.link_previews_enabled,
         }
     }
 
@@ -704,6 +734,32 @@ impl State {
                 }
             })
             .sum();
+        if prospect.worker_batches.len() > workers::MAX_WORKER_BATCHES {
+            return Err(HttpError::conflict("Worker history is full. Existing history is retained."));
+        }
+        let workers: usize = prospect
+            .worker_batches
+            .iter()
+            .map(|batch| {
+                let tasks: usize = batch
+                    .workers
+                    .iter()
+                    .filter(|worker| !workers::worker_terminal(worker.status))
+                    .map(|worker| {
+                        (if worker.status == DeliveryStatus::Queued { json_bytes(&worker.task) + 4096 } else { 0 })
+                            + MAX_BOT_REPLY_CHARACTERS * 12
+                            + workers::MAX_WORKER_ANSWER_BYTES * 6
+                            + 8192
+                    })
+                    .sum();
+                let report = if !batch.cancelled && batch.report.as_ref().is_none_or(|report| !report.status.is_terminal()) {
+                    workers::MAX_WORKER_ANSWER_BYTES * batch.workers.len() * 12 + MAX_BOT_REPLY_CHARACTERS * 6 + 8192 + WORKER_REPORT_SOURCE_RESERVE
+                } else {
+                    0
+                };
+                tasks.saturating_add(report)
+            })
+            .sum();
         let user_turns = prospect.work_queue.iter().filter(|work| matches!(work.kind, WorkKind::User { .. })).count().saturating_mul(4096);
         // Missing specialized pointers are appended by the commit projection. Include their small
         // metadata tail in admission rather than accepting an immediately oversized state file.
@@ -717,8 +773,30 @@ impl State {
                 prospect.bot_deliveries.iter().filter(|delivery| delivery.report.as_ref().is_some_and(|report| report.status == ReportStatus::Queued)).count(),
             )
             .saturating_add(prospect.conversations.iter().filter(|conversation| conversation.group_round.is_some()).count())
+            .saturating_add(
+                prospect
+                    .worker_batches
+                    .iter()
+                    .filter(|batch| !batch.cancelled && batch.released_at.is_some())
+                    .map(|batch| {
+                        batch
+                            .workers
+                            .iter()
+                            .filter(|worker| worker.status == DeliveryStatus::Queued && worker.execution_run_id.is_none() && worker.started_at.is_none())
+                            .count()
+                            .saturating_add(usize::from(batch.report.as_ref().is_some_and(|report| report.status == ReportStatus::Queued)))
+                    })
+                    .sum::<usize>(),
+            )
             .saturating_mul(512);
-        if json_bytes(prospect).saturating_add(runs).saturating_add(deliveries).saturating_add(user_turns).saturating_add(pointer_reserve) > MAX_STATE_BYTES {
+        if json_bytes(prospect)
+            .saturating_add(runs)
+            .saturating_add(deliveries)
+            .saturating_add(workers)
+            .saturating_add(user_turns)
+            .saturating_add(pointer_reserve)
+            > MAX_STATE_BYTES
+        {
             return Err(HttpError::too_large(
                 "Application state and reserved queued work would exceed the 64 MiB limit. Existing history and conversations are retained.",
             ));
@@ -793,9 +871,9 @@ impl State {
 
     /// `changed()` up to the write: projections, revision bump, serialization. The public snapshot
     /// for subscribers is rebuilt from these bytes on the writer thread, off the state lock.
-    fn commit(&mut self) -> Job {
+    fn commit(&mut self) -> HttpResult<Job> {
         let now = self.now();
-        let DiskState { routine_runs, conversations, bot_deliveries, bot_exchanges, .. } = &mut self.disk;
+        let DiskState { routine_runs, conversations, bot_deliveries, bot_exchanges, worker_batches, .. } = &mut self.disk;
         for routine_run in routine_runs.iter_mut() {
             if routine_run.result.is_some() {
                 continue;
@@ -819,19 +897,33 @@ impl State {
         }
         let routine_conversations: HashSet<&str> = routine_runs.iter().map(|run| run.conversation_id.as_str()).collect();
         reconcile_bot_deliveries(bot_deliveries, bot_exchanges, conversations, &routine_conversations, now);
+        workers::reconcile(worker_batches, conversations, now);
+        if !self.disk.worker_batches.is_empty()
+            && (!workers::schema_valid(&self.disk) || !workers::references_valid(&self.disk) || !workers::authorization_valid(&self.disk, &self.data_dir))
+        {
+            self.write_failed = true;
+            self.runtime = RuntimeInfo {
+                available: false,
+                bot_message_chains: self.runtime.bot_message_chains,
+                version: self.runtime.version.clone(),
+                error: Some(SAVE_FAILED_RUNTIME.into()),
+            };
+            return Err(internal());
+        }
         self.sync_work_queue();
         self.disk.revision += 1;
         let bytes = serde_json::to_vec(&self.disk).unwrap_or_default();
-        Job::Write {
+        Ok(Job::Write {
             bytes,
             runtime: self.runtime.clone(),
             routine_scheduling_error: self.routine_scheduling_error.clone(),
             reports: uses_reports(&self.disk),
+            workers: !self.disk.worker_batches.is_empty(),
             bot_chains: uses_bot_chains(&self.disk),
             unstarted_report_cancellations: uses_unstarted_report_cancellations(&self.disk),
             work_queue: uses_work_queue(&self.disk),
             done: None,
-        }
+        })
     }
 
     fn snapshot(&self) -> AppState {
@@ -929,6 +1021,7 @@ impl State {
     pub fn is_reserved_conversation(&self, id: &str) -> bool {
         self.disk.bot_deliveries.iter().any(|delivery| delivery.recipient_conversation_id == id)
             || self.disk.routine_runs.iter().any(|run| run.conversation_id == id && run.result.is_none() && !truthy(&run.execution_run_id))
+            || self.worker_for_conversation(id).is_some()
     }
 
     /// Link previews can be disabled even during an active run; no engine configuration changes.
@@ -1462,6 +1555,9 @@ impl State {
         if source.group_id.is_some() {
             return Err(HttpError::conflict("Bot messages are unavailable in group conversations."));
         }
+        if self.worker_for_conversation(conversation_id).is_some() {
+            return Err(HttpError::conflict("Workers cannot send bot messages."));
+        }
         let message = source.messages.iter().rposition(|message| message.role == Role::Assistant);
         if source.run.id != execution_run_id
             || !source.run.status.is_active()
@@ -1590,6 +1686,17 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_report_source_reserve_covers_nested_json_and_identifier_metadata() {
+        for character in ["\u{0000}", "\"", "\\", "a"] {
+            let source_request = serde_json::json!({ "sourceRequest": {
+                "sourceUserId": new_id(), "text": character.repeat(12 * 1024)
+            } });
+            let prompt = source_request.to_string();
+            assert!(json_bytes(&prompt) <= WORKER_REPORT_SOURCE_RESERVE, "nested source request needs {} bytes", json_bytes(&prompt));
+        }
+    }
 
     #[test]
     fn base_url_matches_whatwg_url() {

@@ -7,7 +7,7 @@ another copy of the engine.
 ```sh
 # All core library and integration tests:
 node scripts/cargo.mjs test --locked -p grok-bot-core
-# List the 48 integration cases (30 runtime scenarios plus per-Bot concurrency coverage):
+# List the integration cases (including worker and per-Bot concurrency scenarios):
 node scripts/cargo.mjs test --locked -p grok-bot-core --test integration -- --list
 # Run one scenario, including its output:
 node scripts/cargo.mjs test --locked -p grok-bot-core --test integration \
@@ -28,6 +28,7 @@ cannot reset those caches, and changing process environment variables inside con
 unsafe. `common::run` sets the child's environment **before startup**, without modifying the
 parent's environment. The vault test also installs its log subscriber only in its child.
 
-The former runtime driver contained 28 fixture scenarios plus checklist and startup checks. Those
-same bodies and assertions now have 30 separate libtest entry points; the other 16 original test
-entry points remain. No application behavior or assertion coverage is intentionally changed.
+The former runtime driver contained 32 fixture scenarios (including four worker scenarios) plus
+checklist and startup checks. Those same bodies and assertions now have 34 separate libtest entry
+points; the other 16 original test entry points and the link-preview API case remain. No application
+behavior or assertion coverage is intentionally changed.

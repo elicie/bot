@@ -148,13 +148,14 @@ async fn send(app: &TestApp, id: &str) {
     assert_eq!(result.0, 202, "{result:?}");
 }
 
-fn assert_ready_search(fixture: &Fixture, total: usize) {
+fn assert_ready_search(fixture: &Fixture) -> usize {
     let searches = fixture.searches.lock().unwrap();
     assert_eq!(searches.len(), 1, "{searches:?}");
     let result = &searches[0];
     eprintln!("[mcp-initial-search] first search: {result}");
     assert_eq!(result["status"], "ready", "{result}");
-    assert_eq!(result["total_hidden_tools"], total, "{result}");
+    let total = result["total_hidden_tools"].as_u64().expect("search reports its complete catalog size") as usize;
+    assert!(total > 2, "workspace tools remain indexed alongside the two synthetic tools: {result}");
     assert!(
         result["results"]
             .as_array()
@@ -163,6 +164,15 @@ fn assert_ready_search(fixture: &Fixture, total: usize) {
             .any(|group| { group["server"] == "notion" && group["tools"].as_array().unwrap().iter().any(|tool| tool["tool_name"] == "notion__notion-search") }),
         "{result}"
     );
+    assert!(
+        result["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|group| group["server"] == "notion" && group["tools"].as_array().unwrap().iter().any(|tool| tool["tool_name"] == "notion__notion-fetch")),
+        "{result}"
+    );
+    total
 }
 
 #[test]
@@ -189,8 +199,10 @@ fn first_search_waits_for_custom_mcp_on_new_and_loaded_sessions() {
         assert_eq!(app.api("PATCH", &format!("/api/bots/{bot}/mcp-servers/notion"), Some(json!({"enabled":true}))).await.0, 200);
         let (_, created) = app.api("POST", "/api/conversations", Some(json!({"botId":bot}))).await;
         let id = created["conversation"]["id"].as_str().unwrap();
-        // 22 app-owned workspace tools, plus the two synthetic Notion tools.
-        let builtin_count = 22;
+        // App-owned tools can grow independently (for example same-Bot workers). Record the
+        // workspace portion from the first complete catalog; the loaded turn must match it and
+        // a failed Notion server below must remove exactly its two synthetic tools.
+        let mut builtin_count = None;
 
         // Beyond upstream's two-second grace: the immediate model must still see a complete index.
         let delay_ms = std::env::var("MCP_SEARCH_DELAY_MS").ok().map(|value| value.parse::<u64>().expect("fixture delay in milliseconds")).unwrap_or(3500);
@@ -200,7 +212,12 @@ fn first_search_waits_for_custom_mcp_on_new_and_loaded_sessions() {
             fixture.searches.lock().unwrap().clear();
             send(&app, id).await;
             let current = wait_for(&app, id, |c| c["run"]["status"] == "awaiting_permission" || c["run"]["status"] == "completed").await;
-            assert_ready_search(&fixture, builtin_count + 2);
+            let discovered_workspace_count = assert_ready_search(&fixture) - 2;
+            if let Some(expected) = builtin_count {
+                assert_eq!(discovered_workspace_count, expected, "loading a session retains the complete catalog");
+            } else {
+                builtin_count = Some(discovered_workspace_count);
+            }
             assert_eq!(current["run"]["status"], "awaiting_permission");
             assert_eq!(fixture.calls.load(Ordering::SeqCst), turn, "discovery must not bypass custom tool approval");
             let permission = &current["run"]["permission"];
@@ -226,7 +243,7 @@ fn first_search_waits_for_custom_mcp_on_new_and_loaded_sessions() {
             let searches = fixture.searches.lock().unwrap();
             assert_eq!(searches.len(), 1);
             assert_eq!(searches[0]["status"], "ready");
-            assert_eq!(searches[0]["total_hidden_tools"], builtin_count);
+            assert_eq!(searches[0]["total_hidden_tools"], builtin_count.unwrap(), "only the failed server's two tools disappear");
             assert!(searches[0]["results"].as_array().unwrap().is_empty());
         }
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);

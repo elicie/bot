@@ -37,6 +37,9 @@ use mcp_apps::mcp_apps;
 #[path = "runtime_bot_reports/mod.rs"]
 mod bot_reports;
 use bot_reports::{bot_report_cancellation, bot_report_failures, bot_reports};
+#[path = "runtime_workers/mod.rs"]
+mod workers;
+use workers::{worker_batches, worker_cancellation, worker_deadline, worker_workspace_authorization};
 #[path = "runtime_canvas/mod.rs"]
 mod canvas;
 use canvas::{canvas_edits, canvas_literal_data, canvas_redaction};
@@ -278,11 +281,12 @@ struct Options {
     startup: Duration,
     idle: Duration,
     cancel: Duration,
+    worker: Duration,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { startup: Duration::from_secs(30), idle: Duration::from_secs(30), cancel: Duration::from_millis(800) }
+        Self { startup: Duration::from_secs(30), idle: Duration::from_secs(30), cancel: Duration::from_millis(800), worker: Duration::from_secs(5 * 60) }
     }
 }
 
@@ -303,6 +307,7 @@ impl Fixture {
                 startup_timeout: options.startup,
                 prompt_idle_timeout: options.idle,
                 cancel_deadline: options.cancel,
+                worker_timeout: options.worker,
             },
         );
         runtime.initialize().await;
@@ -1373,6 +1378,10 @@ mod scenarios {
     scenario!(bot_reports);
     scenario!(bot_report_failures);
     scenario!(bot_report_cancellation);
+    scenario!(worker_batches);
+    scenario!(worker_cancellation);
+    scenario!(worker_workspace_authorization);
+    scenario!(worker_deadline, Options { worker: Duration::from_millis(500), ..Options::default() });
     scenario!(nested_bot_reports);
     scenario!(stop_nested_bot_chains);
     scenario!(expire_nested_bot_chains);

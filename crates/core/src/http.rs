@@ -567,7 +567,8 @@ async fn send_message(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(
 }
 
 async fn cancel(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(id): Path<String>, JsonBody(_): JsonBody<Empty>) -> ApiResult {
-    // Stop is scoped to this conversation, not to other Bots executing its message descendants.
+    // Runtime signals this conversation and its internal worker children before queue contention
+    // or a fallible save. Other conversations and Bot-message descendants keep their own slots.
     ctx.runtime.cancel(&id).await?;
     Ok(state_reply(&ctx, StatusCode::OK, &remote))
 }

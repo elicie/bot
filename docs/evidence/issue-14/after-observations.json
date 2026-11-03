@@ -1,0 +1,13 @@
+{
+  "phase": "after",
+  "calls": 9,
+  "browserErrors": [],
+  "viewport": {
+    "desktop": "1040x760",
+    "mobile": "390x844"
+  },
+  "locale": "ko-KR",
+  "timezone": "Asia/Seoul",
+  "theme": "dark",
+  "scenario": "Scripted example city data; parent held immediately after three spawn attempts."
+}

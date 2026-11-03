@@ -161,7 +161,15 @@ impl Runtime {
         if current.epoch != status.epoch || current.frame_id != status.frame_id {
             return Err(HttpError::conflict("Browser changed while approval was pending. Observe again.").into());
         }
-        run.flags().computer_epoch = Some(status.epoch.clone());
+        {
+            let mut flags = run.flags();
+            if flags.stopped || flags.finishing {
+                return Err(HttpError::forbidden("Browser operation denied or cancelled.").into());
+            }
+            // Publish ownership under the same lock as Stop: it either sees this epoch or this
+            // operation observes the stopped flag and cannot start after cancellation cleanup.
+            flags.computer_epoch = Some(status.epoch.clone());
+        }
         let request = json!({ "requestId": new_id(), "epoch": status.epoch, "frameId": status.frame_id, "action": action });
         let value = computer.perform(&run.bot.id, request, computer.generation()).await?;
         if run.inactive() {

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { reducer, emptyFiles, draftKey, readRoute, routeSearch, pendingBotWork, ownConversationsFor, type UIState } from '../web/state.js';
+import { reducer, emptyFiles, draftKey, readRoute, routeSearch, runningConversation, pendingWorkerBatch, workerBatchPending, pendingBotWork, ownConversationsFor, conversationsFor, type UIState } from '../web/state.js';
 import type { AppState } from '../shared/types.js';
 
 function snapshot(revision: number, status: 'running' | 'completed'): AppState {
@@ -94,6 +94,41 @@ test('external document refresh updates clean editors and preserves unsaved edit
   }
 });
 
+test('only executing hidden workers hold global admission while queued parents retain Stop', () => {
+  const data = snapshot(1, 'completed');
+  const parent = data.conversations[0];
+  const batch = {
+    id: randomUUID(), botId: parent.botId, parentConversationId: parent.id,
+    sourceMessageId: parent.messages[0].id, sourceRunId: parent.run.id,
+    createdAt: parent.updatedAt, cancelled: false,
+    workers: [{ id: randomUUID(), conversationId: randomUUID(), task: 'Review city data', status: 'queued' as const, createdAt: parent.updatedAt }],
+  };
+  data.workerBatches = [batch];
+  assert.equal(runningConversation(data), undefined, 'a queued batch does not lock unrelated conversations');
+  assert.equal(pendingWorkerBatch(data, parent.id), batch);
+  data.workerBatches = [{ ...batch, workers: [{ ...batch.workers[0], status: 'running' }] }];
+  assert.equal(runningConversation(data), parent, 'an executing hidden child owns the global slot');
+  assert.equal(pendingWorkerBatch(data, 'other'), undefined);
+  const finished = { ...batch, workers: [{ ...batch.workers[0], status: 'completed' as const }], report: { status: 'queued' as const } };
+  assert.equal(workerBatchPending(finished), true);
+  assert.equal(workerBatchPending({ ...finished, report: { status: 'running' } }), true);
+  assert.equal(workerBatchPending({ ...finished, report: { status: 'completed' } }), false);
+  assert.equal(workerBatchPending({ ...batch, cancelled: true }), false);
+  assert.equal(workerBatchPending({ ...batch, cancelled: true, workers: [{ ...batch.workers[0], status: 'running' }] }), true);
+  data.workerBatches = [{ ...finished, report: { status: 'completed' } }];
+  assert.equal(runningConversation(data), undefined);
+  data.workerBatches = [];
+  assert.equal(runningConversation(data), undefined);
+
+  data.workerBatches = [{ ...finished, report: { status: 'queued' } }];
+  assert.equal(runningConversation(data), undefined, 'a queued worker report does not lock unrelated conversations');
+  data.workerBatches = [{ ...finished, report: { status: 'running' } }];
+  assert.equal(runningConversation(data), parent, 'an executing worker report owns the global slot');
+  const actualRun = { ...parent, id: 'actual-running-conversation', run: { id: 'actual-run', status: 'running' as const } };
+  data.conversations.push(actualRun);
+  assert.equal(runningConversation(data), actualRun, 'main’s actual active conversation takes priority over worker fallback');
+});
+
 test('pendingBotWork keeps Stop available for related deliveries and pending source reports only', () => {
   const data = snapshot(1, 'completed');
   data.runtime.botMessageChains = true;
@@ -156,4 +191,41 @@ test('opening a bot prefers its own newest conversation over a newer one opened 
   data.conversations = [recipient];
   assert.deepEqual(ownConversationsFor(data, own.botId), []);
   assert.equal(reducer(ui(), { type: 'snapshot', data }).selection.conversationId, null);
+});
+
+test('worker batches do not change own-conversation defaults, full history, or explicit recipient and empty-chat selection', () => {
+  const data = snapshot(1, 'completed');
+  const own = data.conversations[0];
+  const newerOwn = { ...own, id: 'newer-own', updatedAt: '2026-10-31T12:00:00Z' };
+  const recipient = { ...own, id: 'recipient', updatedAt: '2026-11-01T00:00:00Z' };
+  data.conversations = [own, recipient, newerOwn];
+  data.botDeliveries = [{
+    id: 'delivery', exchangeId: 'exchange', chainId: 'delivery', hop: 1,
+    sourceConversationId: 'other-source', sourceMessageId: 'other-message',
+    recipientConversationId: recipient.id, fromBotId: 'other-bot', toBotId: own.botId,
+    text: 'A public fixture question.', createdAt: recipient.updatedAt, status: 'waiting_children',
+  }];
+  data.workerBatches = [{
+    id: 'batch', botId: own.botId, parentConversationId: own.id,
+    sourceMessageId: own.messages[0].id, sourceRunId: own.run.id,
+    createdAt: recipient.updatedAt, cancelled: false,
+    workers: [{ id: 'worker', conversationId: 'hidden-child', task: 'Review public fixture data', status: 'running', createdAt: recipient.updatedAt }],
+  }];
+  assert.deepEqual(conversationsFor(data, own.botId).map(item => item.id), [recipient.id, newerOwn.id, own.id], 'history still includes recipient conversations');
+  assert.deepEqual(ownConversationsFor(data, own.botId).map(item => item.id), [newerOwn.id, own.id], 'defaults and sidebar previews use own conversations only');
+  const fresh = reducer(ui(), { type: 'snapshot', data });
+  assert.equal(fresh.selection.conversationId, newerOwn.id);
+
+  const explicit = reducer(fresh, { type: 'select', selection: { botId: own.botId, conversationId: recipient.id } });
+  assert.equal(explicit.selection.conversationId, recipient.id, 'history and execution links may explicitly open a recipient');
+  const remembered = reducer({ ...explicit, selection: { botId: own.botId, conversationId: 'missing' } }, { type: 'snapshot', data });
+  assert.equal(remembered.selection.conversationId, recipient.id, 'a remembered explicit recipient wins over the own-conversation fallback');
+  assert.deepEqual(ownConversationsFor(data, own.botId).map(item => item.id), [newerOwn.id, own.id], 'remembering a recipient never makes it an own-conversation preview');
+
+  const empty = reducer(remembered, { type: 'select', selection: { botId: own.botId, conversationId: null } });
+  assert.equal(reducer(empty, { type: 'snapshot', data }).selection.conversationId, null, 'an explicit empty chat survives worker snapshots');
+  const recipientOnly = { ...data, conversations: [recipient] };
+  assert.deepEqual(conversationsFor(recipientOnly, own.botId).map(item => item.id), [recipient.id]);
+  assert.deepEqual(ownConversationsFor(recipientOnly, own.botId), []);
+  assert.equal(reducer(ui(), { type: 'snapshot', data: recipientOnly }).selection.conversationId, null, 'recipient-only history opens a new empty chat even with worker batches');
 });

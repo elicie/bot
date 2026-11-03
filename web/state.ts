@@ -6,6 +6,7 @@ import type {
   FileDocument,
   FileListing,
   RunStatus,
+  WorkerBatch,
 } from '../shared/types';
 import { previewText } from './preview-text';
 
@@ -68,8 +69,19 @@ export interface UIState {
 }
 export const activeRun = (status: RunStatus) =>
   status === 'starting' || status === 'running' || status === 'awaiting_permission';
-export const runningConversation = (data: AppState | null) =>
-  data?.conversations.find((conversation) => activeRun(conversation.run.status));
+/** Hidden workers retain the parent's busy/Stop affordance without exposing child sessions. */
+export const workerBatchPending = (batch: WorkerBatch) =>
+  batch.workers.some(worker => worker.status === 'running') || batch.report?.status === 'running' ||
+  (!batch.cancelled && (batch.workers.some(worker => worker.status === 'queued') || !batch.report || batch.report.status === 'queued'));
+export const pendingWorkerBatch = (data: AppState | null | undefined, conversationId: string | undefined) =>
+  data?.workerBatches?.find(batch => batch.parentConversationId === conversationId && workerBatchPending(batch));
+export const runningConversation = (data: AppState | null) => {
+  const active = data?.conversations.find(conversation => activeRun(conversation.run.status));
+  if (active) return active;
+  // Queued work has no execution slot yet: other conversations can still start a user turn.
+  const batch = data?.workerBatches?.find(batch => batch.workers.some(worker => worker.status === 'running') || batch.report?.status === 'running');
+  return batch && data?.conversations.find(conversation => conversation.id === batch.parentConversationId);
+};
 /** A waiting Bot chain can own descendants even when this conversation has no active engine turn. */
 export const pendingBotWork = (data: AppState | null, conversation: Conversation | undefined) =>
   !!data?.runtime.botMessageChains && !!conversation && !!data.botDeliveries?.some(delivery =>

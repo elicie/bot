@@ -198,6 +198,8 @@ impl Runtime {
             }
             WorkKind::Group { .. } => (Turn::Group, Vec::new()),
             WorkKind::Report { .. } => (Turn::Report, Vec::new()),
+            WorkKind::Worker { worker_id } => (Turn::Worker(worker_id.clone()), Vec::new()),
+            WorkKind::WorkerReport { batch_id } => (Turn::WorkerReport(batch_id.clone()), Vec::new()),
         };
         self.start_turn(&work.conversation_id, turn, attachments, &work.id).await
     }
@@ -206,12 +208,38 @@ impl Runtime {
         self.store
             .mutate(|state| {
                 state.assert_writable()?;
+                // A direct caller or cancellation may already have claimed this pointer. Never
+                // turn a started receipt into an admission failure on a stale dispatch snapshot.
+                if !state.disk().work_queue.iter().any(|queued| queued == work) {
+                    return Ok(());
+                }
                 let now = state.now();
                 match &work.kind {
                     WorkKind::Routine { run_id } => state.fail_routine_run(run_id, error, now)?,
                     WorkKind::Delivery { delivery_id } => state.fail_bot_delivery(delivery_id, error, now)?,
                     WorkKind::Group { .. } => state.fail_group_round(&work.conversation_id, error)?,
                     WorkKind::Report { delivery_id } => state.fail_bot_reports_for(&work.conversation_id, Some(delivery_id), error, now)?,
+                    WorkKind::Worker { worker_id } => {
+                        let queued = state.worker_for_conversation(&work.conversation_id).is_some_and(|(batch, worker)| {
+                            batch.bot_id == work.bot_id
+                                && worker.id == *worker_id
+                                && worker.status == grok_bot_model::DeliveryStatus::Queued
+                                && worker.execution_run_id.is_none()
+                        });
+                        if queued {
+                            state.fail_worker(worker_id, error)?;
+                        }
+                    }
+                    WorkKind::WorkerReport { batch_id } => {
+                        let queued = state.worker_batch(batch_id).is_ok_and(|batch| {
+                            batch.bot_id == work.bot_id
+                                && batch.parent_conversation_id == work.conversation_id
+                                && batch.report.as_ref().is_some_and(|report| report.status == grok_bot_model::ReportStatus::Queued && report.run_id.is_none())
+                        });
+                        if queued {
+                            state.fail_worker_report(batch_id, error)?;
+                        }
+                    }
                     WorkKind::User { text, attachments } => {
                         use grok_bot_model::{Message, Role, RunState, RunStatus, iso, new_id};
                         let timestamp = iso(now);
