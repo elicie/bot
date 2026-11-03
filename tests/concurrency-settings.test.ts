@@ -13,6 +13,7 @@ register(`data:text/javascript,${encodeURIComponent(`
 const { Settings, initialSettingsForm, formReducer, settingsFormDirty, settingsFormInput, concurrencyLimitError } = await import('../web/Settings.js');
 const { BotDialog, History } = await import('../web/Bots.js');
 const { BotDeleteDialog } = await import('../web/BotMenu.js');
+const { BotDataSections } = await import('../web/BotData.js');
 const { Skills } = await import('../web/Skills.js');
 const { BotIntegrations, vaultScopeRunning } = await import('../web/Vault.js');
 
@@ -138,6 +139,29 @@ test('private skill mutations and local MCP switches lock by owner, not by anoth
   const renderMcp = (bot: Bot) => renderToStaticMarkup(createElement(BotIntegrations, { data, bot, dispatch() {} }));
   assert.match(input(renderMcp(data.bots[0]), 'server-a 사용'), /disabled=/);
   assert.doesNotMatch(input(renderMcp(data.bots[1]), 'server-b 사용'), /disabled=/);
+});
+
+test('Bot memories and knowledge wait only for their owner while template import remains global', () => {
+  const data = fixture();
+  for (const bot of data.bots) {
+    bot.memories = [{ id: `memory-${bot.id}`, text: `Memory ${bot.id}`, source: 'user', createdAt: timestamp }];
+    bot.knowledge = [{ id: `knowledge-${bot.id}`, name: `knowledge-${bot.id}.txt`, bytes: 12, hash: 'a'.repeat(64), createdAt: timestamp }];
+  }
+  const render = (bot: Bot) => renderToStaticMarkup(createElement(BotDataSections, { bot, data, dispatch() {}, onBotCreated() {} }));
+  const knowledgeAdd = (html: string) => html.match(/<button[^>]*class="text-button"[^>]*>파일 추가<\/button>/)?.[0] ?? '';
+  for (const [index, ownerBusy] of [[0, true], [1, false]] as const) {
+    const html = render(data.bots[index]);
+    for (const control of [input(html, '새 메모리'), button(html, `메모리 삭제: Memory ${data.bots[index].id}`), button(html, `파일 삭제: knowledge-${data.bots[index].id}.txt`), knowledgeAdd(html)]) {
+      assert.ok(control, 'memory/knowledge control must exist');
+      assert.equal(control.includes('disabled='), ownerBusy, 'only the actual group speaker owns a live Bot configuration slot');
+    }
+    assert.match(input(html, 'Bot 템플릿 파일 선택'), /disabled=/, 'template import still needs the entire app idle');
+  }
+  delete data.conversations[0].run.botId;
+  assert.doesNotMatch(input(render(data.bots[0]), '새 메모리'), /disabled=/);
+  assert.match(input(render(data.bots[1]), '새 메모리'), /disabled=/, 'legacy active speaker fallback also applies');
+  data.conversations[0].run.status = 'completed';
+  assert.doesNotMatch(input(render(data.bots[1]), 'Bot 템플릿 파일 선택'), /disabled=/);
 });
 
 test('global secrets stay blocked anywhere during a run; an idle Bot scope remains editable', () => {

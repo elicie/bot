@@ -3,7 +3,7 @@ import { Brain, Download, FileText, Plus, Trash2, Upload, X } from 'lucide-react
 import type { AppState, Bot } from '../shared/types';
 import type { BotTemplate, KnowledgeDocument, KnowledgeFile, MemoryPreviewItem, TemplateImportResult } from '../shared/bot-data';
 import { errorText, request } from './api';
-import { type Action, runningConversation } from './state';
+import { type Action, isBotRunning, runningConversation } from './state';
 import { ErrorNotice, IconButton, Modal, Spinner } from './ui';
 import './bot-data.css';
 
@@ -38,7 +38,9 @@ export function BotDataSections({ bot, data, dispatch, onBotCreated }: {
   const templateInput = useRef<HTMLInputElement>(null);
   const prefix = useId();
   useEffect(() => { setError(null); setStatus(null); setMemoryDraft(''); setDialog(null); }, [bot.id]);
-  const blocked = !!runningConversation(data) || pending !== null;
+  const ownerRunning = isBotRunning(data, bot.id);
+  const blocked = ownerRunning || pending !== null;
+  const templateBlocked = !!runningConversation(data) || pending !== null;
   const memories = bot.memories ?? [];
   const files = bot.knowledge ?? [];
 
@@ -61,7 +63,7 @@ export function BotDataSections({ bot, data, dispatch, onBotCreated }: {
   const addMemory = async (event: FormEvent) => {
     event.preventDefault();
     const text = memoryDraft.trim();
-    if (!text) return;
+    if (!text || blocked) return;
     await run('memory', async () => {
       const result = await request<{ added: unknown[]; state: AppState }>(`${botPath(bot)}/memories`, { method: 'POST', body: { texts: [text] } });
       dispatch({ type: 'snapshot', data: result.state });
@@ -70,14 +72,14 @@ export function BotDataSections({ bot, data, dispatch, onBotCreated }: {
     });
   };
   const forget = async (id: string, text: string) => {
-    if (!window.confirm(`이 메모리를 삭제할까요?\n\n${text}`)) return;
+    if (blocked || !window.confirm(`이 메모리를 삭제할까요?\n\n${text}`)) return;
     await run('forget', async () => {
       dispatch({ type: 'snapshot', data: await request<AppState>(`${botPath(bot)}/memories/${encodeURIComponent(id)}`, { method: 'DELETE', body: {} }) });
       setStatus('메모리를 삭제했어요.');
     });
   };
   const removeFile = async (file: KnowledgeFile) => {
-    if (!window.confirm(`‘${file.name}’ 파일을 지식에서 삭제할까요?`)) return;
+    if (blocked || !window.confirm(`‘${file.name}’ 파일을 지식에서 삭제할까요?`)) return;
     await run('knowledge-delete', async () => {
       dispatch({ type: 'snapshot', data: await request<AppState>(`${botPath(bot)}/knowledge/${encodeURIComponent(file.id)}`, { method: 'DELETE', body: {} }) });
       setStatus('파일을 삭제했어요.');
@@ -93,7 +95,7 @@ export function BotDataSections({ bot, data, dispatch, onBotCreated }: {
     setTimeout(() => URL.revokeObjectURL(link.href), 0);
     setStatus('템플릿을 내보냈어요.');
   });
-  const importTemplate = (file: File) => run('template', async () => {
+  const importTemplate = (file: File) => templateBlocked ? undefined : run('template', async () => {
     const text = await readUtf8(file, MAX_TEMPLATE_BYTES);
     let template: unknown;
     try { template = JSON.parse(text); } catch { throw new Error('템플릿 JSON을 읽을 수 없어요. Grok Bot 템플릿 파일을 선택하세요.'); }
@@ -136,17 +138,17 @@ export function BotDataSections({ bot, data, dispatch, onBotCreated }: {
       <label className="bot-data-check"><input type="checkbox" checked={includeMemories} onChange={event => setIncludeMemories(event.target.checked)} />메모리 포함</label>
       <div className="bot-data-actions">
         <button type="button" className="small-button" disabled={pending !== null} onClick={() => void exportTemplate()}><Download size={13} />{pending === 'export' ? '내보내는 중…' : '템플릿 내보내기'}</button>
-        <button type="button" className="small-button" disabled={blocked} onClick={() => templateInput.current?.click()}><Upload size={13} />{pending === 'template' ? '가져오는 중…' : 'Bot 가져오기'}</button>
-        <input ref={templateInput} type="file" hidden accept=".json,application/json" aria-label="Bot 템플릿 파일 선택" onChange={event => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; if (file) void importTemplate(file); }} />
+        <button type="button" className="small-button" disabled={templateBlocked} onClick={() => templateInput.current?.click()}><Upload size={13} />{pending === 'template' ? '가져오는 중…' : 'Bot 가져오기'}</button>
+        <input ref={templateInput} type="file" hidden disabled={templateBlocked} accept=".json,application/json" aria-label="Bot 템플릿 파일 선택" onChange={event => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; if (file) void importTemplate(file); }} />
       </div>
     </section>
-    {dialog === 'import' && <MemoryImport bot={bot} onClose={() => setDialog(null)} onSaved={(state, count) => { dispatch({ type: 'snapshot', data: state }); setDialog(null); setStatus(`메모리 ${count}개를 추가했어요.`); }} />}
-    {dialog === 'knowledge' && <KnowledgeAdd bot={bot} onClose={() => setDialog(null)} onSaved={state => { dispatch({ type: 'snapshot', data: state }); setDialog(null); setStatus('파일을 지식에 추가했어요.'); }} />}
+    {dialog === 'import' && <MemoryImport bot={bot} ownerRunning={ownerRunning} onClose={() => setDialog(null)} onSaved={(state, count) => { dispatch({ type: 'snapshot', data: state }); setDialog(null); setStatus(`메모리 ${count}개를 추가했어요.`); }} />}
+    {dialog === 'knowledge' && <KnowledgeAdd bot={bot} ownerRunning={ownerRunning} onClose={() => setDialog(null)} onSaved={state => { dispatch({ type: 'snapshot', data: state }); setDialog(null); setStatus('파일을 지식에 추가했어요.'); }} />}
     {dialog && typeof dialog === 'object' && <KnowledgePreview botId={bot.id} file={dialog.preview} onClose={() => setDialog(null)} />}
   </>;
 }
 
-function MemoryImport({ bot, onClose, onSaved }: { bot: Bot; onClose: () => void; onSaved: (state: AppState, count: number) => void }) {
+function MemoryImport({ bot, ownerRunning, onClose, onSaved }: { bot: Bot; ownerRunning: boolean; onClose: () => void; onSaved: (state: AppState, count: number) => void }) {
   const [text, setText] = useState('');
   const [items, setItems] = useState<(MemoryPreviewItem & { checked: boolean })[] | null>(null);
   const [pending, setPending] = useState(false);
@@ -154,6 +156,7 @@ function MemoryImport({ bot, onClose, onSaved }: { bot: Bot; onClose: () => void
   const [copied, setCopied] = useState(false);
   const selected = items?.filter(item => item.checked) ?? [];
   const preview = async () => {
+    if (pending || ownerRunning) return;
     setPending(true); setError(null);
     try {
       const result = await request<{ memories: MemoryPreviewItem[] }>(`${botPath(bot)}/memories/preview`, { method: 'POST', body: { text } });
@@ -161,6 +164,7 @@ function MemoryImport({ bot, onClose, onSaved }: { bot: Bot; onClose: () => void
     } catch (failure) { setError(errorText(failure)); } finally { setPending(false); }
   };
   const save = async () => {
+    if (pending || ownerRunning) return;
     setPending(true); setError(null);
     try {
       const result = await request<{ added: unknown[]; state: AppState }>(`${botPath(bot)}/memories`, { method: 'POST', body: { texts: selected.map(item => item.text), imported: true } });
@@ -175,14 +179,14 @@ function MemoryImport({ bot, onClose, onSaved }: { bot: Bot; onClose: () => void
         <p className="bot-data-step">1. 다른 AI 어시스턴트에 이 요청을 보내세요.</p>
         <div className="bot-data-prompt"><span>{IMPORT_PROMPT}</span><button type="button" className="small-button" onClick={() => { void navigator.clipboard?.writeText(IMPORT_PROMPT); setCopied(true); }}>{copied ? '복사됨' : '복사'}</button></div>
         <p className="bot-data-step">2. 결과를 아래에 붙여넣어 Grok Bot의 메모리에 추가하세요</p>
-        <textarea aria-label="가져올 메모리" placeholder="메모리 내용을 여기에 붙여넣으세요" rows={9} value={text} onChange={event => setText(event.target.value)} data-autofocus disabled={pending} />
+        <textarea aria-label="가져올 메모리" placeholder="메모리 내용을 여기에 붙여넣으세요" rows={9} value={text} onChange={event => setText(event.target.value)} data-autofocus disabled={pending || ownerRunning} />
         <small className="bot-data-help">한 줄이나 목록 항목 하나가 메모리 하나가 됩니다. 저장하기 전에 항목을 확인할 수 있어요.</small>
       </> : items.length === 0 ? <p className="detail-empty">추가할 항목이 없어요</p> : <>
         <p className="bot-data-step">{bot.name}에 추가할 항목을 선택하세요.</p>
         <ul className="bot-data-review" aria-label="가져올 메모리 항목">
           {items.map((item, index) => <li key={index}>
             <label>
-              <input type="checkbox" checked={item.checked} disabled={!!item.error || pending} onChange={event => setItems(items.map((other, position) => position === index ? { ...other, checked: event.target.checked } : other))} />
+              <input type="checkbox" checked={item.checked} disabled={!!item.error || pending || ownerRunning} onChange={event => setItems(items.map((other, position) => position === index ? { ...other, checked: event.target.checked } : other))} />
               <span>{item.text}{item.duplicate && <small>이미 있음</small>}{item.error && <small className="bot-data-invalid">{item.text.length > MAX_MEMORY_CHARACTERS ? `${MAX_MEMORY_CHARACTERS}자를 넘어 추가할 수 없어요` : '추가할 수 없는 문자가 있어요'}</small>}</span>
             </label>
           </li>)}
@@ -193,16 +197,16 @@ function MemoryImport({ bot, onClose, onSaved }: { bot: Bot; onClose: () => void
     <footer className="modal-footer">
       {items === null ? <>
         <button type="button" className="small-button" onClick={close} disabled={pending}>취소</button>
-        <button type="button" className="primary-button" onClick={() => void preview()} disabled={pending || !text.trim()}>{pending ? '확인 중…' : '항목 확인'}</button>
+        <button type="button" className="primary-button" onClick={() => void preview()} disabled={pending || ownerRunning || !text.trim()}>{pending ? '확인 중…' : '항목 확인'}</button>
       </> : <>
         <button type="button" className="small-button" onClick={() => setItems(null)} disabled={pending}>뒤로</button>
-        <button type="button" className="primary-button" onClick={() => void save()} disabled={pending || !selected.length}>{pending ? '추가 중…' : `메모리에 추가 (${selected.length})`}</button>
+        <button type="button" className="primary-button" onClick={() => void save()} disabled={pending || ownerRunning || !selected.length}>{pending ? '추가 중…' : `메모리에 추가 (${selected.length})`}</button>
       </>}
     </footer>
   </Modal>;
 }
 
-function KnowledgeAdd({ bot, onClose, onSaved }: { bot: Bot; onClose: () => void; onSaved: (state: AppState) => void }) {
+function KnowledgeAdd({ bot, ownerRunning, onClose, onSaved }: { bot: Bot; ownerRunning: boolean; onClose: () => void; onSaved: (state: AppState) => void }) {
   const [name, setName] = useState('');
   const [content, setContent] = useState('');
   const [pending, setPending] = useState(false);
@@ -210,6 +214,7 @@ function KnowledgeAdd({ bot, onClose, onSaved }: { bot: Bot; onClose: () => void
   const fileInput = useRef<HTMLInputElement>(null);
   const bytes = new TextEncoder().encode(content).length;
   const choose = async (file: File) => {
+    if (pending || ownerRunning) return;
     setError(null);
     try {
       setContent(await readUtf8(file, MAX_KNOWLEDGE_BYTES));
@@ -218,6 +223,7 @@ function KnowledgeAdd({ bot, onClose, onSaved }: { bot: Bot; onClose: () => void
   };
   const save = async (event: FormEvent) => {
     event.preventDefault();
+    if (pending || ownerRunning) return;
     setPending(true); setError(null);
     try {
       onSaved(await request<AppState>(`${botPath(bot)}/knowledge`, { method: 'POST', body: { name: name.trim(), content } }));
@@ -229,16 +235,16 @@ function KnowledgeAdd({ bot, onClose, onSaved }: { bot: Bot; onClose: () => void
     <form onSubmit={event => void save(event)}>
       <div className="modal-body bot-data-modal-body">
         <p className="bot-data-help">파일은 Bot에 공유 컨텍스트를 제공하고 팀의 지식을 활용해 답변하도록 돕습니다. 이 Bot의 대화에서만 읽을 수 있어요.</p>
-        <button type="button" className="small-button" onClick={() => fileInput.current?.click()} disabled={pending}><Upload size={13} />파일 업로드</button>
-        <input ref={fileInput} type="file" hidden accept=".txt,.md,.markdown,.csv,.json,.yaml,.yml,.html,.xml,text/*" aria-label="지식 파일 선택" onChange={event => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; if (file) void choose(file); }} />
-        <label className="bot-data-field"><span>파일 이름</span><input aria-label="파일 이름" value={name} maxLength={200} onChange={event => setName(event.target.value)} disabled={pending} data-autofocus /></label>
-        <label className="bot-data-field"><span>내용</span><textarea aria-label="파일 내용" rows={10} value={content} onChange={event => setContent(event.target.value)} disabled={pending} placeholder="텍스트를 붙여넣거나 파일을 업로드하세요" spellCheck={false} /></label>
+        <button type="button" className="small-button" onClick={() => fileInput.current?.click()} disabled={pending || ownerRunning}><Upload size={13} />파일 업로드</button>
+        <input ref={fileInput} type="file" hidden disabled={pending || ownerRunning} accept=".txt,.md,.markdown,.csv,.json,.yaml,.yml,.html,.xml,text/*" aria-label="지식 파일 선택" onChange={event => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; if (file) void choose(file); }} />
+        <label className="bot-data-field"><span>파일 이름</span><input aria-label="파일 이름" value={name} maxLength={200} onChange={event => setName(event.target.value)} disabled={pending || ownerRunning} data-autofocus /></label>
+        <label className="bot-data-field"><span>내용</span><textarea aria-label="파일 내용" rows={10} value={content} onChange={event => setContent(event.target.value)} disabled={pending || ownerRunning} placeholder="텍스트를 붙여넣거나 파일을 업로드하세요" spellCheck={false} /></label>
         <small className={`bot-data-help ${bytes > MAX_KNOWLEDGE_BYTES ? 'bot-data-invalid' : ''}`}>{formatBytes(bytes)} / 512 KB · UTF-8 텍스트</small>
         {error && <ErrorNotice>{error}</ErrorNotice>}
       </div>
       <footer className="modal-footer">
         <button type="button" className="small-button" onClick={close} disabled={pending}>취소</button>
-        <button type="submit" className="primary-button" disabled={pending || !name.trim() || !content.trim() || bytes > MAX_KNOWLEDGE_BYTES}>{pending ? '추가 중…' : '추가'}</button>
+        <button type="submit" className="primary-button" disabled={pending || ownerRunning || !name.trim() || !content.trim() || bytes > MAX_KNOWLEDGE_BYTES}>{pending ? '추가 중…' : '추가'}</button>
       </footer>
     </form>
   </Modal>;
