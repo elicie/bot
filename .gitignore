@@ -11,3 +11,4 @@ engine/target/
 .engine/
 target/
 .claude/worktrees/
+ci-target
