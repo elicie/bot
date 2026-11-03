@@ -21,7 +21,19 @@ node scripts/verify-release.mjs target/release/grok-bot
 
 ## Rebased review verification
 
-The review worktree is rebased onto `origin/main` at `576aa44`, including bounded MCP probes, update maintenance/backups, cancellation fixes, per-runner Cargo cache limits, and sidebar text previews. `HttpContext::new` keeps private probe lifecycle state initialized for the backend and the maintenance/report test hosts. The service updater passes its immutable staged frontend to the release embedder through `GROK_BOT_BUILD_WEB_ROOT`, rather than requiring or embedding a stale checkout bundle. The review corrected the claim that every removed Node backend test had a Rust replacement: scheduler concurrency coverage was incomplete. Backend tests now run in the Rust workspace, but their number alone does not establish coverage parity.
+### Latest main merge after the owner's merge-order change
+
+The owner's 2026-11-02 follow-up makes P4 the first PR to merge and authorizes merging `main` at `a1a9227` into this branch, superseding the earlier dependency hold. Canvas, composer, MCP App protocol and browser tests are retained. Only Node-backend tests are removed: the original 13 plus `canvas.test.ts` and `mcp-app-store.test.ts` (15 total); the orphaned Node-test diagnostic helper is removed too. Canvas and MCP App storage/runtime functionality stays in Rust, not silently dropped with the legacy modules.
+
+- Retention check passed: clean `npm ci`, 113 frontend unit assertions, TypeScript and Vite build.
+- Targeted Rust canvas/model/store and integrated canvas HTTP, MCP Apps, initial MCP discovery, probe shutdown, maintenance, runtime and scheduler checks passed (32 tests). These include the real scripted engine scenarios, not filename-presence-only checks.
+- Preserved-feature browser acceptance passed: 48 scenarios across the 11 changed specs plus the directly relevant canvas-read spec, with no backend opt-in variable or migration skip. This is a focused retention run, not an automatic full-suite expansion.
+- The merged release compiled and passed the copied-binary standalone smoke, including embedded assets, ETag/304, authenticated engine turn, Host/API guards, clean shutdown and explicit disk override.
+- Selector and CI diagnostics/service unit regressions passed; the final current-head CI and renewed independent-review result are recorded in PR #28. Earlier results below remain revision-bound evidence, not proof of an unreviewed merge.
+
+### Earlier reviewed base before the dependency hold
+
+The review worktree was rebased onto `origin/main` at `576aa44`, including bounded MCP probes, update maintenance/backups, cancellation fixes, per-runner Cargo cache limits, and sidebar text previews. `HttpContext::new` keeps private probe lifecycle state initialized for the backend and the maintenance/report test hosts. The service updater passes its immutable staged frontend to the release embedder through `GROK_BOT_BUILD_WEB_ROOT`, rather than requiring or embedding a stale checkout bundle. The review corrected the claim that every removed Node backend test had a Rust replacement: scheduler concurrency coverage was incomplete. Backend tests now run in the Rust workspace, but their number alone does not establish coverage parity.
 
 Review-era results are separate from the actual earlier P4 evidence below:
 

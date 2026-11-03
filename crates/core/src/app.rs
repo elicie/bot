@@ -55,9 +55,8 @@ impl Backend {
         runtime.initialize().await;
         let scheduler_options = options.scheduler.unwrap_or(SchedulerOptions { now, ..SchedulerOptions::default() });
         let scheduler = RoutineScheduler::new(store.clone(), runtime.clone(), queue.clone(), scheduler_options);
-        let mut context = HttpContext::new(store.clone(), runtime.clone(), scheduler.clone(), queue.clone());
-        context.allowed_hosts = default_allowed_hosts(&options.allowed_hosts);
-        context.web_root = options.web_root;
+        let mut context =
+            HttpContext::new(store.clone(), runtime.clone(), scheduler.clone(), queue.clone(), default_allowed_hosts(&options.allowed_hosts), options.web_root);
         context.embedded_web = options.embedded_web;
         let context = Arc::new(context);
         Ok(Self { store, runtime, scheduler, queue, context })

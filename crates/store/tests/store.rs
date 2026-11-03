@@ -102,7 +102,7 @@ async fn mutations_commit_only_when_ok_and_dirty() {
     assert_eq!(events.recv().await.unwrap().routine_scheduling_error.as_deref(), Some("Routine history is full."));
     f.store
         .mutate(|s| {
-            s.set_runtime(RuntimeInfo { available: true, version: Some("1.2.3".into()), error: None });
+            s.set_runtime(RuntimeInfo { available: true, bot_message_chains: None, version: Some("1.2.3".into()), error: None });
             Ok(())
         })
         .await
@@ -312,6 +312,7 @@ async fn snapshot_redaction_keeps_identifiers_enums_and_link_arrays() {
                     paths: Some(vec!["a.txt".into()]),
                     local_only: None,
                     approved_by_rule: None,
+                    mcp_app: None,
                 }],
                 bot_exchange_ids: None,
                 source_bot_id: None,

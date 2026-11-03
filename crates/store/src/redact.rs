@@ -2,7 +2,8 @@
 //! string has the API key and every vault secret value replaced by `[redacted]` except
 //! - `kind`, `status`, `role`, `color`, and `hash` fields,
 //! - identifier fields (`id`, `botId`, `routineId`, ...) whose value is a UUID or 64-hex digest,
-//! - the elements of bot exchange `botIds` and message `botExchangeIds` arrays.
+//! - the elements of bot exchange `botIds` and message `botExchangeIds` arrays,
+//! - app-generated canvas version timestamps (structural metadata, not editable text).
 //!
 //! Enum-typed fields outside that list (`shape`, `trigger`) are kept as-is: the Node replacer would
 //! rewrite them only if the key were a substring of the enum name, which a typed snapshot cannot
@@ -10,7 +11,7 @@
 
 use std::sync::LazyLock;
 
-use grok_bot_model::{AppState, BotDelivery, BotExchange, Conversation, Routine, RoutineRun, RoutineSchedule};
+use grok_bot_model::{AppState, BotDelivery, BotExchange, Conversation, McpApp, Routine, RoutineRun, RoutineSchedule};
 use regex::Regex;
 
 static IDENTIFIER: LazyLock<Regex> =
@@ -48,10 +49,74 @@ impl Redactor<'_> {
         }
     }
 
+    /// App arguments are JSON encoded inside a string. Redact decoded keys and string values too,
+    /// so credentials with quotes/backslashes or Unicode escapes cannot survive that encoding.
+    fn encoded_json(&self, text: &mut String) {
+        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(text)
+            && value.is_object()
+        {
+            let original = value.clone();
+            if !self.json_value(&mut value) {
+                // Redacted keys collided. Do not silently merge argument fields or leave secrets.
+                *text = "{}".into();
+            } else if value != original {
+                *text = value.to_string();
+            }
+        } else {
+            // Only object arguments are durable. Invalid in-memory data is never forwarded.
+            *text = "{}".into();
+        }
+        self.text(text);
+    }
+
+    /// False when redacting object keys would conflate distinct fields.
+    fn json_value(&self, value: &mut serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::String(text) => self.text(text),
+            serde_json::Value::Array(items) => return items.iter_mut().all(|item| self.json_value(item)),
+            serde_json::Value::Object(fields) => {
+                let mut redacted = serde_json::Map::new();
+                for (mut key, mut value) in std::mem::take(fields) {
+                    self.text(&mut key);
+                    if !self.json_value(&mut value) || redacted.insert(key, value).is_some() {
+                        return false;
+                    }
+                }
+                *fields = redacted;
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn mcp_app(&self, app: &mut McpApp) {
+        self.id(&mut app.bot_id);
+        self.id(&mut app.server_id);
+        self.text(&mut app.server_updated_at);
+        self.text(&mut app.server);
+        self.text(&mut app.tool);
+        self.text(&mut app.uri);
+        self.text(&mut app.html);
+        self.encoded_json(&mut app.input);
+        self.text(&mut app.output);
+    }
+
     fn conversation(&self, conversation: &mut Conversation) {
         self.id(&mut conversation.id);
         self.id(&mut conversation.bot_id);
         self.text(&mut conversation.title);
+        if let Some(canvas) = &mut conversation.canvas {
+            canvas.redacted |= crate::canvas::contains_secret(self.keys, &[&canvas.title, &canvas.language, &canvas.content]);
+            self.text(&mut canvas.title);
+            self.text(&mut canvas.language);
+            self.text(&mut canvas.content);
+            for version in &mut canvas.history {
+                version.redacted |= crate::canvas::version_has_secret(version, self.keys);
+                self.text(&mut version.title);
+                self.text(&mut version.language);
+                self.text(&mut version.content);
+            }
+        }
         for message in &mut conversation.messages {
             self.id(&mut message.id);
             self.text(&mut message.text);
@@ -63,6 +128,9 @@ impl Redactor<'_> {
                 self.optional(&mut tool.output);
                 for path in tool.paths.iter_mut().flatten() {
                     self.text(path);
+                }
+                if let Some(app) = &mut tool.mcp_app {
+                    self.mcp_app(app);
                 }
             }
             self.optional_id(&mut message.source_bot_id);
@@ -170,6 +238,10 @@ impl Redactor<'_> {
             self.optional_id(&mut report.run_id);
             self.optional(&mut report.finished_at);
             self.optional(&mut report.error);
+        }
+        if let Some(termination) = delivery.chain_termination.as_mut() {
+            self.text(&mut termination.finished_at);
+            self.optional(&mut termination.error);
         }
     }
 

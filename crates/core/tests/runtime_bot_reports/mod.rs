@@ -8,7 +8,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
-use grok_bot_core::http::{HttpContext, router};
+use grok_bot_core::http::{HttpContext, default_allowed_hosts, router};
 use grok_bot_core::queue::CommandQueue;
 use grok_bot_core::scheduler::{RoutineScheduler, SchedulerOptions};
 use grok_bot_model::{
@@ -186,7 +186,8 @@ pub(super) async fn bot_reports(f: &Fixture) {
 /// Exercise the real HTTP cancellation handler against the fixture's store/runtime and the exact
 /// same command queue as dispatch, without another server or scheduler timer influencing ordering.
 async fn cancel_selected_reports(f: &Fixture, dispatcher: &Arc<RoutineScheduler>, queue: &CommandQueue, ids: &[String], source: &str) -> Value {
-    let context = Arc::new(HttpContext::new(Arc::clone(&f.store), Arc::clone(&f.runtime), Arc::clone(dispatcher), queue.clone()));
+    let context =
+        Arc::new(HttpContext::new(Arc::clone(&f.store), Arc::clone(&f.runtime), Arc::clone(dispatcher), queue.clone(), default_allowed_hosts(&[]), None));
     let request = Request::builder()
         .method("POST")
         .uri(format!("/api/conversations/{source}/bot-reports/cancel"))

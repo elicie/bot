@@ -65,6 +65,8 @@ pub(crate) fn schema_valid(disk: &mut DiskState) -> bool {
     let conversations = disk.conversations.iter().all(|conversation| {
         is_uuid(&conversation.id)
             && is_uuid(&conversation.bot_id)
+            && crate::mcp_apps::conversation_mcp_apps_valid(conversation)
+            && conversation.canvas.as_ref().is_none_or(crate::canvas::persisted_canvas_valid)
             && conversation.messages.iter().all(|message| {
                 is_uuid(&message.id)
                     && message.bot_exchange_ids.as_ref().is_none_or(|ids| ids.len() <= 1 && ids.iter().all(|id| is_uuid(id)))
@@ -144,6 +146,9 @@ pub(crate) fn references_valid(disk: &DiskState) -> Result<(), String> {
             .iter()
             .any(|run| unique_ids.contains(run.routine_id.as_str()) && !disk.routines.iter().any(|routine| routine.id == run.routine_id))
         || disk.conversations.iter().any(|conversation| !bot_ids.contains(conversation.bot_id.as_str()) && !crate::groups::is_group_conversation(conversation))
+        || disk.conversations.iter().any(|conversation| {
+            conversation.canvas.is_some() && disk.bot_deliveries.iter().any(|delivery| delivery.recipient_conversation_id == conversation.id)
+        })
         || !crate::groups::references_valid(disk)
         || !crate::vault::references_valid(disk)
         || disk.routines.iter().any(|routine| {

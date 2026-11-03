@@ -1,6 +1,20 @@
 import type { PublicMcpServer, PublicSecret } from './vault';
 export type RunStatus = 'idle' | 'starting' | 'running' | 'awaiting_permission' | 'completed' | 'cancelled' | 'error' | 'interrupted';
 export type ToolStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
+/** A bounded MCP UI resource saved with its originating tool activity (Rust custom MCP). */
+export interface McpApp {
+  botId: string;
+  serverId: string;
+  serverUpdatedAt: string;
+  server: string;
+  tool: string;
+  uri: string;
+  html: string;
+  /** JSON object containing the original tool arguments, not instructions. */
+  input: string;
+  /** The engine's text/content fallback; structuredContent and result _meta are not exposed. */
+  output: string;
+}
 export interface ToolActivity {
   id: string;
   title: string;
@@ -12,6 +26,7 @@ export interface ToolActivity {
   localOnly?: boolean;
   /** ID of the permission rule that approved this action without asking. */
   approvedByRule?: string;
+  mcpApp?: McpApp;
 }
 export interface Message {
   id: string;
@@ -61,12 +76,15 @@ export interface BotDelivery {
   chainId: string;
   hop: number;
   createdAt: string;
-  status: 'queued' | 'running' | 'completed' | 'cancelled' | 'error' | 'interrupted';
+  status: 'queued' | 'running' | 'waiting_children' | 'completed' | 'cancelled' | 'error' | 'interrupted';
   requestId?: string;
   executionRunId?: string;
+  /** First recipient execution start; report turns do not reset it. */
   startedAt?: string;
   finishedAt?: string;
   error?: string;
+  /** Root-only durable Stop/deadline latch for the entire chain, including queued descendants. */
+  chainTermination?: { status: 'cancelled' | 'error'; finishedAt: string; error?: string };
   /** The follow-up turn that reports this delivery's result to the sender conversation. */
   report?: DeliveryReport;
 }
@@ -115,6 +133,30 @@ export interface Conversation {
   /** Group conversations: members still to answer the latest user message. */
   groupRound?: GroupRound;
   memberSessions?: { botId: string; sessionId: string; sessionFingerprint: string }[];
+  /** Conversation-owned text, independent of the connected workspace. */
+  canvas?: Canvas;
+}
+export interface CanvasVersion {
+  revision: number;
+  title: string;
+  /** `markdown`, `text`, or a code language identifier. Code is never executed. */
+  language: string;
+  content: string;
+  updatedAt: string;
+  source: 'user' | 'bot' | 'restore';
+  /** The public text contains masked secrets and cannot be safely edited/restored. */
+  redacted?: boolean;
+}
+export interface Canvas extends CanvasVersion {
+  /** Up to 20 older snapshots, in ascending revision order. */
+  history: CanvasVersion[];
+}
+export interface CanvasInput {
+  /** Zero creates the first version; every later write compares the current revision. */
+  revision: number;
+  title: string;
+  language: string;
+  content: string;
 }
 export interface ThreadLink { parentConversationId: string; parentMessageId: string }
 export interface GroupRound { id: string; userMessageId: string; pendingBotIds: string[]; createdAt: string }
@@ -171,6 +213,8 @@ export interface SettingsInput {
 }
 export interface RuntimeInfo {
   available: boolean;
+  /** Logical chain cancellation is available only on the Rust backend. */
+  botMessageChains?: boolean;
   version?: string;
   error?: string;
 }

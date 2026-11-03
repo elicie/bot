@@ -28,6 +28,7 @@ pub fn project_computer_permissions(mut state: AppState, local: bool) -> AppStat
                         paths: None,
                         local_only: Some(true),
                         approved_by_rule: None,
+                        mcp_app: None,
                     };
                 }
             }
@@ -136,6 +137,7 @@ mod tests {
             paths: Some(vec![detail.into()]),
             local_only,
             approved_by_rule: None,
+            mcp_app: None,
         }
     }
 
@@ -184,6 +186,7 @@ mod tests {
             thread: None,
             group_round: None,
             member_sessions: None,
+            canvas: None,
         };
         AppState {
             revision: 3,
@@ -197,7 +200,7 @@ mod tests {
             groups: Vec::new(),
             routine_scheduling_error: None,
             settings: PublicSettings { base_url: String::new(), model: String::new(), has_api_key: false, workspace: String::new() },
-            runtime: RuntimeInfo { available: true, version: None, error: None },
+            runtime: RuntimeInfo { available: true, bot_message_chains: None, version: None, error: None },
             secrets: Vec::new(),
             mcp_servers: Vec::new(),
             main_bot_id: None,

@@ -49,17 +49,25 @@ pub struct HttpContext {
 }
 
 impl HttpContext {
-    /// Compose a host around existing application components without exposing probe internals.
-    pub fn new(store: Arc<Store>, runtime: Arc<Runtime>, scheduler: Arc<RoutineScheduler>, queue: CommandQueue) -> Self {
+    /// Compose an HTTP adapter around existing app services while keeping probe lifecycle state
+    /// private. Alternate in-process adapters use the same safe initialization as Backend.
+    pub fn new(
+        store: Arc<Store>,
+        runtime: Arc<Runtime>,
+        scheduler: Arc<RoutineScheduler>,
+        queue: CommandQueue,
+        allowed_hosts: HashSet<String>,
+        web_root: Option<PathBuf>,
+    ) -> Self {
         Self {
             store,
             runtime,
             scheduler,
             queue,
-            allowed_hosts: default_allowed_hosts(&[]),
+            allowed_hosts,
             port: AtomicU16::new(0),
             closing: AtomicBool::new(false),
-            web_root: None,
+            web_root,
             embedded_web: None,
             mcp_tests: crate::mcp_probe::Probes::default(),
             stopping: tokio::sync::watch::Sender::new(false),
@@ -271,9 +279,11 @@ pub fn router(ctx: Ctx) -> Router {
         .merge(crate::permission_rules::routes())
         .merge(crate::webhooks::api_routes())
         .merge(crate::chat_features::routes())
+        .merge(crate::canvas_http::routes())
         .merge(crate::groups_http::routes())
         .merge(crate::computer_http::routes())
         .merge(crate::vault_http::routes())
+        .merge(crate::mcp_apps_http::routes())
         .merge(crate::main_bot::routes())
         .fallback(|| async { (StatusCode::NOT_FOUND, Json(json!({ "error": "API endpoint does not exist." }))) });
     let mut app = Router::new()
@@ -553,14 +563,9 @@ async fn send_message(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(
 }
 
 async fn cancel(State(ctx): State<Ctx>, ConnectInfo(remote): Remote, Path(id): Path<String>, JsonBody(_): JsonBody<Empty>) -> ApiResult {
-    let store = ctx.store.clone();
-    let queued_id = id.clone();
-    let cancelled_queued = ctx.queue.run(async move { store.mutate(|s| s.cancel_queued_work(&queued_id)).await }).await?;
-    if !cancelled_queued {
-        // Runtime cancellation waits for the run to settle; it is not held inside the command queue
-        // (the Node handler awaited `done` outside the queue as well).
-        ctx.runtime.cancel(&id).await?;
-    }
+    // Runtime resolves both the selected turn and its durable Bot chain. Waiting parents can
+    // own an active descendant in another conversation; do not stop at a queued receipt here.
+    ctx.runtime.cancel(&id).await?;
     Ok(state_reply(&ctx, StatusCode::OK, &remote))
 }
 

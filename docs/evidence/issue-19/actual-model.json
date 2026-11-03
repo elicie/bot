@@ -1,0 +1,15 @@
+{
+  "checkedAt": "2026-11-02T06:15:06.072Z",
+  "backend": "Rust",
+  "actualModel": "gpt-6.1-sol",
+  "syntheticDocument": true,
+  "prompt": "캔버스의 첫 문단을 더 짧게 해 줘. 제목과 마지막 문단은 그대로 두고 첫 문단만 간결하게 다듬어 줘.",
+  "originalParagraph": "이 문단은 기능의 의도와 사용 방법을 자세하고 명확하게 설명하기 위해 작성한 제품 안내입니다.",
+  "editedParagraph": "기능의 목적과 사용법을 설명하는 제품 안내입니다.",
+  "preApprovalUnchanged": true,
+  "savedBotRevision": 2,
+  "unaffectedPrefixAndSuffix": true,
+  "restoredRevision": 3,
+  "exactUndo": true,
+  "consoleErrors": []
+}

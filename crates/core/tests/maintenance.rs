@@ -11,7 +11,7 @@ use axum::body::{Body, to_bytes};
 use axum::extract::ConnectInfo;
 use axum::http::Request;
 use grok_bot_core::app::{Backend, BackendOptions};
-use grok_bot_core::http::{HttpContext, router};
+use grok_bot_core::http::{HttpContext, default_allowed_hosts, router};
 use grok_bot_core::scheduler::SchedulerOptions;
 use grok_bot_model::{RoutineInput, RoutineSchedule, RunState, RunStatus};
 use serde_json::{Value, json};
@@ -37,7 +37,7 @@ impl Fixture {
         .await
         .unwrap();
         backend.runtime.set_origin("http://127.0.0.1:3333".into());
-        let context = Arc::new(HttpContext::new(backend.store, backend.runtime, backend.scheduler, backend.queue));
+        let context = Arc::new(HttpContext::new(backend.store, backend.runtime, backend.scheduler, backend.queue, default_allowed_hosts(&[]), None));
         context.port.store(3333, Ordering::SeqCst);
         Self { app: router(context.clone()), context }
     }
