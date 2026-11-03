@@ -5,7 +5,7 @@
 //! upstream `@path` expansion, inline `data:` image extraction, or slash-command parsing, and that
 //! image attachments reach it as `image_url` parts of the user message.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};

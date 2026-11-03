@@ -2,7 +2,7 @@
 //! `tests/routines-api.test.ts`. These drive the real Runtime and HTTP command queue, not a fake
 //! `start` method. Provider gates and explicitly polled queue waiters control command ordering.
 
-mod common;
+use crate::common;
 #[path = "scheduler/provider.rs"]
 mod provider;
 

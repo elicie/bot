@@ -1,7 +1,7 @@
 //! HTTP tests for permission rule CRUD (loopback-only loosening) and routine webhooks
 //! (authentication, rotation, revocation, Host rules, admission conflicts, body bounds, throttling).
 
-mod common;
+use crate::common;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;

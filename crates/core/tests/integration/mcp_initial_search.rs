@@ -1,7 +1,7 @@
 //! First-search readiness against the real engine, not an application-side MCP probe.
 //! A slow synthetic Notion server must finish discovery before any model inference begins.
 
-mod common;
+use crate::common;
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

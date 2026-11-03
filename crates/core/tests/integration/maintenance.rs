@@ -1,6 +1,6 @@
 //! Update preparation is an atomic reply-admission gate, not a racy public-state idle check.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::sync::Arc;

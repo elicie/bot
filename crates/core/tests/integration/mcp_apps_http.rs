@@ -1,7 +1,7 @@
 //! Proposal/decision HTTP admission tests. Seed only a durable app artifact; proposals and denials
 //! must work without contacting its intentionally unavailable MCP endpoint or starting an LLM.
 
-mod common;
+use crate::common;
 
 use common::{TestApp, run};
 use grok_bot_model::{McpApp, Message, Role, ToolActivity, ToolStatus, iso, new_id};

@@ -1,6 +1,6 @@
 //! Port of `tests/backend-api.test.ts`.
 
-mod common;
+use crate::common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;

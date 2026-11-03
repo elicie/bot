@@ -7,7 +7,7 @@
 //! the real API key while the engine configuration holds only the relay token, and that unreferenced
 //! images are swept when their conversation is deleted.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
