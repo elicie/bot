@@ -118,6 +118,10 @@ jobs:
             # Compiler cache shared by both runners (systemd unit sccache-grok-bot, port 4231), so a new or
             # cleared per-runner target dir reuses dependency builds. It runs outside the job: a job-started
             # server would be killed by the runner's orphan cleanup mid-way through the other runner's build.
+            # Each integration-test binary embeds the engine; its link takes ~1.5G. cargo's default -j8 ran 7
+            # links at once per runner and exhausted the host. 3 jobs per runner keeps both runners' links
+            # (and compiles: 2 x 3 of 8 cores) under the grok-bot-ci.slice memory cap.
+            echo "CARGO_BUILD_JOBS=3" >> "$GITHUB_ENV"
             if systemctl is-active --quiet sccache-grok-bot; then
               { echo "RUSTC_WRAPPER=sccache"; echo "SCCACHE_SERVER_PORT=4231"; } >> "$GITHUB_ENV"
             fi
@@ -192,6 +196,10 @@ jobs:
             # Compiler cache shared by both runners (systemd unit sccache-grok-bot, port 4231), so a new or
             # cleared per-runner target dir reuses dependency builds. It runs outside the job: a job-started
             # server would be killed by the runner's orphan cleanup mid-way through the other runner's build.
+            # Each integration-test binary embeds the engine; its link takes ~1.5G. cargo's default -j8 ran 7
+            # links at once per runner and exhausted the host. 3 jobs per runner keeps both runners' links
+            # (and compiles: 2 x 3 of 8 cores) under the grok-bot-ci.slice memory cap.
+            echo "CARGO_BUILD_JOBS=3" >> "$GITHUB_ENV"
             if systemctl is-active --quiet sccache-grok-bot; then
               { echo "RUSTC_WRAPPER=sccache"; echo "SCCACHE_SERVER_PORT=4231"; } >> "$GITHUB_ENV"
             fi
@@ -281,6 +289,10 @@ jobs:
             # Compiler cache shared by both runners (systemd unit sccache-grok-bot, port 4231), so a new or
             # cleared per-runner target dir reuses dependency builds. It runs outside the job: a job-started
             # server would be killed by the runner's orphan cleanup mid-way through the other runner's build.
+            # Each integration-test binary embeds the engine; its link takes ~1.5G. cargo's default -j8 ran 7
+            # links at once per runner and exhausted the host. 3 jobs per runner keeps both runners' links
+            # (and compiles: 2 x 3 of 8 cores) under the grok-bot-ci.slice memory cap.
+            echo "CARGO_BUILD_JOBS=3" >> "$GITHUB_ENV"
             if systemctl is-active --quiet sccache-grok-bot; then
               { echo "RUSTC_WRAPPER=sccache"; echo "SCCACHE_SERVER_PORT=4231"; } >> "$GITHUB_ENV"
             fi

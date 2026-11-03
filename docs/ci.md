@@ -149,8 +149,11 @@ taking down the machine:
   a job-started server during the other runner's build. CI sets `RUSTC_WRAPPER=sccache`
   only when the unit is active. The `Final disk usage` step prints hit/miss counts.
 - Both runner services and `sccache-grok-bot` (whose children are the actual `rustc`
-  processes) run in `grok-bot-ci.slice`: `MemoryHigh=12G`, `MemoryMax=14G`,
-  `MemorySwapMax=0`, via `Slice=grok-bot-ci.slice` drop-ins. A build over the cap fails
+  processes) run in `grok-bot-ci.slice`: `MemoryMax=14G`, `MemorySwapMax=0`, via `Slice=grok-bot-ci.slice` drop-ins. A build over the cap fails
   instead of exhausting the 31G host, which also runs VMs and other repos' runners.
-- mold is not used: with parallel links of the engine-embedding test binaries it drove
-  the host into swap thrashing on 2026-11-03 (load ~270, unreachable until reboot).
+- `CARGO_BUILD_JOBS=3` per runner. Every `crates/core/tests/*.rs` file is a separate binary
+  that embeds the engine, and each link (rust-lld) takes ~1.5G. With cargo's default
+  `-j8`, seven links ran at once per runner; on 2026-11-03 that drove the host into swap
+  thrashing (load ~270, unreachable until reboot), and under a `MemoryHigh` limit it
+  stalled builds for 30+ minutes. The slice therefore has only `MemoryMax` (an over-cap
+  build is OOM-killed rather than throttled indefinitely).
