@@ -3,7 +3,7 @@
 //! socket regardless of forwarded-address headers, and LAN snapshots, mutation responses, and
 //! already-open SSE streams hide local-only computer approvals and tool details.
 
-mod common;
+use crate::common;
 
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::path::PathBuf;

@@ -1,5 +1,5 @@
 //! The embedded frontend stays behind the same Host/Origin/security middleware as disk files.
-mod common;
+use crate::common;
 
 use grok_bot_core::app::{Backend, BackendOptions};
 use grok_bot_core::web::EmbeddedWeb;

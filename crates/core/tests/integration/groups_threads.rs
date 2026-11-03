@@ -3,7 +3,7 @@
 //! per-member sessions that see the other members' replies, mention routing, cancellation of the
 //! remaining members, and thread context.
 
-mod common;
+use crate::common;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
