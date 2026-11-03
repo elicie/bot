@@ -425,6 +425,64 @@ async fn bounded_ttl_lru_failure_cache_and_repeat_coalescing() {
 }
 
 #[tokio::test]
+async fn queued_thumbnail_survives_disabled_cache_clear_until_cancelled() {
+    let fixture = Fixture::start().await;
+    let (root, service) = fixture.service(Limits::default()).await;
+    let conversation = service
+        .store
+        .mutate(|state| {
+            state.update_settings(grok_bot_model::SettingsInput {
+                base_url: format!("{}/v1", fixture.origin),
+                model: "fixture-model".into(),
+                workspace: String::new(),
+                api_key: None,
+                clear_api_key: None,
+                max_concurrent_runs: None,
+            })?;
+            let bot = state.disk().bots[0].id.clone();
+            state.add_conversation(&bot)
+        })
+        .await
+        .unwrap();
+    let queued_card = service.preview(&fixture.url("/articles/final")).await.unwrap();
+    let unreferenced_card = service.preview(&fixture.url("/start")).await.unwrap();
+    let local_url = queued_card.image_url.unwrap();
+    let queued_id = local_url.strip_prefix(ROUTE_PREFIX).unwrap();
+    let unreferenced_id = unreferenced_card.image_url.as_deref().unwrap().strip_prefix(ROUTE_PREFIX).unwrap();
+    assert_ne!(queued_id, unreferenced_id);
+    for id in [queued_id, unreferenced_id] {
+        assert_eq!(grok_bot_store::generated_images::read_generated_image(root.path(), id).unwrap(), (PNG.to_vec(), "image/png"));
+    }
+    assert_eq!(fixture.hits("/image"), 2, "both cached cards own real downloaded thumbnails");
+    let queued_path = service.store.data_dir().join("generated-images").join(queued_id);
+    let unreferenced_path = service.store.data_dir().join("generated-images").join(unreferenced_id);
+    // Make the later sweep eligible now, without waiting out the streaming-image grace period.
+    std::fs::File::open(&queued_path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now() - Duration::from_secs(7200)))
+        .unwrap();
+    let text = format!("Please inspect ![queued thumbnail]({local_url})");
+    let accepted = service.store.mutate(|state| state.enqueue_user_turn(&conversation.id, &text, Vec::new())).await.unwrap();
+    service.store.flush().await.unwrap();
+    let persisted: grok_bot_model::DiskState = serde_json::from_slice(&std::fs::read(service.store.data_dir().join("state.json")).unwrap()).unwrap();
+    assert_eq!(persisted.work_queue, vec![accepted.clone()]);
+    assert!(persisted.conversations.iter().all(|conversation| conversation.messages.is_empty()), "the accepted reference exists only in queued text");
+
+    service.store.mutate(|state| state.set_link_previews_enabled(false)).await.unwrap();
+    service.clear();
+    assert!(service.cache.lock().unwrap().ready.is_empty());
+    assert_eq!(grok_bot_store::generated_images::read_generated_image(root.path(), queued_id).unwrap(), (PNG.to_vec(), "image/png"));
+    assert!(!unreferenced_path.exists(), "clearing the cache still removes its unreferenced thumbnail");
+    assert_eq!(grok_bot_store::generated_images::read_generated_image(root.path(), unreferenced_id).unwrap_err().status, 404);
+
+    assert_eq!(service.store.mutate(|state| state.cancel_user_turn(&conversation.id, &accepted.id)).await.unwrap(), accepted);
+    assert!(service.store.read(|state| state.disk().work_queue.is_empty()));
+    crate::chat_features::prune_generated_images(&service.store).await;
+    assert!(!queued_path.exists(), "after cancellation neither the queue nor the cache owns the thumbnail");
+    assert_eq!(grok_bot_store::generated_images::read_generated_image(root.path(), queued_id).unwrap_err().status, 404);
+}
+
+#[tokio::test]
 async fn concurrency_is_bounded_and_disable_stops_cached_and_new_downloads() {
     let fixture = Fixture::start().await;
     let (_root, service) = fixture.service(Limits { concurrent: 1, ..Limits::default() }).await;

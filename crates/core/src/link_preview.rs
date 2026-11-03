@@ -282,11 +282,18 @@ impl LinkPreviewService {
         if ids.is_empty() {
             return;
         }
-        // A user may have copied a preview's local URL into a persisted message. In that case
-        // ownership passes to normal generated-image retention. Scan messages only once per batch.
+        // Accepted user work owns copied local image references even before its message starts.
         self.store.read(|state| {
-            for message in state.disk().conversations.iter().flat_map(|c| &c.messages) {
-                for referenced in grok_bot_store::generated_images::referenced_ids(&message.text) {
+            let disk = state.disk();
+            let texts =
+                disk.conversations.iter().flat_map(|c| &c.messages).map(|message| message.text.as_str()).chain(disk.work_queue.iter().filter_map(|work| {
+                    match &work.kind {
+                        grok_bot_model::WorkKind::User { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    }
+                }));
+            for text in texts {
+                for referenced in grok_bot_store::generated_images::referenced_ids(text) {
                     ids.remove(referenced);
                 }
             }
