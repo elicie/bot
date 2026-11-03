@@ -19,9 +19,11 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Rust on the self-hosted runner: `rustup toolchain install <ver> --profile minimal -c clippy -c rustfmt`.
+  # Rust on the self-hosted runner: `rustup toolchain install <ver> --profile minimal -c clippy -c rustfmt`,
+  # plus `apt install mold sccache` and the sccache-grok-bot systemd unit (see docs/ci.md).
   SELF_HOSTED_RUST: 1.98.0
-  SELF_HOSTED_TARGET_CAP_GB: 40
+  # Per-runner target dirs; with the shared sccache (20G) a cleared dir rebuilds quickly.
+  SELF_HOSTED_TARGET_CAP_GB: 30
 
 jobs:
   changes:
@@ -113,6 +115,16 @@ jobs:
             fi
             # A pinned toolchain installed on the runner, so its default `stable` (shared with other repos) stays untouched.
             echo "RUSTUP_TOOLCHAIN=$SELF_HOSTED_RUST" >> "$GITHUB_ENV"
+            # Compiler cache shared by both runners (systemd unit sccache-grok-bot, port 4231), so a new or
+            # cleared per-runner target dir reuses dependency builds. It runs outside the job: a job-started
+            # server would be killed by the runner's orphan cleanup mid-way through the other runner's build.
+            if systemctl is-active --quiet sccache-grok-bot; then
+              { echo "RUSTC_WRAPPER=sccache"; echo "SCCACHE_SERVER_PORT=4231"; } >> "$GITHUB_ENV"
+            fi
+            # mold links the many integration-test binaries (each embeds the engine) much faster than ld.
+            if command -v mold >/dev/null; then
+              echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
+            fi
           else
             dir="$GITHUB_WORKSPACE/target"
           fi
@@ -148,7 +160,9 @@ jobs:
         run: node scripts/ci-run.mjs node scripts/cargo.mjs clippy --locked $PACKAGES --all-targets -- -D warnings
       - name: Final disk usage
         if: always()
-        run: df -h / . /tmp && df -i / . /tmp && du -sh -- "${CARGO_TARGET_DIR:-target}" 2>/dev/null || true
+        run: |
+          df -h / . /tmp && df -i / . /tmp && du -sh -- "${CARGO_TARGET_DIR:-target}" 2>/dev/null || true
+          if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --show-stats 2>/dev/null | grep -E '^(Compile requests|Cache (hits|misses)|Cache size|Max cache size)' || true; fi
 
   test:
     name: Tests (affected crates, frontend units, Rust specs)
@@ -179,6 +193,16 @@ jobs:
             fi
             # A pinned toolchain installed on the runner, so its default `stable` (shared with other repos) stays untouched.
             echo "RUSTUP_TOOLCHAIN=$SELF_HOSTED_RUST" >> "$GITHUB_ENV"
+            # Compiler cache shared by both runners (systemd unit sccache-grok-bot, port 4231), so a new or
+            # cleared per-runner target dir reuses dependency builds. It runs outside the job: a job-started
+            # server would be killed by the runner's orphan cleanup mid-way through the other runner's build.
+            if systemctl is-active --quiet sccache-grok-bot; then
+              { echo "RUSTC_WRAPPER=sccache"; echo "SCCACHE_SERVER_PORT=4231"; } >> "$GITHUB_ENV"
+            fi
+            # mold links the many integration-test binaries (each embeds the engine) much faster than ld.
+            if command -v mold >/dev/null; then
+              echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
+            fi
           else
             dir="$GITHUB_WORKSPACE/target"
           fi
@@ -230,7 +254,9 @@ jobs:
         run: node scripts/ci-run.mjs npx playwright test $SPECS
       - name: Final disk usage
         if: always()
-        run: df -h / . /tmp && df -i / . /tmp && du -sh -- "${CARGO_TARGET_DIR:-target}" 2>/dev/null || true
+        run: |
+          df -h / . /tmp && df -i / . /tmp && du -sh -- "${CARGO_TARGET_DIR:-target}" 2>/dev/null || true
+          if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --show-stats 2>/dev/null | grep -E '^(Compile requests|Cache (hits|misses)|Cache size|Max cache size)' || true; fi
       - name: Upload Playwright results
         if: failure() && env.SPECS != ''
         uses: actions/upload-artifact@v4
@@ -260,6 +286,16 @@ jobs:
               echo "Clearing $real (over ${SELF_HOSTED_TARGET_CAP_GB}G)"; rm -rf "$real"; rm -f "$dir"
             fi
             echo "RUSTUP_TOOLCHAIN=$SELF_HOSTED_RUST" >> "$GITHUB_ENV"
+            # Compiler cache shared by both runners (systemd unit sccache-grok-bot, port 4231), so a new or
+            # cleared per-runner target dir reuses dependency builds. It runs outside the job: a job-started
+            # server would be killed by the runner's orphan cleanup mid-way through the other runner's build.
+            if systemctl is-active --quiet sccache-grok-bot; then
+              { echo "RUSTC_WRAPPER=sccache"; echo "SCCACHE_SERVER_PORT=4231"; } >> "$GITHUB_ENV"
+            fi
+            # mold links the many integration-test binaries (each embeds the engine) much faster than ld.
+            if command -v mold >/dev/null; then
+              echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
+            fi
           else
             dir="$GITHUB_WORKSPACE/target"
           fi
@@ -292,4 +328,6 @@ jobs:
         run: node scripts/ci-run.mjs node scripts/verify-release.mjs "$CARGO_TARGET_DIR/release/grok-bot"
       - name: Final disk usage
         if: always()
-        run: df -h / . /tmp && df -i / . /tmp && du -sh -- "${CARGO_TARGET_DIR:-target}" 2>/dev/null || true
+        run: |
+          df -h / . /tmp && df -i / . /tmp && du -sh -- "${CARGO_TARGET_DIR:-target}" 2>/dev/null || true
+          if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --show-stats 2>/dev/null | grep -E '^(Compile requests|Cache (hits|misses)|Cache size|Max cache size)' || true; fi

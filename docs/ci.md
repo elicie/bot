@@ -137,3 +137,18 @@ workspace rebuild. Keep measuring the critical-path
 job and whether the Rust cache actually restored; do not infer a guarantee from a
 single run. New reverse-dependent coverage can increase the work for low-level
 crate changes, intentionally trading some selectivity for correctness.
+
+## Self-hosted build speed
+
+The ai-dev runners share a compiler cache and use the mold linker:
+
+- `sccache` (apt) runs as the systemd unit `sccache-grok-bot` on port 4231 with
+  `SCCACHE_DIR=~/.cache/grok-bot-ci/sccache` and a 20G limit. It runs outside the jobs
+  because the runner kills processes a job started when that job ends, which would stop
+  a job-started server during the other runner's build. CI sets `RUSTC_WRAPPER=sccache`
+  only when the unit is active.
+- `mold` (apt) is used via `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=mold`
+  when installed. Each integration-test binary embeds the engine, so linking is a large
+  share of a test build.
+- The `Final disk usage` step prints sccache hit/miss counts.
+
