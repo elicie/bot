@@ -8,6 +8,7 @@ mod computer_http;
 mod groups_threads;
 mod http_api;
 mod http_bots;
+mod link_preview_api;
 mod main_bot;
 mod maintenance;
 mod mcp_apps_http;
