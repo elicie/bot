@@ -234,6 +234,7 @@ fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_err
         permission_rules,
         groups,
         main_bot_id,
+        link_previews_enabled,
         ..
     } = disk;
     webhooks::strip_webhook_secrets(&mut routines);
@@ -261,6 +262,7 @@ fn public_snapshot(disk: DiskState, runtime: RuntimeInfo, routine_scheduling_err
         secrets,
         mcp_servers,
         main_bot_id,
+        link_previews_enabled,
     };
     redact::redact_state(&mut state, &keys);
     state
@@ -396,6 +398,7 @@ fn default_state(now: DateTime<Utc>) -> DiskState {
         secrets: Vec::new(),
         mcp_servers: Vec::new(),
         main_bot_id: None,
+        link_previews_enabled: false,
     }
 }
 
@@ -926,6 +929,15 @@ impl State {
     pub fn is_reserved_conversation(&self, id: &str) -> bool {
         self.disk.bot_deliveries.iter().any(|delivery| delivery.recipient_conversation_id == id)
             || self.disk.routine_runs.iter().any(|run| run.conversation_id == id && run.result.is_none() && !truthy(&run.execution_run_id))
+    }
+
+    /// Link previews can be disabled even during an active run; no engine configuration changes.
+    pub fn set_link_previews_enabled(&mut self, enabled: bool) -> HttpResult<()> {
+        self.assert_writable()?;
+        if self.disk.link_previews_enabled != enabled {
+            self.disk_mut().link_previews_enabled = enabled;
+        }
+        Ok(())
     }
 
     pub fn update_settings(&mut self, mut input: SettingsInput) -> HttpResult<()> {
