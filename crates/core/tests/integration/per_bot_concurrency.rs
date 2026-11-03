@@ -5,9 +5,7 @@
 //! no assertion depends on sleeping long enough for another task to run. The engine environment is
 //! process-global, so these related scenarios share one isolated integration case.
 
-use super::common;
-#[path = "scheduler/provider.rs"]
-mod provider;
+use super::{common, scheduler::provider};
 #[path = "per_bot_concurrency/scripted_provider.rs"]
 mod scripted_provider;
 

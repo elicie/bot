@@ -4,7 +4,7 @@
 
 use crate::common;
 #[path = "scheduler/provider.rs"]
-mod provider;
+pub(super) mod provider;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
