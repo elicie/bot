@@ -148,6 +148,12 @@ taking down the machine:
   because the runner kills processes a job started when that job ends, which would stop
   a job-started server during the other runner's build. CI sets `RUSTC_WRAPPER=sccache`
   only when the unit is active. The `Final disk usage` step prints hit/miss counts.
+- sccache puts every `CARGO_*` environment variable into its cache keys. An absolute,
+  per-runner `CARGO_TARGET_DIR` therefore made every Rust compile miss on the other
+  runner. CI sets `CARGO_TARGET_DIR=ci-target`, a relative symlink in the workspace to
+  `~/.cache/grok-bot-ci/$RUNNER_NAME/target`, so the variable is identical on both
+  runners while each keeps its own cargo lock. Keep any other `CARGO_*` setting
+  identical across runners too (`--target-dir`/config files do not affect the key).
 - Both runner services and `sccache-grok-bot` (whose children are the actual `rustc`
   processes) run in `grok-bot-ci.slice`: `MemoryMax=14G`, `MemorySwapMax=0`, via `Slice=grok-bot-ci.slice` drop-ins. A build over the cap fails
   instead of exhausting the 31G host, which also runs VMs and other repos' runners.
